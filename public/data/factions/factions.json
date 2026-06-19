@@ -1,0 +1,119 @@
+[
+  {
+    "id": "republic",
+    "name": "The Republic",
+    "description": "A loose coalition of former city-states trying to rebuild governance and rule of law.",
+    "color": "#4a90d9",
+    "preferredGoods": ["food", "medicine", "electronics"],
+    "hostileToFactions": ["raiders"],
+    "reputationTiers": [
+      {
+        "label": "Stranger",
+        "minReputation": 0,
+        "discountPercent": 0,
+        "unlocksAircraftIds": [],
+        "unlocksContractTypes": ["cargo"]
+      },
+      {
+        "label": "Associate",
+        "minReputation": 100,
+        "discountPercent": 5,
+        "unlocksAircraftIds": [],
+        "unlocksContractTypes": ["cargo", "passenger"]
+      },
+      {
+        "label": "Ally",
+        "minReputation": 300,
+        "discountPercent": 12,
+        "unlocksAircraftIds": ["bush_plane"],
+        "unlocksContractTypes": ["cargo", "passenger", "emergency"]
+      },
+      {
+        "label": "Trusted Pilot",
+        "minReputation": 600,
+        "discountPercent": 20,
+        "unlocksAircraftIds": ["old_cargo_aircraft"],
+        "unlocksContractTypes": ["cargo", "passenger", "emergency", "secret"]
+      }
+    ]
+  },
+  {
+    "id": "merchants_guild",
+    "name": "Merchants Guild",
+    "description": "Profit-driven traders who control most of the working supply chains. They respect results over loyalty.",
+    "color": "#f5a623",
+    "preferredGoods": ["food", "water", "machinery", "artifact"],
+    "hostileToFactions": [],
+    "reputationTiers": [
+      {
+        "label": "Unknown",
+        "minReputation": 0,
+        "discountPercent": 0,
+        "unlocksAircraftIds": [],
+        "unlocksContractTypes": ["cargo"]
+      },
+      {
+        "label": "Contractor",
+        "minReputation": 150,
+        "discountPercent": 8,
+        "unlocksAircraftIds": [],
+        "unlocksContractTypes": ["cargo", "passenger"]
+      },
+      {
+        "label": "Partner",
+        "minReputation": 400,
+        "discountPercent": 15,
+        "unlocksAircraftIds": ["twin_turboprop"],
+        "unlocksContractTypes": ["cargo", "passenger", "secret"]
+      }
+    ]
+  },
+  {
+    "id": "nomads",
+    "name": "Nomads",
+    "description": "Free wanderers who live between settlements. Suspicious of outsiders but loyal to those who earn their trust.",
+    "color": "#7ed321",
+    "preferredGoods": ["food", "water", "fuel", "ammunition"],
+    "hostileToFactions": [],
+    "reputationTiers": [
+      {
+        "label": "Outsider",
+        "minReputation": 0,
+        "discountPercent": 0,
+        "unlocksAircraftIds": [],
+        "unlocksContractTypes": ["cargo"]
+      },
+      {
+        "label": "Wanderer",
+        "minReputation": 200,
+        "discountPercent": 10,
+        "unlocksAircraftIds": ["crop_duster"],
+        "unlocksContractTypes": ["cargo", "emergency"]
+      }
+    ]
+  },
+  {
+    "id": "raiders",
+    "name": "Raiders",
+    "description": "Opportunistic scavengers who prey on trade routes. Some will deal if approached carefully.",
+    "color": "#d0021b",
+    "preferredGoods": ["ammunition", "fuel", "artifact"],
+    "hostileToFactions": ["republic"],
+    "reputationTiers": [
+      {
+        "label": "Target",
+        "minReputation": 0,
+        "discountPercent": 0,
+        "unlocksAircraftIds": [],
+        "unlocksContractTypes": []
+      },
+      {
+        "label": "Tolerated",
+        "minReputation": 250,
+        "discountPercent": 5,
+        "unlocksAircraftIds": [],
+        "unlocksContractTypes": ["cargo", "secret"]
+      }
+    ]
+  }
+]

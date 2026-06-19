@@ -1,0 +1,59 @@
+[
+  {
+    "id": "ashford_basin",
+    "name": "Ashford Basin",
+    "description": "A fortified trading post built in a dried river basin. The Republic's main western hub, known for its fuel depot and reliable repair crews.",
+    "factionId": "republic",
+    "position": { "x": 220, "y": 340 },
+    "population": 1800,
+    "securityLevel": 7,
+    "fuelBasePrice": 4.5,
+    "repairBaseCost": 120,
+    "unlocked": true,
+    "goods": [
+      { "goodId": "food_rations",      "supplyLevel": 70, "demandLevel": 30, "basePrice": 75  },
+      { "goodId": "medicine_basic",    "supplyLevel": 60, "demandLevel": 40, "basePrice": 190 },
+      { "goodId": "purified_water",    "supplyLevel": 50, "demandLevel": 50, "basePrice": 50  },
+      { "goodId": "electronics_salvage","supplyLevel": 30, "demandLevel": 70, "basePrice": 370 },
+      { "goodId": "machinery_parts",   "supplyLevel": 40, "demandLevel": 60, "basePrice": 420 }
+    ]
+  },
+  {
+    "id": "redrock_camp",
+    "name": "Redrock Camp",
+    "description": "A nomad encampment carved into red sandstone cliffs. Water is scarce here and medicine rarer still.",
+    "factionId": "nomads",
+    "position": { "x": 780, "y": 410 },
+    "population": 450,
+    "securityLevel": 4,
+    "fuelBasePrice": 6.2,
+    "repairBaseCost": 200,
+    "unlocked": true,
+    "goods": [
+      { "goodId": "food_rations",    "supplyLevel": 35, "demandLevel": 75, "basePrice": 110  },
+      { "goodId": "medicine_basic",  "supplyLevel": 15, "demandLevel": 90, "basePrice": 280  },
+      { "goodId": "purified_water",  "supplyLevel": 20, "demandLevel": 85, "basePrice": 90   },
+      { "goodId": "aviation_fuel",   "supplyLevel": 25, "demandLevel": 60, "basePrice": 140  },
+      { "goodId": "pre_war_artifact","supplyLevel": 55, "demandLevel": 30, "basePrice": 750  }
+    ]
+  },
+  {
+    "id": "irongate_station",
+    "name": "Irongate Station",
+    "description": "A Merchants Guild stronghold built around a pre-war rail depot. Bustling and lawless — if you have coin, you can buy anything.",
+    "factionId": "merchants_guild",
+    "position": { "x": 500, "y": 200 },
+    "population": 3200,
+    "securityLevel": 5,
+    "fuelBasePrice": 3.8,
+    "repairBaseCost": 95,
+    "unlocked": false,
+    "goods": [
+      { "goodId": "food_rations",       "supplyLevel": 80, "demandLevel": 20, "basePrice": 65   },
+      { "goodId": "electronics_salvage","supplyLevel": 65, "demandLevel": 55, "basePrice": 330  },
+      { "goodId": "machinery_parts",    "supplyLevel": 70, "demandLevel": 40, "basePrice": 380  },
+      { "goodId": "pre_war_artifact",   "supplyLevel": 45, "demandLevel": 65, "basePrice": 820  },
+      { "goodId": "ammunition",         "supplyLevel": 60, "demandLevel": 50, "basePrice": 240  }
+    ]
+  }
+]

@@ -1,0 +1,90 @@
+[
+  {
+    "id": "food_rations",
+    "name": "Food Rations",
+    "category": "food",
+    "description": "Preserved food packages. Essential for survival, always in demand.",
+    "weightPerUnit": 10,
+    "baseValue": 80,
+    "fragile": false,
+    "perishable": true,
+    "illegal": false
+  },
+  {
+    "id": "medicine_basic",
+    "name": "Basic Medicine",
+    "category": "medicine",
+    "description": "Antibiotics, painkillers, bandages. A lifeline for remote settlements.",
+    "weightPerUnit": 5,
+    "baseValue": 200,
+    "fragile": true,
+    "perishable": true,
+    "illegal": false
+  },
+  {
+    "id": "purified_water",
+    "name": "Purified Water",
+    "category": "water",
+    "description": "Containers of clean water. Heavy but critical in arid regions.",
+    "weightPerUnit": 20,
+    "baseValue": 50,
+    "fragile": false,
+    "perishable": false,
+    "illegal": false
+  },
+  {
+    "id": "electronics_salvage",
+    "name": "Salvaged Electronics",
+    "category": "electronics",
+    "description": "Circuit boards, radios, power cells. Precious in the post-collapse world.",
+    "weightPerUnit": 8,
+    "baseValue": 350,
+    "fragile": true,
+    "perishable": false,
+    "illegal": false
+  },
+  {
+    "id": "machinery_parts",
+    "name": "Machinery Parts",
+    "category": "machinery",
+    "description": "Engine components, generators, pumps. Heavy and hard to move.",
+    "weightPerUnit": 50,
+    "baseValue": 400,
+    "fragile": false,
+    "perishable": false,
+    "illegal": false
+  },
+  {
+    "id": "aviation_fuel",
+    "name": "Aviation Fuel",
+    "category": "fuel",
+    "description": "Refined fuel for aircraft. Dangerous to transport but highly valuable.",
+    "weightPerUnit": 15,
+    "baseValue": 120,
+    "fragile": false,
+    "perishable": false,
+    "illegal": false
+  },
+  {
+    "id": "pre_war_artifact",
+    "name": "Pre-War Artifact",
+    "category": "artifact",
+    "description": "Relics from before the collapse. Collectors and scholars pay well.",
+    "weightPerUnit": 3,
+    "baseValue": 800,
+    "fragile": true,
+    "perishable": false,
+    "illegal": false
+  },
+  {
+    "id": "ammunition",
+    "name": "Ammunition",
+    "category": "ammunition",
+    "description": "Rifle rounds and shells. Illegal in Republic territory but traded everywhere else.",
+    "weightPerUnit": 12,
+    "baseValue": 250,
+    "fragile": false,
+    "perishable": false,
+    "illegal": true
+  }
+]

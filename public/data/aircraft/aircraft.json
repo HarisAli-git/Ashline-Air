@@ -1,0 +1,107 @@
+[
+  {
+    "id": "crop_duster",
+    "name": "Crop Duster",
+    "tier": 1,
+    "description": "A battered single-engine biplane repurposed for light cargo. Slow and temperamental but cheap to run.",
+    "unlockCost": 0,
+    "spriteKey": "aircraft_crop_duster",
+    "stats": {
+      "maxSpeed": 180,
+      "cruiseSpeed": 130,
+      "stallSpeed": 60,
+      "maxAltitude": 3000,
+      "climbRate": 3,
+      "cargoCapacity": 200,
+      "fuelCapacity": 80,
+      "fuelBurnRate": 8,
+      "engineReliability": 0.92,
+      "landingDifficulty": 3,
+      "repairCostPerUnit": 15
+    }
+  },
+  {
+    "id": "bush_plane",
+    "name": "Bush Plane",
+    "tier": 1,
+    "description": "A rugged high-wing monoplane built for rough strips. Reliable and forgiving to land.",
+    "unlockCost": 12000,
+    "spriteKey": "aircraft_bush_plane",
+    "stats": {
+      "maxSpeed": 240,
+      "cruiseSpeed": 180,
+      "stallSpeed": 70,
+      "maxAltitude": 4500,
+      "climbRate": 5,
+      "cargoCapacity": 400,
+      "fuelCapacity": 140,
+      "fuelBurnRate": 12,
+      "engineReliability": 0.96,
+      "landingDifficulty": 2,
+      "repairCostPerUnit": 20
+    }
+  },
+  {
+    "id": "old_cargo_aircraft",
+    "name": "Old Cargo Transport",
+    "tier": 1,
+    "description": "A twin-engine cargo plane from the late war era. High capacity but thirsty and hard to maintain.",
+    "unlockCost": 35000,
+    "spriteKey": "aircraft_old_cargo",
+    "stats": {
+      "maxSpeed": 310,
+      "cruiseSpeed": 260,
+      "stallSpeed": 100,
+      "maxAltitude": 7000,
+      "climbRate": 7,
+      "cargoCapacity": 1500,
+      "fuelCapacity": 400,
+      "fuelBurnRate": 35,
+      "engineReliability": 0.88,
+      "landingDifficulty": 6,
+      "repairCostPerUnit": 40
+    }
+  },
+  {
+    "id": "twin_turboprop",
+    "name": "Twin Turboprop",
+    "tier": 2,
+    "description": "A modern turboprop design. Fast, efficient, and comfortable for passengers.",
+    "unlockCost": 90000,
+    "spriteKey": "aircraft_twin_turboprop",
+    "stats": {
+      "maxSpeed": 500,
+      "cruiseSpeed": 420,
+      "stallSpeed": 120,
+      "maxAltitude": 9000,
+      "climbRate": 12,
+      "cargoCapacity": 2500,
+      "fuelCapacity": 700,
+      "fuelBurnRate": 55,
+      "engineReliability": 0.97,
+      "landingDifficulty": 5,
+      "repairCostPerUnit": 65
+    }
+  },
+  {
+    "id": "military_transport",
+    "name": "Military Transport",
+    "tier": 2,
+    "description": "A decommissioned military transport. Armored cargo bay and high payload, but noisy and conspicuous.",
+    "unlockCost": 150000,
+    "spriteKey": "aircraft_military_transport",
+    "stats": {
+      "maxSpeed": 450,
+      "cruiseSpeed": 380,
+      "stallSpeed": 130,
+      "maxAltitude": 8000,
+      "climbRate": 10,
+      "cargoCapacity": 4000,
+      "fuelCapacity": 900,
+      "fuelBurnRate": 80,
+      "engineReliability": 0.94,
+      "landingDifficulty": 7,
+      "repairCostPerUnit": 90
+    }
+  }
+]

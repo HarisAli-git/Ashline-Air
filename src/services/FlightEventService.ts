@@ -1,0 +1,127 @@
+import type { FlightEventDefinition, FlightState, EventConsequence } from '../types';
+import { EventBus } from '../game/utils/EventBus';
+import { clamp } from '../game/utils/math';
+
+interface ActiveEvent {
+  event: FlightEventDefinition;
+  lastFiredAt: number; // elapsed seconds in flight
+}
+
+class FlightEventServiceClass {
+  private definitions: FlightEventDefinition[] = [];
+  private activeEvents: ActiveEvent[] = [];
+  private pendingChoice: FlightEventDefinition | null = null;
+
+  initialise(definitions: FlightEventDefinition[]): void {
+    this.definitions = definitions;
+  }
+
+  reset(): void {
+    this.activeEvents = [];
+    this.pendingChoice = null;
+  }
+
+  checkEvents(state: FlightState): FlightEventDefinition | null {
+    if (this.pendingChoice) return null; // one event at a time
+
+    for (const def of this.definitions) {
+      if (!this.shouldTrigger(def, state)) continue;
+      if (Math.random() > def.probability) continue;
+
+      const tracked = this.activeEvents.find(e => e.event.id === def.id);
+      const elapsed = state.elapsedSeconds;
+      if (tracked && elapsed - tracked.lastFiredAt < def.cooldownSeconds) continue;
+
+      // Mark as triggered
+      if (tracked) {
+        tracked.lastFiredAt = elapsed;
+      } else {
+        this.activeEvents.push({ event: def, lastFiredAt: elapsed });
+      }
+
+      this.pendingChoice = def;
+      EventBus.emit('ui:show-event-modal', { event: def });
+      EventBus.emit('flight:event-triggered', { event: def });
+      return def;
+    }
+
+    return null;
+  }
+
+  applyChoice(choiceId: string, state: FlightState): FlightState {
+    if (!this.pendingChoice) return state;
+
+    const choice = this.pendingChoice.choices.find(c => c.id === choiceId);
+    if (!choice) return state;
+
+    const eventId = this.pendingChoice.id;
+    this.pendingChoice = null;
+
+    let next = { ...state };
+    for (const consequence of choice.consequences) {
+      next = this.applyConsequence(next, consequence);
+    }
+
+    EventBus.emit('flight:event-choice', { eventId, choiceId });
+    EventBus.emit('ui:close-event-modal');
+    return next;
+  }
+
+  private shouldTrigger(def: FlightEventDefinition, state: FlightState): boolean {
+    switch (def.trigger) {
+      case 'random':
+        // Checked once per second; probability is already low
+        return true;
+      case 'on_engine_temp_high':
+        return state.engineTemp >= (def.triggerThreshold ?? 0.8);
+      case 'on_fuel_low':
+        return state.fuel <= (def.triggerThreshold ?? 0.4) * 80; // 80L baseline
+      case 'on_speed_low':
+        return state.speed <= (def.triggerThreshold ?? 0.5) * 30; // m/s
+      case 'on_speed_high':
+        return state.speed >= (def.triggerThreshold ?? 0.9) * 80;
+      case 'on_altitude_low':
+        return state.altitude <= (def.triggerThreshold ?? 100);
+      case 'on_altitude_high':
+        return state.altitude >= (def.triggerThreshold ?? 3000);
+      case 'on_weather_change':
+        return false; // fired externally by WeatherSystem
+      case 'on_time_elapsed':
+        return state.elapsedSeconds >= (def.triggerThreshold ?? 60);
+      default:
+        return false;
+    }
+  }
+
+  private applyConsequence(state: FlightState, c: EventConsequence): FlightState {
+    const next = { ...state };
+
+    if (c.type === 'add_money' || c.type === 'add_reputation' || c.type === 'add_cargo_damage') {
+      return next;
+    }
+
+    const target = c.target as keyof FlightState;
+    if (!(target in next)) return next;
+
+    const current = next[target];
+    if (typeof current !== 'number') return next;
+
+    const numericNext = next as unknown as Record<string, number>;
+
+    switch (c.type) {
+      case 'delta':    numericNext[target as string] = current + c.value; break;
+      case 'multiply': numericNext[target as string] = current * c.value; break;
+      case 'set':      numericNext[target as string] = c.value;           break;
+    }
+
+    // Clamp common fields
+    if (target === 'engineTemp') next.engineTemp = clamp(next.engineTemp, 0, 1);
+    if (target === 'integrity')  next.integrity  = clamp(next.integrity, 0, 100);
+    if (target === 'fuel')       next.fuel        = clamp(next.fuel, 0, Infinity);
+    if (target === 'throttle')   next.throttle    = clamp(next.throttle, 0, 1);
+
+    return next;
+  }
+}
+
+export const FlightEventService = new FlightEventServiceClass();
