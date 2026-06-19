@@ -1,49 +1,52 @@
 import React, { useState } from 'react';
 import { SaveService } from '../../../services/SaveService';
 import { EconomyService } from '../../../services/EconomyService';
-import type { SettlementDefinition, SettlementState, GoodDefinition } from '../../../types';
+import { EventBus } from '../../../game/utils/EventBus';
+import type { GoodDefinition } from '../../../types';
 
 interface Props {
   settlementId: string;
 }
 
 export function EconomyScreen({ settlementId }: Props): React.ReactElement {
+  const [tick, setTick] = useState(0);
+
   const save = SaveService.get();
   const settlement = window.gameData.settlements.find(s => s.id === settlementId)!;
-  const state = save.world.settlements.find(s => s.definitionId === settlementId)!;
+  const settlementState = save.world.settlements.find(s => s.definitionId === settlementId)!;
+  const owned = save.player.ownedAircraft[parseInt(save.player.activeAircraftId)];
+  const def = window.gameData.aircraft.find(a => a.id === owned.definitionId)!;
 
-  const [aircraft] = useState(() => {
-    const owned = save.player.ownedAircraft[parseInt(save.player.activeAircraftId)];
-    const def = window.gameData.aircraft.find(a => a.id === owned.definitionId)!;
-    return { owned, def };
-  });
-
-  const fuelNeeded = aircraft.def.stats.fuelCapacity - aircraft.owned.fuel;
-  const fuelCost = EconomyService.fuelCost(state, fuelNeeded);
-  const repairNeeded = 100 - aircraft.owned.integrity;
-  const repairCost = EconomyService.repairCost(state, repairNeeded);
+  const fuelNeeded = def.stats.fuelCapacity - owned.fuel;
+  const fuelCost = EconomyService.fuelCost(settlementState, fuelNeeded);
+  const repairNeeded = 100 - owned.integrity;
+  const repairCost = EconomyService.repairCost(settlementState, repairNeeded);
 
   function refuel(): void {
     if (save.player.money < fuelCost) {
-      alert('Not enough money to refuel.');
+      EventBus.emit('ui:show-notification', { message: 'Not enough money to refuel.', type: 'warning' });
       return;
     }
     save.player.money -= fuelCost;
-    aircraft.owned.fuel = aircraft.def.stats.fuelCapacity;
+    owned.fuel = def.stats.fuelCapacity;
     SaveService.save(save.player, save.world);
-    window.location.reload(); // simple refresh for MVP; replace with state management
+    EventBus.emit('player:money-changed', { amount: save.player.money, delta: -fuelCost });
+    EventBus.emit('ui:show-notification', { message: 'Aircraft refueled.', type: 'success' });
+    setTick(t => t + 1);
   }
 
   function repair(): void {
     if (repairNeeded === 0) return;
     if (save.player.money < repairCost) {
-      alert('Not enough money to repair.');
+      EventBus.emit('ui:show-notification', { message: 'Not enough money to repair.', type: 'warning' });
       return;
     }
     save.player.money -= repairCost;
-    aircraft.owned.integrity = 100;
+    owned.integrity = 100;
     SaveService.save(save.player, save.world);
-    window.location.reload();
+    EventBus.emit('player:money-changed', { amount: save.player.money, delta: -repairCost });
+    EventBus.emit('ui:show-notification', { message: 'Aircraft repaired.', type: 'success' });
+    setTick(t => t + 1);
   }
 
   const availableGoods: GoodDefinition[] = settlement.goods
@@ -56,21 +59,21 @@ export function EconomyScreen({ settlementId }: Props): React.ReactElement {
 
       {/* Aircraft services */}
       <div style={styles.section}>
-        <div style={styles.sectionTitle}>Aircraft: {aircraft.def.name}</div>
+        <div style={styles.sectionTitle}>Aircraft: {def.name}</div>
         <div style={styles.row}>
-          <span>Fuel: {aircraft.owned.fuel.toFixed(1)} / {aircraft.def.stats.fuelCapacity} L</span>
+          <span>Fuel: {owned.fuel.toFixed(1)} / {def.stats.fuelCapacity} L</span>
           <button style={styles.btn} onClick={refuel} disabled={fuelNeeded === 0}>
             Refuel — ₢{fuelCost.toLocaleString()}
           </button>
         </div>
         <div style={styles.row}>
-          <span>Integrity: {aircraft.owned.integrity.toFixed(0)}%</span>
+          <span>Integrity: {owned.integrity.toFixed(0)}%</span>
           <button style={styles.btn} onClick={repair} disabled={repairNeeded === 0}>
             Repair — ₢{repairCost.toLocaleString()}
           </button>
         </div>
         <div style={styles.fuelPrice}>
-          Fuel price: ₢{state.fuelPrice.toFixed(2)}/L
+          Fuel price: ₢{settlementState.fuelPrice.toFixed(2)}/L
         </div>
       </div>
 
@@ -88,7 +91,7 @@ export function EconomyScreen({ settlementId }: Props): React.ReactElement {
           </thead>
           <tbody>
             {availableGoods.map(good => {
-              const gs = state.goodStates[good.id];
+              const gs = settlementState.goodStates[good.id];
               if (!gs) return null;
               return (
                 <tr key={good.id}>

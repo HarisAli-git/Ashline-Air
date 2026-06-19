@@ -21,17 +21,17 @@ export class MapScene extends Phaser.Scene {
 
     this.drawMap(settlements, save.player.unlockedSettlementIds);
 
-    // UI: player money in top-right
-    this.add.text(this.cameras.main.width - 16, 16,
+    // UI: player money in top-right — stays in sync with earnings from flights
+    const moneyText = this.add.text(this.cameras.main.width - 16, 16,
       `₢ ${save.player.money.toLocaleString()}`, {
         fontSize: '18px', color: '#ffd080', fontFamily: 'monospace',
       }
     ).setOrigin(1, 0);
 
-    // Listen for money changes from React UI side
-    EventBus.on('player:money-changed', ({ amount }) => {
-      // Money display is kept in React HUD — Phaser only shows the map
+    const unsubMoney = EventBus.on('player:money-changed', ({ amount }) => {
+      moneyText.setText(`₢ ${amount.toLocaleString()}`);
     });
+    this.events.once('shutdown', unsubMoney);
   }
 
   private drawMap(

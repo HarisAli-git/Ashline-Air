@@ -47,6 +47,7 @@ export class PreFlightScene extends Phaser.Scene {
       .on('pointerover', function(this: Phaser.GameObjects.Text) { this.setStyle({ color: '#e8d5b7' }); })
       .on('pointerout',  function(this: Phaser.GameObjects.Text) { this.setStyle({ color: '#8a7a5a' }); })
       .on('pointerdown', () => {
+        EventBus.emit('scene:return-to-map');
         this.scene.start('MapScene');
       });
 
@@ -76,15 +77,18 @@ export class PreFlightScene extends Phaser.Scene {
     }
 
     // React may enable the button after contract acceptance
-    EventBus.on('contract:accepted', () => {
+    const unsubAccepted = EventBus.on('contract:accepted', () => {
       text.setText('FLY →');
       text.setStyle({ color: '#ffd080' });
       text.setInteractive({ useHandCursor: true });
+      text.on('pointerover', () => text.setStyle({ color: '#ffffff' }));
+      text.on('pointerout',  () => text.setStyle({ color: '#ffd080' }));
       text.on('pointerdown', () => {
         const s = SaveService.get();
         EventBus.emit('scene:start-flight', { contractId: s.player.activeContractId! });
         this.scene.start('FlightScene', { contractId: s.player.activeContractId! });
       });
     });
+    this.events.once('shutdown', unsubAccepted);
   }
 }

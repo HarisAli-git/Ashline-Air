@@ -27,6 +27,7 @@ export class FlightScene extends Phaser.Scene {
   private hudText!: Phaser.GameObjects.Text;
   private contractId!: string;
   private landed = false;
+  private hasBeenAirborne = false;
   private gearToggleCooldown = 0;
   private flapsToggleCooldown = 0;
 
@@ -37,6 +38,7 @@ export class FlightScene extends Phaser.Scene {
   init(data: FlightSceneData): void {
     this.contractId = data.contractId;
     this.landed = false;
+    this.hasBeenAirborne = false;
   }
 
   create(): void {
@@ -209,8 +211,11 @@ export class FlightScene extends Phaser.Scene {
       });
     }
 
-    // Fuel exhausted
-    if (this.state.fuel <= 0 && this.state.altitude <= 0) {
+    // Track first time we leave the ground
+    if (this.state.altitude > 5) this.hasBeenAirborne = true;
+
+    // Fuel exhausted on the ground after being airborne
+    if (this.hasBeenAirborne && this.state.fuel <= 0 && this.state.altitude <= 0) {
       this.triggerLanding();
       return;
     }
@@ -225,8 +230,8 @@ export class FlightScene extends Phaser.Scene {
 
     EventBus.emit('flight:state-update', this.state);
 
-    // Auto-land if at ground with low speed and gear down
-    if (this.state.altitude <= 0 && this.state.speed < 10 && this.state.gearDown) {
+    // Auto-land once the aircraft has been airborne and returns to ground
+    if (this.hasBeenAirborne && this.state.altitude <= 0 && this.state.speed < 10 && this.state.gearDown) {
       this.triggerLanding();
     }
   }

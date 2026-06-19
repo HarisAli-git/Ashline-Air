@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
+import { EconomyService } from '../../services/EconomyService';
+import { ContractService } from '../../services/ContractService';
 import { EventBus } from '../utils/EventBus';
 
 export class MenuScene extends Phaser.Scene {
@@ -33,11 +35,19 @@ export class MenuScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    // New Game button
-    const newBtn = this.makeButton(cx, height * 0.52, 'NEW GAME', () => {
+    // New Game button — builds a fresh save and goes straight to the map
+    this.makeButton(cx, height * 0.52, 'NEW GAME', () => {
       SaveService.deleteSave();
-      // Reload boot to re-initialise with a fresh save
-      this.scene.start('BootScene');
+      const save = SaveService.load();
+      save.world.settlements = EconomyService.initialise(window.gameData.settlements);
+      save.world.availableContracts = ContractService.refreshBoard(
+        window.gameData.settlements,
+        save.player.unlockedSettlementIds,
+        save.player.reputation,
+        save.world.gameTimestamp
+      );
+      SaveService.save(save.player, save.world);
+      this.scene.start('MapScene');
     });
 
     // Continue button — only enabled when a save exists
