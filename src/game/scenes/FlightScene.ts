@@ -148,7 +148,7 @@ export class FlightScene extends Phaser.Scene {
 
     // Controls reminder
     this.add.text(width - 16, height - 16,
-      'W/S: Throttle   A/D: Pitch   G: Gear   F: Flaps   ESC: Abort',
+      'W/S: Throttle   A: Nose Up   D: Nose Down   G: Gear   F: Flaps   ESC: Abort',
       {
         fontSize: '11px', color: '#6a7a6a', fontFamily: 'monospace',
         backgroundColor: '#00000066',
