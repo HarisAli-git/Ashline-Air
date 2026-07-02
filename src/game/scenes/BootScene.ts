@@ -17,11 +17,8 @@ export class BootScene extends Phaser.Scene {
   }
 
   preload(): void {
-    // Placeholder graphics are generated procedurally for MVP.
-    // Replace with actual asset loads here as art is produced.
-    this.load.on('complete', () => {
-      console.log('[BootScene] Assets loaded');
-    });
+    this.load.image('cargo_plane', '/assets/cargoPlane.png');
+    this.load.on('complete', () => console.log('[BootScene] Assets loaded'));
   }
 
   async create(): Promise<void> {
