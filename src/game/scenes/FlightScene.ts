@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { AircraftController, type FlightInput } from '../entities/aircraft/AircraftController';
+import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
@@ -9,14 +10,9 @@ import { clamp } from '../utils/math';
 import { findById } from '../utils/DataLoader';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
-const GROUND_Y_OFFSET  = 110;  // px from screen bottom to ground line
-const AIRCRAFT_X       = 240;  // fixed screen x (world scrolls past it)
-const PLANE_DISP_W     = 220;  // displayed width of aircraft image
-const PLANE_DISP_H     = 124;  // displayed height (maintains 1334:750 ratio)
-const PLANE_GEAR_FRAC  = 0.97; // fraction from top where gear touches ground
-const PLANE_PROP_X_FRAC = 0.62;// fraction from left where prop centre is (after flip)
-const PLANE_PROP_Y_FRAC = 0.54;// fraction from top where prop centre is
-const MAX_DISPLAY_ALT  = 800;  // m of altitude that fills full height
+const GROUND_Y_OFFSET = 110;  // px from screen bottom to ground line
+const AIRCRAFT_X      = 240;  // fixed screen x (world scrolls past it)
+const MAX_DISPLAY_ALT = 800;  // m of altitude that maps to full usable screen height
 
 interface FlightSceneData { contractId: string; }
 
@@ -35,10 +31,8 @@ export class FlightScene extends Phaser.Scene {
   private groundGfx!: Phaser.GameObjects.Graphics;
 
   // ── Aircraft ──────────────────────────────────────────────────────────────
-  private aircraftImg!: Phaser.GameObjects.Image;
-  private propGfx!: Phaser.GameObjects.Graphics;
-  private exhaustGfx!: Phaser.GameObjects.Graphics;
-  private shadowGfx!: Phaser.GameObjects.Graphics;
+  private aircraft!: AircraftSprite;
+  private engineRunning = true;
 
   // ── HUD ───────────────────────────────────────────────────────────────────
   private throttleBarGfx!: Phaser.GameObjects.Graphics;
@@ -54,26 +48,25 @@ export class FlightScene extends Phaser.Scene {
   private flapsToggleCooldown = 0;
 
   // ── Animation state ───────────────────────────────────────────────────────
-  private scrollX        = 0;   // cumulative world scroll (m)
-  private propAngle      = 0;   // degrees
-  private lastSkyAlt     = -999;
-  private shakeDuration  = 0;
-  private cloudOffsets   = [0, 200, 450, 700, 900]; // seed x for clouds
+  private scrollX       = 0;     // cumulative world scroll (m)
+  private lastSkyAlt    = -999;
+  private shakeDuration = 0;
+  private cloudOffsets  = [0, 200, 450, 700, 900];
 
   constructor() { super({ key: 'FlightScene' }); }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   init(data: FlightSceneData): void {
-    this.contractId         = data.contractId;
-    this.landed             = false;
-    this.hasBeenAirborne    = false;
-    this.scrollX            = 0;
-    this.propAngle          = 0;
-    this.lastSkyAlt         = -999;
-    this.shakeDuration      = 0;
-    this.gearToggleCooldown = 0;
+    this.contractId          = data.contractId;
+    this.landed              = false;
+    this.hasBeenAirborne     = false;
+    this.scrollX             = 0;
+    this.lastSkyAlt          = -999;
+    this.shakeDuration       = 0;
+    this.gearToggleCooldown  = 0;
     this.flapsToggleCooldown = 0;
+    this.engineRunning       = true;
   }
 
   create(): void {
@@ -100,16 +93,8 @@ export class FlightScene extends Phaser.Scene {
     this.mountainGfx = this.add.graphics();
     this.hillGfx     = this.add.graphics();
     this.groundGfx   = this.add.graphics();
-    this.shadowGfx   = this.add.graphics();
-    this.exhaustGfx  = this.add.graphics();
-
-    // Aircraft image — faces left in source, flip to face right
-    this.aircraftImg = this.add.image(AIRCRAFT_X, groundY, 'cargo_plane');
-    this.aircraftImg.setDisplaySize(PLANE_DISP_W, PLANE_DISP_H);
-    this.aircraftImg.setFlipX(true);
-    this.aircraftImg.setOrigin(0.5, PLANE_GEAR_FRAC); // anchor at gear contact
-
-    this.propGfx = this.add.graphics();
+    // ── Layered aircraft ─────────────────────────────────────────────────
+    this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY);
 
     // ── HUD ───────────────────────────────────────────────────────────────
     this.throttleBarGfx = this.add.graphics();
@@ -131,7 +116,7 @@ export class FlightScene extends Phaser.Scene {
 
     // Controls reminder
     this.add.text(width - 12, height - 12,
-      'W/S: Throttle   A: Nose Up   D: Nose Down   G: Gear   F: Flaps   ESC: Abort',
+      'W/S: Throttle   A/D: Pitch   E: Engine   G: Gear   F: Flaps   ESC: Abort',
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
     ).setOrigin(1, 1).setDepth(10);
@@ -142,6 +127,7 @@ export class FlightScene extends Phaser.Scene {
       S:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.S),
       A:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.A),
       D:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.D),
+      E:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E),
       G:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
       F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
       ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
@@ -292,102 +278,6 @@ export class FlightScene extends Phaser.Scene {
     }
   }
 
-  // ── Aircraft + effects ────────────────────────────────────────────────────
-
-  private updateAircraftVisuals(groundY: number): void {
-    // Vertical position: gear touches groundY when altitude=0, rises with altitude
-    const altPixels = (this.state.altitude / MAX_DISPLAY_ALT) * (groundY - 80 - 20);
-    const targetY   = clamp(groundY - altPixels, 80, groundY);
-    this.aircraftImg.y = targetY;
-    this.aircraftImg.x = AIRCRAFT_X;
-
-    // Pitch tilt — positive pitch → nose up → negative Phaser angle for right-facing sprite
-    this.aircraftImg.angle = clamp(-this.state.pitch * 0.55, -22, 22);
-
-    // Gear visual (slight bounce on ground rolls)
-    if (this.state.altitude <= 0 && this.state.speed > 2) {
-      this.aircraftImg.y += Math.sin(this.state.elapsedSeconds * 18) * 0.4;
-    }
-
-    this.updateShadow(groundY);
-    this.updatePropeller();
-    this.updateExhaust();
-  }
-
-  private updateShadow(groundY: number): void {
-    this.shadowGfx.clear();
-    if (this.state.altitude > 300) return; // shadow fades out at height
-
-    const shadowAlpha = Math.max(0, 1 - this.state.altitude / 300) * 0.35;
-    const shadowScale = 1 + this.state.altitude * 0.001; // shadow stretches with height
-    const shadowY     = groundY + 5;
-    const shadowW     = PLANE_DISP_W * 0.85 * shadowScale;
-
-    this.shadowGfx.fillStyle(0x000000, shadowAlpha);
-    this.shadowGfx.fillEllipse(AIRCRAFT_X, shadowY, shadowW, 12);
-  }
-
-  private updatePropeller(): void {
-    this.propGfx.clear();
-    if (this.state.throttle < 0.01) return;
-
-    // Prop centre position on the (flipped) aircraft image
-    const halfW  = PLANE_DISP_W * 0.5;
-    const halfH  = PLANE_DISP_H * 0.5;
-    const propX  = this.aircraftImg.x + (PLANE_PROP_X_FRAC - 0.5) * PLANE_DISP_W;
-    const propY  = this.aircraftImg.y - halfH * 2 * (PLANE_GEAR_FRAC - PLANE_PROP_Y_FRAC);
-
-    const radius = 20;
-    const alpha  = 0.2 + this.state.throttle * 0.45;
-
-    // Blur disc (always visible when throttle > 0)
-    this.propGfx.fillStyle(0x999999, alpha * 0.7);
-    this.propGfx.fillEllipse(propX, propY, radius * 2, radius * 0.45);
-
-    // At low throttle: show individual blades
-    if (this.state.throttle < 0.35) {
-      const a1 = Phaser.Math.DegToRad(this.propAngle);
-      const a2 = a1 + Math.PI;
-      const a3 = a1 + Math.PI * 2 / 3;
-      this.propGfx.lineStyle(3, 0x555555, 0.9);
-      const bld = (a: number) => {
-        this.propGfx.lineBetween(
-          propX + Math.cos(a) * radius,
-          propY + Math.sin(a) * radius * 0.22,
-          propX - Math.cos(a) * radius,
-          propY - Math.sin(a) * radius * 0.22,
-        );
-      };
-      bld(a1); bld(a2); bld(a3);
-    }
-
-    // Spin advance
-    this.propAngle = (this.propAngle + 6 + this.state.throttle * 40) % 360;
-  }
-
-  private updateExhaust(): void {
-    this.exhaustGfx.clear();
-    if (this.state.throttle < 0.08) return;
-
-    const halfW  = PLANE_DISP_W * 0.5;
-    const halfH  = PLANE_DISP_H * 0.5;
-    const propX  = this.aircraftImg.x + (PLANE_PROP_X_FRAC - 0.5) * PLANE_DISP_W;
-    const propY  = this.aircraftImg.y - halfH * 2 * (PLANE_GEAR_FRAC - PLANE_PROP_Y_FRAC);
-
-    // Exhaust trails drift backward (left) from engine
-    const puffCount = 4;
-    for (let i = 0; i < puffCount; i++) {
-      const t     = i / puffCount;
-      const alpha = (0.22 - t * 0.2) * this.state.throttle;
-      const r     = 4 + i * 4;
-      const ox    = -(i * 16 + 8);
-      const oy    = Math.sin(this.state.elapsedSeconds * 6 + i) * 2.5;
-
-      this.exhaustGfx.fillStyle(0x8a8a8a, alpha);
-      this.exhaustGfx.fillCircle(propX + ox, propY + oy, r);
-    }
-  }
-
   // ── HUD ───────────────────────────────────────────────────────────────────
 
   private updateHUD(groundY: number): void {
@@ -470,8 +360,19 @@ export class FlightScene extends Phaser.Scene {
       toggleFlaps:  false,
     };
 
+    if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
+      this.engineRunning = !this.engineRunning;
+      if (this.engineRunning) {
+        this.aircraft.startEngine();
+        EventBus.emit('ui:show-notification', { message: 'Engine started.', type: 'success' });
+      } else {
+        this.aircraft.stopEngine();
+        EventBus.emit('ui:show-notification', { message: 'Engine shut down.', type: 'warning' });
+      }
+    }
     if (Phaser.Input.Keyboard.JustDown(this.keys.G) && this.gearToggleCooldown === 0) {
       this.state.gearDown = !this.state.gearDown;
+      this.aircraft.setGearDown(this.state.gearDown);
       this.gearToggleCooldown = 500;
       EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
     }
@@ -548,7 +449,15 @@ export class FlightScene extends Phaser.Scene {
     this.drawGround(width, groundY, this.scrollX);
 
     // ── Aircraft visuals ───────────────────────────────────────────────────
-    this.updateAircraftVisuals(groundY);
+    const altPixels = (this.state.altitude / MAX_DISPLAY_ALT) * (groundY - 100);
+    const screenY   = clamp(groundY - altPixels, 80, groundY);
+    this.aircraft.container.setY(screenY);
+    this.aircraft.shadowImg.setX(AIRCRAFT_X);
+    this.aircraft.shadowImg.setY(groundY + 4);
+    this.aircraft.updateShadow(this.state.altitude);
+    // Cut throttle to 0 in physics when engine is off
+    if (!this.engineRunning) this.state.throttle = 0;
+    this.aircraft.update(dt, this.state);
 
     // ── Camera shake ───────────────────────────────────────────────────────
     if (this.shakeDuration > 0) {

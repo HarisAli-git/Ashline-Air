@@ -55,6 +55,11 @@ export class AircraftController {
     if (input.pitchUp)   next.pitch = clamp(state.pitch + pitchRate, -30, 30);
     if (input.pitchDown) next.pitch = clamp(state.pitch - pitchRate, -30, 30);
 
+    // Auto-level pitch on the ground so the aircraft doesn't take off nose-down
+    if (state.altitude <= 0 && !input.pitchUp && !input.pitchDown) {
+      next.pitch = lerp(state.pitch, 0, 0.12);
+    }
+
     // Gear / flaps toggles are handled as one-shots in FlightScene
 
     // Effective thrust — degraded by engine temp damage and flaps drag
