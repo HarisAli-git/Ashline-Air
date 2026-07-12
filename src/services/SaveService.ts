@@ -1,8 +1,9 @@
-import type { SaveData, PlayerState, WorldState } from '../types';
+import type { SaveData, PlayerState, WorldState, OwnedAircraft, AircraftDefinition } from '../types';
 import { EventBus } from '../game/utils/EventBus';
 
 const SAVE_KEY = 'ashline_air_save';
-const SAVE_VERSION = 1;
+// v2: contract types/expiry rework, cargo condition, world clock in use
+const SAVE_VERSION = 2;
 
 function makeDefaultSave(): SaveData {
   return {
@@ -93,11 +94,46 @@ class SaveServiceClass {
     return this.current;
   }
 
+  /**
+   * Bounds-checked lookup of the player's active aircraft.
+   * `activeAircraftId` is stored as a stringified array index; fall back to
+   * slot 0 rather than crashing on a stale or malformed id.
+   */
+  getActiveAircraft(): { owned: OwnedAircraft; def: AircraftDefinition } {
+    const save = this.get();
+    const idx = Number.parseInt(save.player.activeAircraftId, 10);
+    const owned =
+      (Number.isFinite(idx) ? save.player.ownedAircraft[idx] : undefined) ??
+      save.player.ownedAircraft[0];
+    const def = window.gameData.aircraft.find(a => a.id === owned.definitionId);
+    if (!def) throw new Error(`[SaveService] Unknown aircraft definition: ${owned.definitionId}`);
+    return { owned, def };
+  }
+
   private migrate(data: SaveData): SaveData {
-    // Future: add migration steps per version increment
     if (data.version === SAVE_VERSION) return data;
     console.warn(`[SaveService] Migrating save from v${data.version} to v${SAVE_VERSION}`);
-    return { ...makeDefaultSave(), ...data, version: SAVE_VERSION };
+
+    const defaults = makeDefaultSave();
+    const migrated: SaveData = {
+      ...defaults,
+      ...data,
+      version: SAVE_VERSION,
+      player: {
+        ...defaults.player,
+        ...data.player,
+        stats: { ...defaults.player.stats, ...data.player?.stats },
+        activeContractId: null, // old contract shapes are discarded below
+      },
+      world: {
+        ...defaults.world,
+        ...data.world,
+        // v1 contracts lack the reworked type/expiry semantics — drop them;
+        // BootScene regenerates the board when it's empty.
+        availableContracts: [],
+      },
+    };
+    return migrated;
   }
 }
 

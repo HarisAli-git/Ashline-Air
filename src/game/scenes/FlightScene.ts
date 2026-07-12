@@ -1,325 +1,442 @@
 import Phaser from 'phaser';
 import { AircraftController, type FlightInput } from '../entities/aircraft/AircraftController';
+import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
+import { ParallaxWorld } from '../world/ParallaxWorld';
+import { WeatherFX } from '../world/WeatherFX';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
+import { CargoHold } from '../entities/CargoHold';
 import { EventBus } from '../utils/EventBus';
-import type { FlightState, AircraftDefinition, LandingQuality, LandingResult } from '../../types';
-import { clamp } from '../utils/math';
-import { findById } from '../utils/DataLoader';
+import { fadeIn, fadeToScene, flashToScene } from '../utils/transitions';
+import type { FlightState, LandingQuality, LandingResult, WeatherCondition } from '../../types';
+import { clamp, distance, pixelsToKm } from '../utils/math';
 
-const GROUND_Y_OFFSET = 80; // pixels from bottom of screen to ground line
+// ─── Layout constants ────────────────────────────────────────────────────────
+const GROUND_Y_OFFSET = 110;  // px from screen bottom to ground line
+const AIRCRAFT_X      = 240;  // fixed screen x (world scrolls past it)
 
-interface FlightSceneData {
-  contractId: string;
-}
+interface FlightSceneData { contractId: string; }
+
+const DEV_WEATHER_KEYS: Record<string, WeatherCondition> = {
+  '1': 'clear', '2': 'cloudy', '3': 'strong_winds', '4': 'dust_storm',
+  '5': 'fog', '6': 'thunderstorm', '7': 'blizzard',
+};
 
 export class FlightScene extends Phaser.Scene {
+  // ── Physics ───────────────────────────────────────────────────────────────
   private controller!: AircraftController;
   private weather!: WeatherSystem;
   private state!: FlightState;
-  private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
 
-  private aircraftSprite!: Phaser.GameObjects.Container;
-  private groundLine!: Phaser.GameObjects.Graphics;
-  private terrainGraphics!: Phaser.GameObjects.Graphics;
-  private hudText!: Phaser.GameObjects.Text;
-  private contractId!: string;
-  private landed = false;
-  private hasBeenAirborne = false;
-  private gearToggleCooldown = 0;
-  private flapsToggleCooldown = 0;
+  // ── Visuals ───────────────────────────────────────────────────────────────
+  private world!: ParallaxWorld;
+  private fx!: WeatherFX;
+  private aircraft!: AircraftSprite;
+  private engineRunning = true;
 
-  constructor() {
-    super({ key: 'FlightScene' });
-  }
+  // ── In-canvas HUD (approach guidance only — gauges live in React) ────────
+  private approachText!: Phaser.GameObjects.Text;
+
+  // ── Scene state ───────────────────────────────────────────────────────────
+  private contractId!: string;
+  private routeKm = 6;          // gameplay-scale route length to the destination
+  private cargo!: CargoHold;
+  private lastCargoEmit = 0;
+  private landed      = false;
+  private hasBeenAirborne = false;
+  private gearToggleCooldown  = 0;
+  private flapsToggleCooldown = 0;
+  private eventModalOpen   = false;
+  private lastEventCheckAt = 0;
+  private eventUnsubs: Array<() => void> = [];
+
+  // ── Landing state ─────────────────────────────────────────────────────────
+  private pendingTouchdown: { vs: number; speed: number } | null = null;
+  private rollout = false;
+  private rolloutResult: LandingResult | null = null;
+
+  // ── Animation state ───────────────────────────────────────────────────────
+  private scrollX       = 0;     // cumulative world scroll (m)
+  private shakeDuration = 0;
+
+  constructor() { super({ key: 'FlightScene' }); }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   init(data: FlightSceneData): void {
-    this.contractId = data.contractId;
-    this.landed = false;
-    this.hasBeenAirborne = false;
+    this.contractId          = data.contractId;
+    this.landed              = false;
+    this.hasBeenAirborne     = false;
+    this.scrollX             = 0;
+    this.shakeDuration       = 0;
+    this.gearToggleCooldown  = 0;
+    this.flapsToggleCooldown = 0;
+    this.engineRunning       = true;
+    this.eventModalOpen      = false;
+    this.lastEventCheckAt    = 0;
+    this.pendingTouchdown    = null;
+    this.rollout             = false;
+    this.rolloutResult       = null;
   }
 
   create(): void {
     const { width, height } = this.cameras.main;
-    this.cameras.main.setBackgroundColor('#1a2a3a');
+    const groundY = height - GROUND_Y_OFFSET;
+    fadeIn(this);
 
-    const save = SaveService.get();
-    const aircraft = save.player.ownedAircraft[parseInt(save.player.activeAircraftId)];
-    const definition = findById<AircraftDefinition>(window.gameData.aircraft, aircraft.definitionId);
+    // ── Physics init ──────────────────────────────────────────────────────
+    const { owned, def: definition } = SaveService.getActiveAircraft();
 
     this.controller = new AircraftController(definition);
-    this.state = this.controller.initialState();
-    this.state.fuel = aircraft.fuel;
-    this.state.integrity = aircraft.integrity;
-    this.state.engineTemp = aircraft.engineTemp;
+    this.state      = this.controller.initialState();
+    this.state.fuel        = owned.fuel;
+    this.state.integrity   = owned.integrity;
+    this.state.engineTemp  = owned.engineTemp;
 
-    this.weather = new WeatherSystem(this);
+    // Stall buffet shakes the camera; touchdown captures true impact values
+    this.controller.onBuffet = () => { this.shakeDuration = Math.max(this.shakeDuration, 150); };
+    this.controller.onTouchdown = (vs, speed) => { this.pendingTouchdown = { vs, speed }; };
 
-    FlightEventService.reset();
+    this.weather = new WeatherSystem();
+    FlightEventService.reset(definition);
 
-    this.setupInput();
-    this.buildScene(width, height);
-    this.buildHUD(width, height);
+    // ── Route length (gameplay scale, from the contract's settlements) ─────
+    const save = SaveService.get();
+    const contract = save.world.availableContracts.find(c => c.id === this.contractId);
+    if (contract) {
+      const origin = window.gameData.settlements.find(s => s.id === contract.originId);
+      const dest   = window.gameData.settlements.find(s => s.id === contract.destinationId);
+      if (origin && dest) {
+        const loreKm = pixelsToKm(
+          distance(origin.position.x, origin.position.y, dest.position.x, dest.position.y), 0.5,
+        );
+        this.routeKm = clamp(3 + loreKm / 40, 3, 15);
+      }
+    }
 
+    // ── Cargo hold: what's riding in the back ─────────────────────────────
+    this.cargo = new CargoHold(contract ?? null, window.gameData.goods);
+    this.lastCargoEmit = 0;
+    FlightEventService.onCargoDamage = amount => this.cargo.applyDamage(amount);
+
+    // ── Build scene (back → front) ────────────────────────────────────────
+    this.world    = new ParallaxWorld(this, width, height, groundY);
+    this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
+    this.fx       = new WeatherFX(this, width, height);
+
+    // ── In-canvas approach indicator ──────────────────────────────────────
+    this.approachText = this.add.text(width / 2, height / 2 - 30, '', {
+      fontSize: '16px', color: '#ffffff', fontFamily: 'monospace',
+      backgroundColor: '#00000099', padding: { x: 14, y: 6 },
+    }).setOrigin(0.5).setDepth(10).setAlpha(0);
+
+    this.add.text(width - 12, height - 12,
+      'W/S: Throttle   A/D: Pitch   E: Engine   G: Gear   F: Flaps   ESC: Abort',
+      { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
+        backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
+    ).setOrigin(1, 1).setDepth(10);
+
+    // ── Input ─────────────────────────────────────────────────────────────
+    this.keys = {
+      W:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.W),
+      S:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.S),
+      A:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.A),
+      D:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.D),
+      E:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E),
+      G:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
+      F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
+      ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
+    };
+
+    // DEV: number keys force weather conditions for testing
+    if (import.meta.env.DEV) {
+      this.input.keyboard!.on('keydown', (ev: KeyboardEvent) => {
+        const condition = DEV_WEATHER_KEYS[ev.key];
+        if (condition) this.weather.forceCondition(condition);
+      });
+    }
+
+    // ── Event wiring ──────────────────────────────────────────────────────
+    // Physics pauses while a flight-event modal is up; the chosen consequence
+    // is applied to the authoritative state here (React only reports the choice).
+    this.eventUnsubs = [
+      EventBus.on('ui:show-event-modal',  () => { this.eventModalOpen = true; }),
+      EventBus.on('ui:close-event-modal', () => { this.eventModalOpen = false; }),
+      EventBus.on('flight:apply-event-choice', ({ choiceId }) => {
+        this.state = FlightEventService.applyChoice(choiceId, this.state);
+      }),
+      EventBus.on('weather:changed', ({ state: weather }) => {
+        this.world.setWeather(weather.condition);
+        this.fx.setCondition(weather.condition);
+        FlightEventService.checkWeatherEvents(this.state);
+      }),
+    ];
+    this.events.once('shutdown', () => {
+      this.eventUnsubs.forEach(u => u());
+      this.eventUnsubs = [];
+    });
+
+    // ── First draw ────────────────────────────────────────────────────────
+    this.world.update(0, {
+      scrollX: 0, altitude: 0, windX: 0,
+      routeTotalKm: this.routeKm, condition: this.weather.current.condition,
+    });
     EventBus.emit('flight:state-update', this.state);
   }
 
-  private setupInput(): void {
-    this.cursors = this.input.keyboard!.createCursorKeys();
-    this.keys = {
-      W: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.W),
-      S: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.S),
-      A: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.A),
-      D: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.D),
-      G: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
-      F: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
-      ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
-    };
-  }
-
-  private buildScene(width: number, height: number): void {
-    const groundY = height - GROUND_Y_OFFSET;
-
-    // Sky gradient
-    const sky = this.add.graphics();
-    sky.fillGradientStyle(0x1a2a3a, 0x1a2a3a, 0x2a4a2a, 0x2a4a2a, 1);
-    sky.fillRect(0, 0, width, groundY);
-
-    // Scrolling terrain
-    this.terrainGraphics = this.add.graphics();
-    this.drawTerrain(groundY, width);
-
-    // Ground line
-    this.groundLine = this.add.graphics();
-    this.groundLine.lineStyle(2, 0x5a4a2a, 1);
-    this.groundLine.lineBetween(0, groundY, width, groundY);
-
-    // Aircraft (procedural placeholder)
-    this.aircraftSprite = this.buildAircraftSprite();
-    this.aircraftSprite.setPosition(width * 0.2, groundY - 10);
-  }
-
-  private buildAircraftSprite(): Phaser.GameObjects.Container {
-    const g = this.add.graphics();
-    // Fuselage
-    g.fillStyle(0xd4c4a0, 1);
-    g.fillRect(-30, -6, 60, 12);
-    // Wing
-    g.fillStyle(0xb8a880, 1);
-    g.fillRect(-15, -14, 30, 8);
-    // Tail
-    g.fillRect(20, -16, 12, 10);
-    // Nose
-    g.fillStyle(0xe8d5b7, 1);
-    g.fillRect(30, -4, 10, 8);
-    // Gear (drawn separately so it can be toggled)
-    g.fillStyle(0x888888, 1);
-    g.fillRect(-10, 6, 4, 8);
-    g.fillRect(10, 6, 4, 8);
-
-    const container = this.add.container(0, 0, [g]);
-    return container;
-  }
-
-  private drawTerrain(groundY: number, width: number): void {
-    this.terrainGraphics.clear();
-    this.terrainGraphics.fillStyle(0x2a3a1a, 1);
-    this.terrainGraphics.fillRect(0, groundY, width, 200);
-
-    // Simple rolling hill silhouettes
-    this.terrainGraphics.fillStyle(0x1e2e14, 1);
-    this.terrainGraphics.fillTriangle(0, groundY, 120, groundY - 40, 240, groundY);
-    this.terrainGraphics.fillTriangle(300, groundY, 480, groundY - 60, 660, groundY);
-    this.terrainGraphics.fillTriangle(700, groundY, 850, groundY - 30, 1000, groundY);
-  }
-
-  private buildHUD(width: number, height: number): void {
-    // Phaser-side HUD (critical numbers in-cockpit style)
-    // React overlay handles the full HUD panel
-    this.hudText = this.add.text(16, 16, '', {
-      fontSize: '13px',
-      color: '#00ff88',
-      fontFamily: 'monospace',
-      backgroundColor: '#00000088',
-      padding: { x: 8, y: 6 },
-    });
-
-    // Controls reminder
-    this.add.text(width - 16, height - 16,
-      'W/S: Throttle   A: Nose Up   D: Nose Down   G: Gear   F: Flaps   ESC: Abort',
-      {
-        fontSize: '11px', color: '#6a7a6a', fontFamily: 'monospace',
-        backgroundColor: '#00000066',
-        padding: { x: 6, y: 4 },
-      }
-    ).setOrigin(1, 1);
-  }
+  // ── Main loop ─────────────────────────────────────────────────────────────
 
   update(time: number, delta: number): void {
-    if (this.landed) return;
+    if (this.landed || this.eventModalOpen) return;
 
-    this.gearToggleCooldown = Math.max(0, this.gearToggleCooldown - delta);
+    const dt = delta / 1000;
+    const { height } = this.cameras.main;
+    const groundY = height - GROUND_Y_OFFSET;
+
+    // ── Cooldowns ──────────────────────────────────────────────────────────
+    this.gearToggleCooldown  = Math.max(0, this.gearToggleCooldown  - delta);
     this.flapsToggleCooldown = Math.max(0, this.flapsToggleCooldown - delta);
 
+    // ── Input ──────────────────────────────────────────────────────────────
     const input: FlightInput = {
       throttleUp:   this.keys.W.isDown,
       throttleDown: this.keys.S.isDown,
       pitchUp:      this.keys.A.isDown,
       pitchDown:    this.keys.D.isDown,
-      toggleGear:   false,
-      toggleFlaps:  false,
+      engineOn:     this.engineRunning,
     };
 
-    // One-shot toggles with cooldown
+    if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
+      this.engineRunning = !this.engineRunning;
+      if (this.engineRunning) {
+        this.aircraft.startEngine();
+        EventBus.emit('ui:show-notification', { message: 'Engine started.', type: 'success' });
+      } else {
+        this.aircraft.stopEngine();
+        EventBus.emit('ui:show-notification', { message: 'Engine shut down.', type: 'warning' });
+      }
+    }
     if (Phaser.Input.Keyboard.JustDown(this.keys.G) && this.gearToggleCooldown === 0) {
-      this.state.gearDown = !this.state.gearDown;
-      this.gearToggleCooldown = 500;
-      EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
+      if (!this.aircraft.hasRetractableGear) {
+        EventBus.emit('ui:show-notification', { message: 'This aircraft has fixed landing gear.', type: 'info' });
+        this.gearToggleCooldown = 500;
+      } else {
+        this.state.gearDown = !this.state.gearDown;
+        this.aircraft.setGearDown(this.state.gearDown);
+        this.gearToggleCooldown = 500;
+        EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
+      }
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.F) && this.flapsToggleCooldown === 0) {
       this.state.flapsDeployed = !this.state.flapsDeployed;
       this.flapsToggleCooldown = 500;
       EventBus.emit('flight:flaps-toggled', { deployed: this.state.flapsDeployed });
     }
-
     if (Phaser.Input.Keyboard.JustDown(this.keys.ESC)) {
-      this.abortFlight();
+      EventBus.emit('scene:return-to-map');
+      EventBus.emit('ui:show-notification', { message: 'Flight aborted.', type: 'warning' });
+      fadeToScene(this, 'MapScene');
       return;
     }
 
-    this.state = this.controller.update(this.state, input);
-
-    // Weather influence on turbulence
+    // ── Weather → wind ─────────────────────────────────────────────────────
     this.weather.update(delta);
+    const windX = this.weather.windX() * 0.4;
+
+    // ── Physics (fixed-step, frame-rate independent) ───────────────────────
+    this.state = this.controller.update(this.state, input, dt, windX);
+
+    // ── Turbulence ─────────────────────────────────────────────────────────
     const turbulence = this.weather.current.turbulenceIntensity;
     if (turbulence > 0 && this.state.altitude > 10) {
       this.state.altitude = clamp(
-        this.state.altitude + (Math.random() - 0.5) * turbulence * 8,
-        0, 10000
+        this.state.altitude + (Math.random() - 0.5) * turbulence * 8, 0, 10000
       );
       this.state.verticalSpeed += (Math.random() - 0.5) * turbulence * 2;
+      if (turbulence > 0.3) {
+        this.shakeDuration = 400;
+      }
     }
 
-    // Fuel-critical alert
-    if (this.state.fuel < 10 && Math.floor(time / 5000) !== Math.floor((time - delta) / 5000)) {
-      EventBus.emit('flight:fuel-critical', { fuelRemaining: this.state.fuel });
+    // Fuel warning (every 5s)
+    if (this.state.fuel < 15 && Math.floor(time / 5000) !== Math.floor((time - delta) / 5000)) {
       EventBus.emit('ui:show-notification', {
-        message: `WARNING: Fuel critical — ${this.state.fuel.toFixed(1)}L remaining`,
+        message: `⚠ FUEL CRITICAL: ${this.state.fuel.toFixed(0)} L remaining`,
         type: 'danger',
       });
     }
 
-    // Track first time we leave the ground
+    // Engine overheat warning
+    if (this.state.engineTemp > 0.85 && Math.floor(time / 8000) !== Math.floor((time - delta) / 8000)) {
+      EventBus.emit('ui:show-notification', {
+        message: 'ENGINE OVERHEATING — reduce throttle',
+        type: 'warning',
+      });
+    }
+
+    // ── Airborne tracking ──────────────────────────────────────────────────
     if (this.state.altitude > 5) this.hasBeenAirborne = true;
 
-    // Fuel exhausted on the ground after being airborne
-    if (this.hasBeenAirborne && this.state.fuel <= 0 && this.state.altitude <= 0) {
-      this.triggerLanding();
+    // ── Cargo condition ────────────────────────────────────────────────────
+    if (this.cargo.hasCargo) {
+      this.cargo.update(dt, turbulence);
+      if (this.state.elapsedSeconds - this.lastCargoEmit >= 1) {
+        this.lastCargoEmit = this.state.elapsedSeconds;
+        EventBus.emit('flight:cargo-update', {
+          average: this.cargo.averageCondition(),
+          count: this.cargo.slots.length,
+        });
+      }
+    }
+
+    // ── Touchdown: grade the exact moment the wheels meet the ground ──────
+    if (this.pendingTouchdown && this.hasBeenAirborne && !this.rollout) {
+      const { vs, speed } = this.pendingTouchdown;
+      const result = this.evaluateLanding(vs, speed);
+      this.aircraft.notifyTouchdown(vs);
+      this.cargo.applyDamage(result.cargoDamagePercent);
+
+      if (result.quality === 'crash') {
+        this.cameras.main.shake(600, 14);
+        this.finishFlight(result);
+        return;
+      }
+      if (result.quality === 'hard') this.cameras.main.shake(450, 7);
+      this.rollout = true;
+      this.rolloutResult = result;
+    }
+    this.pendingTouchdown = null;
+
+    // ── Rollout: brake to a stop (throttling up again = touch-and-go) ─────
+    if (this.rollout) {
+      if (this.state.altitude > 0.5) {
+        this.rollout = false;
+        this.rolloutResult = null;
+      } else {
+        this.state.speed = Math.max(0, this.state.speed - 6 * dt);
+        this.state.groundSpeed = this.state.speed;
+        if (this.state.speed < 3) {
+          this.finishFlight(this.rolloutResult!);
+          return;
+        }
+      }
+    }
+
+    // Fuel exhausted and rolled to a stop without a graded touchdown
+    if (this.hasBeenAirborne && this.state.fuel <= 0 && this.state.altitude <= 0 && this.state.speed < 1) {
+      this.finishFlight(this.evaluateLanding(Math.abs(this.state.verticalSpeed), this.state.speed));
       return;
     }
 
-    // Check flight events every ~1s
-    if (Math.floor(this.state.elapsedSeconds) % 3 === 0) {
+    // Flight events — only once airborne, at most one check every 3 seconds
+    if (this.hasBeenAirborne && this.state.elapsedSeconds - this.lastEventCheckAt >= 3) {
+      this.lastEventCheckAt = this.state.elapsedSeconds;
       FlightEventService.checkEvents(this.state);
     }
 
-    this.updateVisuals();
-    this.updateHUD();
+    // ── World & weather visuals ────────────────────────────────────────────
+    this.scrollX += this.state.groundSpeed * dt;
+    this.world.update(dt, {
+      scrollX: this.scrollX,
+      altitude: this.state.altitude,
+      windX,
+      routeTotalKm: this.routeKm,
+      condition: this.weather.current.condition,
+    });
+    this.fx.update(dt);
 
+    // ── Aircraft ───────────────────────────────────────────────────────────
+    this.aircraft.container.setY(this.world.altitudeToScreenY(this.state.altitude));
+    this.aircraft.update(dt, this.state);
+
+    // ── Camera shake ───────────────────────────────────────────────────────
+    if (this.shakeDuration > 0) {
+      this.shakeDuration -= delta;
+      const mag = clamp(turbulence * 5, 1, 8);
+      this.cameras.main.shake(80, mag);
+    }
+
+    // ── Approach guidance ──────────────────────────────────────────────────
+    this.updateApproachIndicator();
+
+    // ── Events to React ────────────────────────────────────────────────────
     EventBus.emit('flight:state-update', this.state);
+  }
 
-    // Auto-land once the aircraft has been airborne and returns to ground
-    if (this.hasBeenAirborne && this.state.altitude <= 0 && this.state.speed < 10 && this.state.gearDown) {
-      this.triggerLanding();
+  // ── Approach indicator ─────────────────────────────────────────────────────
+
+  private updateApproachIndicator(): void {
+    if (!this.hasBeenAirborne || this.state.altitude > 250) {
+      this.approachText.setAlpha(0);
+      return;
+    }
+
+    const vSpeed = this.state.verticalSpeed;
+    if (vSpeed >= -0.3) { this.approachText.setAlpha(0); return; }
+
+    let label: string;
+    let color: string;
+
+    if (!this.state.gearDown) {
+      label = '⚠  GEAR NOT DOWN  ⚠';
+      color = '#ff4444';
+    } else if (vSpeed < -6) {
+      label = '▼  SINKING FAST — PULL UP';
+      color = '#ff4444';
+    } else if (vSpeed < -3.5) {
+      label = '▼  APPROACH STEEP';
+      color = '#ffd080';
+    } else {
+      label = '✓  GOOD APPROACH';
+      color = '#00ff88';
+    }
+
+    this.approachText.setText(label).setStyle({ color }).setAlpha(1);
+  }
+
+  // ── Landing ───────────────────────────────────────────────────────────────
+
+  private finishFlight(result: LandingResult): void {
+    if (this.landed) return;
+    this.landed = true;
+    const data = {
+      result,
+      contractId: this.contractId,
+      finalState: this.state,
+      cargoSlots: this.cargo.slots,
+      reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
+    };
+    if (result.quality === 'crash') {
+      flashToScene(this, 'PostFlightScene', data);
+    } else {
+      fadeToScene(this, 'PostFlightScene', data);
     }
   }
 
-  private updateVisuals(): void {
-    const { width, height } = this.cameras.main;
-    const groundY = height - GROUND_Y_OFFSET;
-
-    // Aircraft y position mapped from altitude
-    const maxDisplayAlt = 800;
-    const screenY = groundY - (this.state.altitude / maxDisplayAlt) * (groundY - 60);
-    this.aircraftSprite.y = clamp(screenY, 60, groundY - 5);
-
-    // Pitch tilt
-    this.aircraftSprite.angle = -this.state.pitch * 0.5;
-
-    // Parallax terrain scroll based on speed
-    const scroll = this.state.speed * 2;
-    this.terrainGraphics.x = ((this.terrainGraphics.x - scroll * 0.016) % width);
-  }
-
-  private updateHUD(): void {
-    const s = this.state;
-    const w = this.weather.current;
-    this.hudText.setText([
-      `ALT:  ${s.altitude.toFixed(0)} m`,
-      `SPD:  ${(s.speed * 3.6).toFixed(0)} km/h`,
-      `V/S:  ${s.verticalSpeed.toFixed(1)} m/s`,
-      `THR:  ${(s.throttle * 100).toFixed(0)}%`,
-      `FUEL: ${s.fuel.toFixed(1)} L`,
-      `ENG:  ${(s.engineTemp * 100).toFixed(0)}%`,
-      `INT:  ${s.integrity.toFixed(0)}%`,
-      `GEAR: ${s.gearDown ? 'DOWN' : 'UP'}`,
-      `FLAP: ${s.flapsDeployed ? 'ON' : 'OFF'}`,
-      `WX:   ${w.condition.replace('_', ' ')}`,
-    ]);
-  }
-
-  private triggerLanding(): void {
-    if (this.landed) return;
-    this.landed = true;
-
-    const result = this.evaluateLanding();
-    this.scene.start('PostFlightScene', { result, contractId: this.contractId });
-  }
-
-  private evaluateLanding(): LandingResult {
-    const vSpeed = Math.abs(this.state.verticalSpeed);
-    const hSpeed = this.state.speed;
+  /** Grades the landing from the impact values captured at touchdown. */
+  private evaluateLanding(vSpeedAtImpact: number, hSpeedAtImpact: number): LandingResult {
+    const vSpeed = Math.abs(vSpeedAtImpact);
+    const hSpeed = hSpeedAtImpact;
 
     let quality: LandingQuality;
     let integrityDamage: number;
     let cargoDamage: number;
 
     if (!this.state.gearDown) {
-      quality = 'crash';
-      integrityDamage = 40;
-      cargoDamage = 50;
-    } else if (vSpeed < 1.5 && hSpeed < 30) {
-      quality = 'perfect';
-      integrityDamage = 0;
-      cargoDamage = 0;
-    } else if (vSpeed < 3.5 && hSpeed < 60) {
-      quality = 'good';
-      integrityDamage = 2;
-      cargoDamage = 0;
-    } else if (vSpeed < 6) {
-      quality = 'hard';
-      integrityDamage = 10;
-      cargoDamage = 15;
+      quality = 'crash'; integrityDamage = 45; cargoDamage = 60;
+    } else if (vSpeed < 1.5 && hSpeed < 25) {
+      quality = 'perfect'; integrityDamage = 0; cargoDamage = 0;
+    } else if (vSpeed < 3.0 && hSpeed < 55) {
+      quality = 'good'; integrityDamage = 2; cargoDamage = 0;
+    } else if (vSpeed < 5.5) {
+      quality = 'hard'; integrityDamage = 12; cargoDamage = 20;
     } else {
-      quality = 'crash';
-      integrityDamage = 30;
-      cargoDamage = 40;
+      quality = 'crash'; integrityDamage = 35; cargoDamage = 45;
     }
 
-    return {
-      verticalSpeed: vSpeed,
-      horizontalSpeed: hSpeed,
-      gearDown: this.state.gearDown,
-      quality,
-      integrityDamage,
-      cargoDamagePercent: cargoDamage,
-    };
-  }
-
-  private abortFlight(): void {
-    EventBus.emit('ui:show-notification', { message: 'Flight aborted.', type: 'warning' });
-    this.scene.start('MapScene');
+    return { verticalSpeed: vSpeed, horizontalSpeed: hSpeed, gearDown: this.state.gearDown,
+      quality, integrityDamage, cargoDamagePercent: cargoDamage };
   }
 }

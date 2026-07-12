@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
 import { EventBus } from '../utils/EventBus';
+import { fadeIn, fadeToScene } from '../utils/transitions';
 import type { SettlementDefinition } from '../../types';
 
 const MAP_WIDTH  = 1000;
@@ -15,6 +16,8 @@ export class MapScene extends Phaser.Scene {
 
   create(): void {
     this.cameras.main.setBackgroundColor('#0d1a0d');
+    fadeIn(this);
+    this.settlementMarkers = [];
 
     const save = SaveService.get();
     const settlements: SettlementDefinition[] = window.gameData.settlements;
@@ -109,7 +112,7 @@ export class MapScene extends Phaser.Scene {
 
       container.on('pointerdown', () => {
         EventBus.emit('scene:open-preflight', { settlementId: settlement.id });
-        this.scene.start('PreFlightScene', { settlementId: settlement.id });
+        fadeToScene(this, 'PreFlightScene', { settlementId: settlement.id });
       });
     }
 

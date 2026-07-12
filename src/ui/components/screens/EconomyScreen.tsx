@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { SaveService } from '../../../services/SaveService';
 import { EconomyService } from '../../../services/EconomyService';
+import { TimeService } from '../../../services/TimeService';
 import { EventBus } from '../../../game/utils/EventBus';
 import type { GoodDefinition } from '../../../types';
 
@@ -9,13 +10,15 @@ interface Props {
 }
 
 export function EconomyScreen({ settlementId }: Props): React.ReactElement {
-  const [tick, setTick] = useState(0);
+  const [, setTick] = useState(0);
+
+  // Prices drift with game time — re-render on economy ticks
+  useEffect(() => EventBus.on('economy:tick', () => setTick(t => t + 1)), []);
 
   const save = SaveService.get();
   const settlement = window.gameData.settlements.find(s => s.id === settlementId)!;
   const settlementState = save.world.settlements.find(s => s.definitionId === settlementId)!;
-  const owned = save.player.ownedAircraft[parseInt(save.player.activeAircraftId)];
-  const def = window.gameData.aircraft.find(a => a.id === owned.definitionId)!;
+  const { owned, def } = SaveService.getActiveAircraft();
 
   const fuelNeeded = def.stats.fuelCapacity - owned.fuel;
   const fuelCost = EconomyService.fuelCost(settlementState, fuelNeeded);
@@ -30,6 +33,7 @@ export function EconomyScreen({ settlementId }: Props): React.ReactElement {
     save.player.money -= fuelCost;
     owned.fuel = def.stats.fuelCapacity;
     SaveService.save(save.player, save.world);
+    TimeService.advance(10); // refuelling takes ground time
     EventBus.emit('player:money-changed', { amount: save.player.money, delta: -fuelCost });
     EventBus.emit('ui:show-notification', { message: 'Aircraft refueled.', type: 'success' });
     setTick(t => t + 1);
@@ -44,6 +48,7 @@ export function EconomyScreen({ settlementId }: Props): React.ReactElement {
     save.player.money -= repairCost;
     owned.integrity = 100;
     SaveService.save(save.player, save.world);
+    TimeService.advance(30); // repairs take ground time
     EventBus.emit('player:money-changed', { amount: save.player.money, delta: -repairCost });
     EventBus.emit('ui:show-notification', { message: 'Aircraft repaired.', type: 'success' });
     setTick(t => t + 1);

@@ -1,10 +1,41 @@
 import type { AircraftDefinition, FlightState } from '../../../types';
-import { clamp, lerp } from '../../utils/math';
+import { clamp } from '../../utils/math';
+import { specFor } from './render/AircraftVisualSpec';
 
-const GRAVITY = 9.81;        // m/s²
-const LIFT_COEFFICIENT = 0.035; // tuned so cruise speed (36 m/s) needs ~10° pitch for level flight
-const DRAG_COEFFICIENT = 0.03;
-const DT = 1 / 60;           // seconds per update tick (60 Hz)
+const GRAVITY = 9.81; // m/s²
+
+/**
+ * All feel-related constants in one place so balancing is a single-file job.
+ * Aerodynamic coefficients themselves are derived per aircraft from its data
+ * stats (see the constructor) so every airframe obeys the same equations.
+ */
+export const TUNING = {
+  throttleRate: 0.6,        // throttle change per second of key held
+  pitchRate: 40,            // degrees per second
+  pitchAutoLevel: 4,        // 1/s exponential ground auto-level
+  thrustTimeConstant: 8,    // seconds to ~63% of vMax at full throttle
+  aoa0Deg: 3,               // built-in wing incidence
+  cruisePitchDeg: 2,        // pitch needed for level flight at cruise speed
+  vsLiftFactor: 1.2,        // (lift − g) → target vertical speed
+  vsResponse: 2.5,          // 1/s convergence of vertical speed
+  maxSink: -22,             // m/s hard sink limit
+  climbHeadroom: 2,         // vsTarget cap = climbRate × this
+  stallBand: 0.25,          // stall develops over this fraction below vStall
+  stallLiftLoss: 0.8,       // lift multiplier lost at full stall
+  stallNoseDownRate: 12,    // deg/s nose-drop at full stall
+  flapsLift: 1.35,
+  flapsStallRelief: 0.85,   // flaps lower effective stall speed
+  flapsDragFactor: 0.5,     // extra drag as a fraction of base kD
+  rollingFriction: 0.35,    // m/s² while on the ground
+  tempHeatRate: 0.055,      // 1/s convergence while heating
+  tempCoolRate: 0.11,       // 1/s convergence while cooling
+  overspeedDamage: 3,       // integrity/s above 95% vMax
+  gearDragDamage: 1.2,      // integrity/s with gear out well above stall speed
+};
+
+const STEP = 1 / 120;      // fixed physics step (s)
+const MAX_FRAME_DT = 0.1;  // clamp huge frame gaps (tab switch etc.)
+const MAX_SUBSTEPS = 12;
 
 // Controls input snapshot
 export interface FlightInput {
@@ -12,15 +43,44 @@ export interface FlightInput {
   throttleDown: boolean;
   pitchUp: boolean;
   pitchDown: boolean;
-  toggleGear: boolean;
-  toggleFlaps: boolean;
+  engineOn: boolean;
 }
 
 export class AircraftController {
-  private def: AircraftDefinition;
+  private readonly def: AircraftDefinition;
+
+  // Per-aircraft coefficients, derived once from data stats (all speeds m/s)
+  private readonly vMax: number;
+  private readonly vCruise: number;
+  private readonly vStall: number;
+  private readonly tMax: number;   // full-throttle acceleration, m/s²
+  private readonly kD: number;     // drag coefficient (equilibrium at vMax)
+  private readonly kL: number;     // lift coefficient (level flight at cruise)
+  private readonly gearLimit: number; // speed above which extended gear takes damage
+  private readonly gearFixed: boolean; // fixed gear is built for it — no drag damage
+
+  private accumulator = 0;
+
+  /** Set by FlightScene: called with stall intensity 0–1 while buffeting. */
+  onBuffet: ((intensity: number) => void) | null = null;
+  /**
+   * Set by FlightScene: fires at the exact substep the wheels meet the ground,
+   * with the impact vertical speed and airspeed (before they get zeroed).
+   */
+  onTouchdown: ((verticalSpeed: number, speed: number) => void) | null = null;
 
   constructor(definition: AircraftDefinition) {
     this.def = definition;
+    const s = definition.stats;
+    this.vMax = s.maxSpeed / 3.6;
+    this.vCruise = s.cruiseSpeed / 3.6;
+    this.vStall = s.stallSpeed / 3.6;
+    this.tMax = this.vMax / TUNING.thrustTimeConstant;
+    this.kD = this.tMax / (this.vMax * this.vMax);
+    const aoaRad = ((TUNING.aoa0Deg + TUNING.cruisePitchDeg) * Math.PI) / 180;
+    this.kL = GRAVITY / (this.vCruise * this.vCruise * Math.sin(aoaRad));
+    this.gearLimit = this.vStall * 1.6;
+    this.gearFixed = specFor(definition.id).gear.fixed;
   }
 
   initialState(): FlightState {
@@ -29,6 +89,7 @@ export class AircraftController {
       throttle: 0,
       pitch: 0,
       speed: 0,
+      groundSpeed: 0,
       altitude: 0,
       verticalSpeed: 0,
       heading: 0,
@@ -39,71 +100,104 @@ export class AircraftController {
       flapsDeployed: false,
       distanceTravelled: 0,
       elapsedSeconds: 0,
+      modifiers: { fuelBurnMult: 1, dragMult: 1 },
     };
   }
 
-  update(state: FlightState, input: FlightInput): FlightState {
-    const next = { ...state };
-    const { stats } = this.def;
+  /**
+   * Frame-rate-independent integration: the real frame delta feeds a
+   * fixed-step accumulator, so the sim advances identically at 30, 60 or
+   * 144 Hz. windX is the along-track wind component in m/s (+ = tailwind).
+   */
+  update(state: FlightState, input: FlightInput, dtSeconds: number, windX = 0): FlightState {
+    const next: FlightState = { ...state, modifiers: { ...state.modifiers } };
 
-    // Throttle
-    if (input.throttleUp)   next.throttle = clamp(state.throttle + 0.01, 0, 1);
-    if (input.throttleDown) next.throttle = clamp(state.throttle - 0.01, 0, 1);
-
-    // Pitch — positive value = nose up = counter-clockwise sprite tilt = more lift
-    const pitchRate = 1.2; // degrees per tick
-    if (input.pitchUp)   next.pitch = clamp(state.pitch + pitchRate, -30, 30);
-    if (input.pitchDown) next.pitch = clamp(state.pitch - pitchRate, -30, 30);
-
-    // Gear / flaps toggles are handled as one-shots in FlightScene
-
-    // Effective thrust — degraded by engine temp damage and flaps drag
-    const thrustForce = state.throttle * (stats.maxSpeed / 3.6) * (1 - state.engineTemp * 0.3);
-
-    // Lift/drag model — lift is proportional to v² (standard aerodynamics)
-    // sin offset of 0.05 ≈ 3° represents built-in wing angle of attack
-    const pitchRad = (state.pitch * Math.PI) / 180;
-    const liftForce = LIFT_COEFFICIENT * state.speed ** 2 * Math.sin(pitchRad + 0.05);
-    const dragForce = DRAG_COEFFICIENT * state.speed ** 2;
-    const flapsDrag = state.flapsDeployed ? 0.015 * state.speed ** 2 : 0;
-
-    // Net horizontal acceleration
-    const accel = thrustForce - dragForce - flapsDrag;
-    next.speed = clamp(state.speed + accel * DT, 0, stats.maxSpeed / 3.6);
-
-    // Vertical speed converges toward net lift/gravity balance
-    // factor 4 keeps climb rates realistic (~5-15 m/s) without wild oscillation
-    const netVertical = liftForce - GRAVITY;
-    next.verticalSpeed = lerp(state.verticalSpeed, netVertical * 4, 0.05);
-    next.altitude = clamp(state.altitude + next.verticalSpeed * DT, 0, stats.maxAltitude);
-
-    // Stall: if below stall speed and airborne, drop faster
-    const stallMs = stats.stallSpeed / 3.6;
-    if (state.altitude > 0 && next.speed < stallMs) {
-      next.verticalSpeed = Math.min(next.verticalSpeed - 2 * DT, -5);
-      next.altitude = clamp(next.altitude + next.verticalSpeed * DT, 0, stats.maxAltitude);
+    this.accumulator += clamp(dtSeconds, 0, MAX_FRAME_DT);
+    let steps = 0;
+    while (this.accumulator >= STEP && steps < MAX_SUBSTEPS) {
+      this.step(next, input, STEP, windX);
+      this.accumulator -= STEP;
+      steps++;
     }
-
-    // Fuel consumption
-    const burnRate = stats.fuelBurnRate * state.throttle;
-    next.fuel = clamp(state.fuel - (burnRate / 60) * DT, 0, stats.fuelCapacity);
-
-    // Engine temp rises with throttle, falls over time
-    const tempTarget = state.throttle * 0.9;
-    next.engineTemp = lerp(state.engineTemp, tempTarget, 0.002);
-
-    // Structural: overspeed and gear-down at speed damage integrity
-    if (next.speed > (stats.maxSpeed / 3.6) * 0.95) {
-      next.integrity = clamp(state.integrity - 0.05, 0, 100);
-    }
-    if (state.gearDown && next.speed > 100 / 3.6 && state.altitude > 5) {
-      next.integrity = clamp(state.integrity - 0.02, 0, 100);
-    }
-
-    // Distance
-    next.distanceTravelled = state.distanceTravelled + next.speed * DT / 1000;
-    next.elapsedSeconds = state.elapsedSeconds + DT;
+    if (steps === MAX_SUBSTEPS) this.accumulator = 0; // shed backlog after a huge stall
 
     return next;
+  }
+
+  private step(s: FlightState, input: FlightInput, dt: number, windX: number): void {
+    const { stats } = this.def;
+    const onGround = s.altitude <= 0;
+
+    // ── Controls ──────────────────────────────────────────────────────────
+    if (input.throttleUp)   s.throttle = clamp(s.throttle + TUNING.throttleRate * dt, 0, 1);
+    if (input.throttleDown) s.throttle = clamp(s.throttle - TUNING.throttleRate * dt, 0, 1);
+    if (input.pitchUp)   s.pitch = clamp(s.pitch + TUNING.pitchRate * dt, -30, 30);
+    if (input.pitchDown) s.pitch = clamp(s.pitch - TUNING.pitchRate * dt, -30, 30);
+    if (onGround && !input.pitchUp && !input.pitchDown) {
+      s.pitch += (0 - s.pitch) * (1 - Math.exp(-dt * TUNING.pitchAutoLevel));
+    }
+
+    const effThrottle = input.engineOn && s.fuel > 0 ? s.throttle : 0;
+
+    // ── Stall factor (0 = clean, 1 = fully stalled) ───────────────────────
+    const vStallEff = this.vStall * (s.flapsDeployed ? TUNING.flapsStallRelief : 1);
+    const stallT = !onGround
+      ? clamp((vStallEff - s.speed) / (TUNING.stallBand * vStallEff), 0, 1)
+      : 0;
+
+    // ── Horizontal: thrust vs drag ────────────────────────────────────────
+    const thrust = effThrottle * this.tMax * (1 - s.engineTemp * 0.3);
+    let drag = this.kD * s.speed * s.speed * s.modifiers.dragMult;
+    if (s.flapsDeployed) drag += this.kD * TUNING.flapsDragFactor * s.speed * s.speed;
+    const rolling = onGround && s.speed > 0 ? TUNING.rollingFriction : 0;
+    s.speed = clamp(s.speed + (thrust - drag - rolling) * dt, 0, this.vMax);
+
+    // ── Vertical: lift model with smooth stall ────────────────────────────
+    const pitchRad = (s.pitch * Math.PI) / 180;
+    const aoaRad = pitchRad + (TUNING.aoa0Deg * Math.PI) / 180;
+    const flapMult = s.flapsDeployed ? TUNING.flapsLift : 1;
+    const lift = this.kL * s.speed * s.speed * Math.sin(aoaRad) * flapMult * (1 - TUNING.stallLiftLoss * stallT);
+
+    const vsTarget = clamp(
+      (lift - GRAVITY) * TUNING.vsLiftFactor,
+      TUNING.maxSink,
+      stats.climbRate * TUNING.climbHeadroom,
+    );
+    s.verticalSpeed += (vsTarget - s.verticalSpeed) * (1 - Math.exp(-dt * TUNING.vsResponse));
+
+    if (stallT > 0) {
+      s.pitch = clamp(s.pitch - TUNING.stallNoseDownRate * stallT * dt, -30, 30);
+      this.onBuffet?.(stallT);
+    }
+
+    const wasAirborne = s.altitude > 0;
+    s.altitude = clamp(s.altitude + s.verticalSpeed * dt, 0, stats.maxAltitude);
+    if (wasAirborne && s.altitude <= 0) {
+      this.onTouchdown?.(s.verticalSpeed, s.speed);
+    }
+    if (s.altitude <= 0 && s.verticalSpeed < 0) s.verticalSpeed = 0; // resting on the ground
+
+    // ── Ground speed / distance (wind acts on track, not airspeed) ────────
+    s.groundSpeed = Math.max(0, s.speed + windX);
+    s.distanceTravelled += (s.groundSpeed * dt) / 1000;
+
+    // ── Fuel & engine temperature ─────────────────────────────────────────
+    const burnPerSecond = (stats.fuelBurnRate * effThrottle * s.modifiers.fuelBurnMult) / 60;
+    s.fuel = clamp(s.fuel - burnPerSecond * dt, 0, stats.fuelCapacity);
+
+    const tempTarget = effThrottle * 0.9;
+    const tempRate = tempTarget > s.engineTemp ? TUNING.tempHeatRate : TUNING.tempCoolRate;
+    s.engineTemp += (tempTarget - s.engineTemp) * (1 - Math.exp(-dt * tempRate));
+    s.engineTemp = clamp(s.engineTemp, 0, 1);
+
+    // ── Structural stress ─────────────────────────────────────────────────
+    if (s.speed > this.vMax * 0.95) {
+      s.integrity = clamp(s.integrity - TUNING.overspeedDamage * dt, 0, 100);
+    }
+    if (!this.gearFixed && s.gearDown && !onGround && s.speed > this.gearLimit && s.altitude > 5) {
+      s.integrity = clamp(s.integrity - TUNING.gearDragDamage * dt, 0, 100);
+    }
+
+    s.elapsedSeconds += dt;
   }
 }
