@@ -6,6 +6,7 @@ import { ParallaxWorld } from '../world/ParallaxWorld';
 import { WeatherFX } from '../world/WeatherFX';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
+import { CargoHold } from '../entities/CargoHold';
 import { EventBus } from '../utils/EventBus';
 import { fadeIn, fadeToScene, flashToScene } from '../utils/transitions';
 import type { FlightState, LandingQuality, LandingResult, WeatherCondition } from '../../types';
@@ -41,6 +42,8 @@ export class FlightScene extends Phaser.Scene {
   // ── Scene state ───────────────────────────────────────────────────────────
   private contractId!: string;
   private routeKm = 6;          // gameplay-scale route length to the destination
+  private cargo!: CargoHold;
+  private lastCargoEmit = 0;
   private landed      = false;
   private hasBeenAirborne = false;
   private gearToggleCooldown  = 0;
@@ -97,7 +100,7 @@ export class FlightScene extends Phaser.Scene {
     this.controller.onTouchdown = (vs, speed) => { this.pendingTouchdown = { vs, speed }; };
 
     this.weather = new WeatherSystem();
-    FlightEventService.reset();
+    FlightEventService.reset(definition);
 
     // ── Route length (gameplay scale, from the contract's settlements) ─────
     const save = SaveService.get();
@@ -112,6 +115,11 @@ export class FlightScene extends Phaser.Scene {
         this.routeKm = clamp(3 + loreKm / 40, 3, 15);
       }
     }
+
+    // ── Cargo hold: what's riding in the back ─────────────────────────────
+    this.cargo = new CargoHold(contract ?? null, window.gameData.goods);
+    this.lastCargoEmit = 0;
+    FlightEventService.onCargoDamage = amount => this.cargo.applyDamage(amount);
 
     // ── Build scene (back → front) ────────────────────────────────────────
     this.world    = new ParallaxWorld(this, width, height, groundY);
@@ -271,11 +279,24 @@ export class FlightScene extends Phaser.Scene {
     // ── Airborne tracking ──────────────────────────────────────────────────
     if (this.state.altitude > 5) this.hasBeenAirborne = true;
 
+    // ── Cargo condition ────────────────────────────────────────────────────
+    if (this.cargo.hasCargo) {
+      this.cargo.update(dt, turbulence);
+      if (this.state.elapsedSeconds - this.lastCargoEmit >= 1) {
+        this.lastCargoEmit = this.state.elapsedSeconds;
+        EventBus.emit('flight:cargo-update', {
+          average: this.cargo.averageCondition(),
+          count: this.cargo.slots.length,
+        });
+      }
+    }
+
     // ── Touchdown: grade the exact moment the wheels meet the ground ──────
     if (this.pendingTouchdown && this.hasBeenAirborne && !this.rollout) {
       const { vs, speed } = this.pendingTouchdown;
       const result = this.evaluateLanding(vs, speed);
       this.aircraft.notifyTouchdown(vs);
+      this.cargo.applyDamage(result.cargoDamagePercent);
 
       if (result.quality === 'crash') {
         this.cameras.main.shake(600, 14);
@@ -380,7 +401,13 @@ export class FlightScene extends Phaser.Scene {
   private finishFlight(result: LandingResult): void {
     if (this.landed) return;
     this.landed = true;
-    const data = { result, contractId: this.contractId, finalState: this.state };
+    const data = {
+      result,
+      contractId: this.contractId,
+      finalState: this.state,
+      cargoSlots: this.cargo.slots,
+      reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
+    };
     if (result.quality === 'crash') {
       flashToScene(this, 'PostFlightScene', data);
     } else {

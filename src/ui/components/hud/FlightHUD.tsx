@@ -1,5 +1,5 @@
 import React from 'react';
-import { useFlightState, useNotification, useEventModal, useGearFlaps } from '../../store/gameStore';
+import { useFlightState, useNotification, useEventModal, useGearFlaps, useCargo } from '../../store/gameStore';
 import { EventBus } from '../../../game/utils/EventBus';
 
 export function FlightHUD(): React.ReactElement | null {
@@ -7,6 +7,7 @@ export function FlightHUD(): React.ReactElement | null {
   const notification = useNotification();
   const event = useEventModal();
   const { gearDown, flapsDeployed } = useGearFlaps();
+  const cargo = useCargo();
 
   if (!state) return null;
 
@@ -27,6 +28,13 @@ export function FlightHUD(): React.ReactElement | null {
         <Gauge label="FUEL" value={`${state.fuel.toFixed(1)} L`} color={state.fuel < 15 ? '#ff4444' : undefined} />
         <Gauge label="ENG" value={`${tempPct}%`} color={tempColor} />
         <Gauge label="INT" value={`${state.integrity.toFixed(0)}%`} color={integrityColor} />
+        {cargo && (
+          <Gauge
+            label="CARGO"
+            value={`${cargo.average.toFixed(0)}%`}
+            color={cargo.average > 75 ? '#00ff88' : cargo.average > 45 ? '#ffd080' : '#ff4444'}
+          />
+        )}
         <div style={styles.toggles}>
           <span style={{ color: gearDown ? '#00ff88' : '#888' }}>GEAR {gearDown ? '▼' : '▲'}</span>
           <span style={{ color: flapsDeployed ? '#ffd080' : '#888' }}>FLAPS {flapsDeployed ? 'ON' : 'OFF'}</span>

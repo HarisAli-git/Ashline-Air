@@ -2,9 +2,8 @@ import type { SettlementDefinition, SettlementState, GoodState } from '../types'
 import { EventBus } from '../game/utils/EventBus';
 import { clamp, randomBetween } from '../game/utils/math';
 
-const PRICE_DRIFT_RATE = 0.02;      // max fractional drift per economy tick
-const SUPPLY_DRIFT_RATE = 1.5;      // max supply/demand point drift per tick
-const TICK_INTERVAL_MINUTES = 30;   // in-game minutes between economy ticks
+const PRICE_DRIFT_RATE = 0.02;      // max fractional drift per economy step
+const SUPPLY_DRIFT_RATE = 1.5;      // max supply/demand point drift per step
 
 class EconomyServiceClass {
   private definitions: SettlementDefinition[] = [];
@@ -32,9 +31,17 @@ class EconomyServiceClass {
     };
   }
 
-  tick(states: SettlementState[], gameTimestamp: number): SettlementState[] {
-    if (gameTimestamp % TICK_INTERVAL_MINUTES !== 0) return states;
+  /**
+   * Run `steps` drift iterations (TimeService calls this once per 30 in-game
+   * minutes elapsed). Returns the updated settlement states.
+   */
+  step(states: SettlementState[], steps: number): SettlementState[] {
+    let current = states;
+    for (let i = 0; i < steps; i++) current = this.driftOnce(current);
+    return current;
+  }
 
+  private driftOnce(states: SettlementState[]): SettlementState[] {
     const updated = states.map(state => {
       const def = this.definitions.find(d => d.id === state.definitionId);
       if (!def) return state;
@@ -94,7 +101,6 @@ class EconomyServiceClass {
       return { ...state, goodStates: newGoodStates, fuelPrice: Math.round(newFuelPrice * 10) / 10 };
     });
 
-    EventBus.emit('economy:tick', { gameTimestamp });
     return updated;
   }
 

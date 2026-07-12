@@ -1,5 +1,6 @@
-import type { FlightEventDefinition, FlightState, EventConsequence } from '../types';
+import type { FlightEventDefinition, FlightState, EventConsequence, AircraftDefinition } from '../types';
 import { EventBus } from '../game/utils/EventBus';
+import { SaveService } from './SaveService';
 import { clamp } from '../game/utils/math';
 
 interface ActiveEvent {
@@ -12,13 +13,27 @@ class FlightEventServiceClass {
   private activeEvents: ActiveEvent[] = [];
   private pendingChoice: FlightEventDefinition | null = null;
 
+  // Active aircraft stats so triggers scale to the airframe being flown
+  private fuelCapacity = 80;
+  private vCruise = 36;  // m/s
+  private vMax = 50;     // m/s
+
+  /** FlightScene calls this when an event damages the cargo hold. */
+  onCargoDamage: ((amount: number) => void) | null = null;
+
   initialise(definitions: FlightEventDefinition[]): void {
     this.definitions = definitions;
   }
 
-  reset(): void {
+  reset(def?: AircraftDefinition): void {
     this.activeEvents = [];
     this.pendingChoice = null;
+    this.onCargoDamage = null;
+    if (def) {
+      this.fuelCapacity = def.stats.fuelCapacity;
+      this.vCruise = def.stats.cruiseSpeed / 3.6;
+      this.vMax = def.stats.maxSpeed / 3.6;
+    }
   }
 
   checkEvents(state: FlightState): FlightEventDefinition | null {
@@ -91,11 +106,11 @@ class FlightEventServiceClass {
       case 'on_engine_temp_high':
         return state.engineTemp >= (def.triggerThreshold ?? 0.8);
       case 'on_fuel_low':
-        return state.fuel <= (def.triggerThreshold ?? 0.4) * 80; // 80L baseline
+        return state.fuel <= (def.triggerThreshold ?? 0.4) * this.fuelCapacity;
       case 'on_speed_low':
-        return state.speed <= (def.triggerThreshold ?? 0.5) * 30; // m/s
+        return state.speed <= (def.triggerThreshold ?? 0.5) * this.vCruise;
       case 'on_speed_high':
-        return state.speed >= (def.triggerThreshold ?? 0.9) * 80;
+        return state.speed >= (def.triggerThreshold ?? 0.9) * this.vMax;
       case 'on_altitude_low':
         return state.altitude <= (def.triggerThreshold ?? 100);
       case 'on_altitude_high':
@@ -112,7 +127,28 @@ class FlightEventServiceClass {
   private applyConsequence(state: FlightState, c: EventConsequence): FlightState {
     const next = { ...state, modifiers: { ...state.modifiers } };
 
-    if (c.type === 'add_money' || c.type === 'add_reputation' || c.type === 'add_cargo_damage') {
+    // Consequences that act on the player/world rather than the flight state
+    if (c.type === 'add_money') {
+      const save = SaveService.get();
+      save.player.money = Math.max(0, save.player.money + c.value);
+      SaveService.save(save.player, save.world);
+      EventBus.emit('player:money-changed', { amount: save.player.money, delta: c.value });
+      return next;
+    }
+    if (c.type === 'add_reputation') {
+      const save = SaveService.get();
+      const rep = save.player.reputation.find(r => r.factionId === c.target);
+      if (rep) {
+        rep.points = clamp(rep.points + c.value, 0, 1000);
+        SaveService.save(save.player, save.world);
+        EventBus.emit('player:reputation-changed', {
+          factionId: c.target, delta: c.value, total: rep.points,
+        });
+      }
+      return next;
+    }
+    if (c.type === 'add_cargo_damage') {
+      this.onCargoDamage?.(c.value);
       return next;
     }
 

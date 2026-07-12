@@ -23,6 +23,9 @@ export interface GameEvents {
   // Weather
   'weather:changed': { state: WeatherState };
 
+  // Cargo
+  'flight:cargo-update': { average: number; count: number };
+
   // Economy
   'economy:tick': { gameTimestamp: number };
   'economy:price-changed': { settlementId: string; goodId: string; newPrice: number };

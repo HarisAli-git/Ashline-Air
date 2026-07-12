@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { EventBus } from '../../game/utils/EventBus';
+import { SaveService } from '../../services/SaveService';
 import type { FlightState, FlightEventDefinition } from '../../types';
 
 /**
@@ -15,11 +16,21 @@ export function useFlightState(): FlightState | null {
 }
 
 export function useMoney(): number {
-  const [money, setMoney] = useState<number>(0);
+  const [money, setMoney] = useState<number>(() => SaveService.get().player.money);
   useEffect(() => {
     return EventBus.on('player:money-changed', ({ amount }) => setMoney(amount));
   }, []);
   return money;
+}
+
+export function useCargo(): { average: number; count: number } | null {
+  const [cargo, setCargo] = useState<{ average: number; count: number } | null>(null);
+  useEffect(() => {
+    const u1 = EventBus.on('flight:cargo-update', c => setCargo(c.count > 0 ? c : null));
+    const u2 = EventBus.on('scene:flight-complete', () => setCargo(null));
+    return () => { u1(); u2(); };
+  }, []);
+  return cargo;
 }
 
 export function useNotification(): { message: string; type: string } | null {

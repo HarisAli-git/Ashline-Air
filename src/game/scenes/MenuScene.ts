@@ -135,7 +135,7 @@ export class MenuScene extends Phaser.Scene {
       fontSize: '10px', color: '#3a3020', fontFamily: 'monospace',
     }).setOrigin(0, 0.5);
 
-    this.add.text(width - 14, height - 15, 'v0.1.0', {
+    this.add.text(width - 14, height - 15, 'v0.2.0', {
       fontSize: '10px', color: '#3a3020', fontFamily: 'monospace',
     }).setOrigin(1, 0.5);
   }

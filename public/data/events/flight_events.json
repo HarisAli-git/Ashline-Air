@@ -67,7 +67,7 @@
     "title": "Bird Strike",
     "description": "A flock of large birds appears from nowhere. A dull thud shakes the cockpit.",
     "trigger": "random",
-    "probability": 0.04,
+    "probability": 0.02,
     "cooldownSeconds": 300,
     "tags": ["random", "damage"],
     "choices": [
