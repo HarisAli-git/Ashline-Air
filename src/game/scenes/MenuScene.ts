@@ -2,6 +2,8 @@ import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
 import { EconomyService } from '../../services/EconomyService';
 import { ContractService } from '../../services/ContractService';
+import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
+import type { FlightState } from '../../types';
 
 interface Star  { x: number; y: number; r: number; phase: number; spd: number; }
 interface Dust  { x: number; y: number; alpha: number; sz: number; vx: number; vy: number; }
@@ -11,7 +13,8 @@ export class MenuScene extends Phaser.Scene {
   private animGfx!:   Phaser.GameObjects.Graphics;
   private stars:  Star[]  = [];
   private dust:   Dust[]  = [];
-  private planeImg!: Phaser.GameObjects.Image;
+  private menuPlane: AircraftSprite | null = null;
+  private menuPlaneState!: FlightState;
   private t = 0;
 
   constructor() {
@@ -32,21 +35,26 @@ export class MenuScene extends Phaser.Scene {
     // Animated overlay (cleared + redrawn every frame)
     this.animGfx = this.add.graphics();
 
-    // ── Aircraft silhouette crossing behind the title ───────────────────────
-    // setFlipX(true) so the plane faces RIGHT (source image faces left)
-    this.planeImg = this.add.image(-200, height * 0.44, 'cargo_plane')
-      .setDisplaySize(200, 112)
-      .setAlpha(0.28)
-      .setFlipX(true);
+    // ── Procedural aircraft crossing behind the title ───────────────────────
+    const def = window.gameData.aircraft.find(a => a.id === 'crop_duster') ?? window.gameData.aircraft[0];
+    this.menuPlane = new AircraftSprite(this, -180, height * 0.44, def);
+    this.menuPlane.container.setScale(0.6);
+    this.menuPlane.container.setAlpha(0.55);
+    this.menuPlaneState = {
+      throttle: 0.65, pitch: 1.5, speed: 30, groundSpeed: 30, altitude: 400, verticalSpeed: 0,
+      heading: 0, fuel: 60, engineTemp: 0.35, integrity: 100,
+      gearDown: true, flapsDeployed: false, distanceTravelled: 0, elapsedSeconds: 0,
+      modifiers: { fuelBurnMult: 1, dragMult: 1 },
+    };
 
     this.tweens.add({
-      targets: this.planeImg,
+      targets: this.menuPlane.container,
       x: width + 200,
       duration: 22000,
       ease: 'Linear',
       repeat: -1,
       onRepeat: () => {
-        this.planeImg.setY(Phaser.Math.FloatBetween(height * 0.30, height * 0.54));
+        this.menuPlane?.container.setY(Phaser.Math.FloatBetween(height * 0.30, height * 0.54));
       },
     });
 
@@ -199,6 +207,10 @@ export class MenuScene extends Phaser.Scene {
     const { width, height } = this.cameras.main;
     const horizonY = Math.round(height * 0.62);
     this.t += delta / 1000;
+
+    // Keep the fly-by plane animated (spinning prop, beacon, exhaust)
+    this.menuPlaneState.elapsedSeconds = this.t;
+    this.menuPlane?.update(delta / 1000, this.menuPlaneState);
 
     const g = this.animGfx;
     g.clear();

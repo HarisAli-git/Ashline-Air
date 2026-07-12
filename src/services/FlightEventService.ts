@@ -94,9 +94,20 @@ class FlightEventServiceClass {
   }
 
   private applyConsequence(state: FlightState, c: EventConsequence): FlightState {
-    const next = { ...state };
+    const next = { ...state, modifiers: { ...state.modifiers } };
 
     if (c.type === 'add_money' || c.type === 'add_reputation' || c.type === 'add_cargo_damage') {
+      return next;
+    }
+
+    // fuelBurnRate isn't part of FlightState — it routes to the burn multiplier
+    if (c.target === 'fuelBurnRate') {
+      switch (c.type) {
+        case 'multiply': next.modifiers.fuelBurnMult *= c.value; break;
+        case 'delta':    next.modifiers.fuelBurnMult += c.value; break;
+        case 'set':      next.modifiers.fuelBurnMult  = c.value; break;
+      }
+      next.modifiers.fuelBurnMult = clamp(next.modifiers.fuelBurnMult, 0.2, 5);
       return next;
     }
 

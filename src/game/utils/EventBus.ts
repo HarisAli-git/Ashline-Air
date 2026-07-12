@@ -1,4 +1,4 @@
-import type { FlightState, LandingResult, Contract, FlightEventDefinition } from '../../types';
+import type { FlightState, LandingResult, Contract, FlightEventDefinition, WeatherState } from '../../types';
 
 /**
  * Typed event map for all cross-system communication.
@@ -19,6 +19,9 @@ export interface GameEvents {
   'flight:fuel-critical': { fuelRemaining: number };
   'flight:gear-toggled': { down: boolean };
   'flight:flaps-toggled': { deployed: boolean };
+
+  // Weather
+  'weather:changed': { state: WeatherState };
 
   // Economy
   'economy:tick': { gameTimestamp: number };

@@ -49,6 +49,11 @@ export class FlightScene extends Phaser.Scene {
   private lastEventCheckAt = 0;
   private eventUnsubs: Array<() => void> = [];
 
+  // ── Landing state ─────────────────────────────────────────────────────────
+  private pendingTouchdown: { vs: number; speed: number } | null = null;
+  private rollout = false;
+  private rolloutResult: LandingResult | null = null;
+
   // ── Animation state ───────────────────────────────────────────────────────
   private scrollX       = 0;     // cumulative world scroll (m)
   private lastSkyAlt    = -999;
@@ -71,6 +76,9 @@ export class FlightScene extends Phaser.Scene {
     this.engineRunning       = true;
     this.eventModalOpen      = false;
     this.lastEventCheckAt    = 0;
+    this.pendingTouchdown    = null;
+    this.rollout             = false;
+    this.rolloutResult       = null;
   }
 
   create(): void {
@@ -86,6 +94,10 @@ export class FlightScene extends Phaser.Scene {
     this.state.integrity   = owned.integrity;
     this.state.engineTemp  = owned.engineTemp;
 
+    // Stall buffet shakes the camera; touchdown captures true impact values
+    this.controller.onBuffet = () => { this.shakeDuration = Math.max(this.shakeDuration, 150); };
+    this.controller.onTouchdown = (vs, speed) => { this.pendingTouchdown = { vs, speed }; };
+
     this.weather = new WeatherSystem(this);
     FlightEventService.reset();
 
@@ -95,8 +107,8 @@ export class FlightScene extends Phaser.Scene {
     this.mountainGfx = this.add.graphics();
     this.hillGfx     = this.add.graphics();
     this.groundGfx   = this.add.graphics();
-    // ── Layered aircraft ─────────────────────────────────────────────────
-    this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY);
+    // ── Procedural aircraft ──────────────────────────────────────────────
+    this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
 
     // ── HUD ───────────────────────────────────────────────────────────────
     this.throttleBarGfx = this.add.graphics();
@@ -373,8 +385,7 @@ export class FlightScene extends Phaser.Scene {
       throttleDown: this.keys.S.isDown,
       pitchUp:      this.keys.A.isDown,
       pitchDown:    this.keys.D.isDown,
-      toggleGear:   false,
-      toggleFlaps:  false,
+      engineOn:     this.engineRunning,
     };
 
     if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
@@ -388,10 +399,15 @@ export class FlightScene extends Phaser.Scene {
       }
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.G) && this.gearToggleCooldown === 0) {
-      this.state.gearDown = !this.state.gearDown;
-      this.aircraft.setGearDown(this.state.gearDown);
-      this.gearToggleCooldown = 500;
-      EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
+      if (!this.aircraft.hasRetractableGear) {
+        EventBus.emit('ui:show-notification', { message: 'This aircraft has fixed landing gear.', type: 'info' });
+        this.gearToggleCooldown = 500;
+      } else {
+        this.state.gearDown = !this.state.gearDown;
+        this.aircraft.setGearDown(this.state.gearDown);
+        this.gearToggleCooldown = 500;
+        EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
+      }
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.F) && this.flapsToggleCooldown === 0) {
       this.state.flapsDeployed = !this.state.flapsDeployed;
@@ -405,8 +421,8 @@ export class FlightScene extends Phaser.Scene {
       return;
     }
 
-    // ── Physics ────────────────────────────────────────────────────────────
-    this.state = this.controller.update(this.state, input);
+    // ── Physics (fixed-step, frame-rate independent) ───────────────────────
+    this.state = this.controller.update(this.state, input, dt);
 
     // ── Weather ────────────────────────────────────────────────────────────
     this.weather.update(delta);
@@ -440,9 +456,41 @@ export class FlightScene extends Phaser.Scene {
     // ── Airborne tracking ──────────────────────────────────────────────────
     if (this.state.altitude > 5) this.hasBeenAirborne = true;
 
-    // Fuel exhausted on ground after flight
-    if (this.hasBeenAirborne && this.state.fuel <= 0 && this.state.altitude <= 0) {
-      this.triggerLanding();
+    // ── Touchdown: grade the exact moment the wheels meet the ground ──────
+    if (this.pendingTouchdown && this.hasBeenAirborne && !this.rollout) {
+      const { vs, speed } = this.pendingTouchdown;
+      const result = this.evaluateLanding(vs, speed);
+      this.aircraft.notifyTouchdown(vs);
+
+      if (result.quality === 'crash') {
+        this.cameras.main.shake(600, 14);
+        this.finishFlight(result);
+        return;
+      }
+      if (result.quality === 'hard') this.cameras.main.shake(450, 7);
+      this.rollout = true;
+      this.rolloutResult = result;
+    }
+    this.pendingTouchdown = null;
+
+    // ── Rollout: brake to a stop (throttling up again = touch-and-go) ─────
+    if (this.rollout) {
+      if (this.state.altitude > 0.5) {
+        this.rollout = false;
+        this.rolloutResult = null;
+      } else {
+        this.state.speed = Math.max(0, this.state.speed - 6 * dt);
+        this.state.groundSpeed = this.state.speed;
+        if (this.state.speed < 3) {
+          this.finishFlight(this.rolloutResult!);
+          return;
+        }
+      }
+    }
+
+    // Fuel exhausted and rolled to a stop without a graded touchdown
+    if (this.hasBeenAirborne && this.state.fuel <= 0 && this.state.altitude <= 0 && this.state.speed < 1) {
+      this.finishFlight(this.evaluateLanding(Math.abs(this.state.verticalSpeed), this.state.speed));
       return;
     }
 
@@ -452,8 +500,8 @@ export class FlightScene extends Phaser.Scene {
       FlightEventService.checkEvents(this.state);
     }
 
-    // ── Parallax scroll ────────────────────────────────────────────────────
-    this.scrollX += this.state.speed * dt;
+    // ── Parallax scroll (ground speed: wind matters) ───────────────────────
+    this.scrollX += this.state.groundSpeed * dt;
 
     // Sky redraws only on meaningful altitude change (expensive gradient)
     if (Math.abs(this.state.altitude - this.lastSkyAlt) > 40) {
@@ -470,11 +518,6 @@ export class FlightScene extends Phaser.Scene {
     const altPixels = (this.state.altitude / MAX_DISPLAY_ALT) * (groundY - 100);
     const screenY   = clamp(groundY - altPixels, 80, groundY);
     this.aircraft.container.setY(screenY);
-    this.aircraft.shadowImg.setX(AIRCRAFT_X);
-    this.aircraft.shadowImg.setY(groundY + 4);
-    this.aircraft.updateShadow(this.state.altitude);
-    // Cut throttle to 0 in physics when engine is off
-    if (!this.engineRunning) this.state.throttle = 0;
     this.aircraft.update(dt, this.state);
 
     // ── Camera shake ───────────────────────────────────────────────────────
@@ -489,31 +532,20 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Events to React ────────────────────────────────────────────────────
     EventBus.emit('flight:state-update', this.state);
-
-    // ── Landing check ──────────────────────────────────────────────────────
-    if (this.hasBeenAirborne && this.state.altitude <= 0 && this.state.speed < 12 && this.state.gearDown) {
-      this.triggerLanding();
-    }
   }
 
   // ── Landing ───────────────────────────────────────────────────────────────
 
-  private triggerLanding(): void {
+  private finishFlight(result: LandingResult): void {
     if (this.landed) return;
     this.landed = true;
-
-    // Hard landing shake
-    const result = this.evaluateLanding();
-    if (result.quality === 'hard' || result.quality === 'crash') {
-      this.cameras.main.shake(600, result.quality === 'crash' ? 14 : 6);
-    }
-
     this.scene.start('PostFlightScene', { result, contractId: this.contractId, finalState: this.state });
   }
 
-  private evaluateLanding(): LandingResult {
-    const vSpeed = Math.abs(this.state.verticalSpeed);
-    const hSpeed = this.state.speed;
+  /** Grades the landing from the impact values captured at touchdown. */
+  private evaluateLanding(vSpeedAtImpact: number, hSpeedAtImpact: number): LandingResult {
+    const vSpeed = Math.abs(vSpeedAtImpact);
+    const hSpeed = hSpeedAtImpact;
 
     let quality: LandingQuality;
     let integrityDamage: number;
