@@ -14,8 +14,7 @@ export function EconomyScreen({ settlementId }: Props): React.ReactElement {
   const save = SaveService.get();
   const settlement = window.gameData.settlements.find(s => s.id === settlementId)!;
   const settlementState = save.world.settlements.find(s => s.definitionId === settlementId)!;
-  const owned = save.player.ownedAircraft[parseInt(save.player.activeAircraftId)];
-  const def = window.gameData.aircraft.find(a => a.id === owned.definitionId)!;
+  const { owned, def } = SaveService.getActiveAircraft();
 
   const fuelNeeded = def.stats.fuelCapacity - owned.fuel;
   const fuelCost = EconomyService.fuelCost(settlementState, fuelNeeded);

@@ -56,39 +56,34 @@ export class PreFlightScene extends Phaser.Scene {
   }
 
   private buildFlyButton(cx: number, y: number): void {
-    const save = SaveService.get();
-    const hasActiveContract = save.player.activeContractId !== null;
-
-    const text = this.add.text(cx, y, hasActiveContract ? 'FLY →' : 'Select a contract first', {
+    const text = this.add.text(cx, y, 'Select a contract first', {
       fontSize: '22px',
-      color: hasActiveContract ? '#ffd080' : '#4a4030',
+      color: '#4a4030',
       fontFamily: 'monospace',
       fontStyle: 'bold',
     }).setOrigin(0.5, 1);
 
-    if (hasActiveContract) {
-      text.setInteractive({ useHandCursor: true });
-      text.on('pointerover', () => text.setStyle({ color: '#ffffff' }));
-      text.on('pointerout',  () => text.setStyle({ color: '#ffd080' }));
-      text.on('pointerdown', () => {
-        EventBus.emit('scene:start-flight', { contractId: save.player.activeContractId! });
-        this.scene.start('FlightScene', { contractId: save.player.activeContractId! });
-      });
-    }
-
-    // React may enable the button after contract acceptance
-    const unsubAccepted = EventBus.on('contract:accepted', () => {
-      text.setText('FLY →');
-      text.setStyle({ color: '#ffd080' });
+    let enabled = false;
+    const enable = (): void => {
+      if (enabled) return;
+      enabled = true;
+      text.setText('FLY →').setStyle({ color: '#ffd080' });
       text.setInteractive({ useHandCursor: true });
       text.on('pointerover', () => text.setStyle({ color: '#ffffff' }));
       text.on('pointerout',  () => text.setStyle({ color: '#ffd080' }));
       text.on('pointerdown', () => {
         const s = SaveService.get();
-        EventBus.emit('scene:start-flight', { contractId: s.player.activeContractId! });
-        this.scene.start('FlightScene', { contractId: s.player.activeContractId! });
+        if (!s.player.activeContractId) return;
+        EventBus.emit('scene:start-flight', { contractId: s.player.activeContractId });
+        this.scene.start('FlightScene', { contractId: s.player.activeContractId });
       });
-    });
+    };
+
+    if (SaveService.get().player.activeContractId !== null) enable();
+
+    // React enables the button after contract acceptance; guard against
+    // stacking duplicate pointer handlers on repeated accepts.
+    const unsubAccepted = EventBus.on('contract:accepted', enable);
     this.events.once('shutdown', unsubAccepted);
   }
 }

@@ -2,12 +2,13 @@ import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
 import { EventBus } from '../utils/EventBus';
 import { ContractService } from '../../services/ContractService';
-import type { LandingResult, Contract, OwnedAircraft } from '../../types';
+import type { LandingResult, Contract, FlightState } from '../../types';
 import { clamp } from '../utils/math';
 
 interface PostFlightData {
   result: LandingResult;
   contractId: string;
+  finalState: FlightState;
 }
 
 export class PostFlightScene extends Phaser.Scene {
@@ -16,9 +17,12 @@ export class PostFlightScene extends Phaser.Scene {
   }
 
   create(data: PostFlightData): void {
-    const { result, contractId } = data;
+    const { result, contractId, finalState } = data;
     const { width, height } = this.cameras.main;
     const cx = width / 2;
+
+    // Tell React the flight is over so the FlightHUD overlay unmounts
+    EventBus.emit('scene:flight-complete', { result, contractId });
 
     this.cameras.main.setBackgroundColor('#100c04');
 
@@ -28,9 +32,11 @@ export class PostFlightScene extends Phaser.Scene {
 
     const { payout, repGain, bonusEarned } = this.calculateRewards(result, contract);
 
-    // Update player state
-    const aircraft = save.player.ownedAircraft[parseInt(save.player.activeAircraftId)];
-    aircraft.integrity = clamp(aircraft.integrity - result.integrityDamage, 0, 100);
+    // Update player state — the flight consumed fuel and stressed the engine
+    const { owned: aircraft, def } = SaveService.getActiveAircraft();
+    aircraft.integrity  = clamp(aircraft.integrity - result.integrityDamage, 0, 100);
+    aircraft.fuel       = clamp(finalState.fuel, 0, def.stats.fuelCapacity);
+    aircraft.engineTemp = clamp(finalState.engineTemp, 0, 1);
 
     if (contract) {
       if (result.quality !== 'crash') {
@@ -55,6 +61,8 @@ export class PostFlightScene extends Phaser.Scene {
 
     save.player.activeContractId = null;
     save.player.stats.totalFlights++;
+    save.player.stats.totalDistanceKm += finalState.distanceTravelled;
+    if (contract && result.quality !== 'crash') save.player.stats.totalEarned += payout;
     if (result.quality === 'perfect') save.player.stats.perfectLandings++;
     SaveService.save(save.player, save.world);
 
@@ -117,6 +125,7 @@ export class PostFlightScene extends Phaser.Scene {
     }
 
     this.makeButton(cx, height - 60, 'RETURN TO MAP', () => {
+      EventBus.emit('scene:return-to-map');
       this.scene.start('MapScene');
     });
   }

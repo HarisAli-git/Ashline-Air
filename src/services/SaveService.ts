@@ -1,4 +1,4 @@
-import type { SaveData, PlayerState, WorldState } from '../types';
+import type { SaveData, PlayerState, WorldState, OwnedAircraft, AircraftDefinition } from '../types';
 import { EventBus } from '../game/utils/EventBus';
 
 const SAVE_KEY = 'ashline_air_save';
@@ -91,6 +91,22 @@ class SaveServiceClass {
   get(): SaveData {
     if (!this.current) return this.load();
     return this.current;
+  }
+
+  /**
+   * Bounds-checked lookup of the player's active aircraft.
+   * `activeAircraftId` is stored as a stringified array index; fall back to
+   * slot 0 rather than crashing on a stale or malformed id.
+   */
+  getActiveAircraft(): { owned: OwnedAircraft; def: AircraftDefinition } {
+    const save = this.get();
+    const idx = Number.parseInt(save.player.activeAircraftId, 10);
+    const owned =
+      (Number.isFinite(idx) ? save.player.ownedAircraft[idx] : undefined) ??
+      save.player.ownedAircraft[0];
+    const def = window.gameData.aircraft.find(a => a.id === owned.definitionId);
+    if (!def) throw new Error(`[SaveService] Unknown aircraft definition: ${owned.definitionId}`);
+    return { owned, def };
   }
 
   private migrate(data: SaveData): SaveData {

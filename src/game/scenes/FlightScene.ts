@@ -5,9 +5,8 @@ import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
 import { EventBus } from '../utils/EventBus';
-import type { FlightState, AircraftDefinition, LandingQuality, LandingResult } from '../../types';
+import type { FlightState, LandingQuality, LandingResult } from '../../types';
 import { clamp } from '../utils/math';
-import { findById } from '../utils/DataLoader';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
 const GROUND_Y_OFFSET = 110;  // px from screen bottom to ground line
@@ -46,6 +45,9 @@ export class FlightScene extends Phaser.Scene {
   private hasBeenAirborne = false;
   private gearToggleCooldown  = 0;
   private flapsToggleCooldown = 0;
+  private eventModalOpen   = false;
+  private lastEventCheckAt = 0;
+  private eventUnsubs: Array<() => void> = [];
 
   // ── Animation state ───────────────────────────────────────────────────────
   private scrollX       = 0;     // cumulative world scroll (m)
@@ -67,6 +69,8 @@ export class FlightScene extends Phaser.Scene {
     this.gearToggleCooldown  = 0;
     this.flapsToggleCooldown = 0;
     this.engineRunning       = true;
+    this.eventModalOpen      = false;
+    this.lastEventCheckAt    = 0;
   }
 
   create(): void {
@@ -74,9 +78,7 @@ export class FlightScene extends Phaser.Scene {
     const groundY = height - GROUND_Y_OFFSET;
 
     // ── Physics init ──────────────────────────────────────────────────────
-    const save        = SaveService.get();
-    const owned       = save.player.ownedAircraft[parseInt(save.player.activeAircraftId)];
-    const definition  = findById<AircraftDefinition>(window.gameData.aircraft, owned.definitionId);
+    const { owned, def: definition } = SaveService.getActiveAircraft();
 
     this.controller = new AircraftController(definition);
     this.state      = this.controller.initialState();
@@ -132,6 +134,21 @@ export class FlightScene extends Phaser.Scene {
       F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
       ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
     };
+
+    // ── Event modal wiring ────────────────────────────────────────────────
+    // Physics pauses while a flight-event modal is up; the chosen consequence
+    // is applied to the authoritative state here (React only reports the choice).
+    this.eventUnsubs = [
+      EventBus.on('ui:show-event-modal',  () => { this.eventModalOpen = true; }),
+      EventBus.on('ui:close-event-modal', () => { this.eventModalOpen = false; }),
+      EventBus.on('flight:apply-event-choice', ({ choiceId }) => {
+        this.state = FlightEventService.applyChoice(choiceId, this.state);
+      }),
+    ];
+    this.events.once('shutdown', () => {
+      this.eventUnsubs.forEach(u => u());
+      this.eventUnsubs = [];
+    });
 
     // ── First draw ────────────────────────────────────────────────────────
     this.drawSky(width, height, groundY, 0);
@@ -340,7 +357,7 @@ export class FlightScene extends Phaser.Scene {
   // ── Main loop ─────────────────────────────────────────────────────────────
 
   update(time: number, delta: number): void {
-    if (this.landed) return;
+    if (this.landed || this.eventModalOpen) return;
 
     const dt = delta / 1000;
     const { width, height } = this.cameras.main;
@@ -429,8 +446,9 @@ export class FlightScene extends Phaser.Scene {
       return;
     }
 
-    // Flight events
-    if (Math.floor(this.state.elapsedSeconds) % 3 === 0) {
+    // Flight events — at most one check every 3 seconds
+    if (this.state.elapsedSeconds - this.lastEventCheckAt >= 3) {
+      this.lastEventCheckAt = this.state.elapsedSeconds;
       FlightEventService.checkEvents(this.state);
     }
 
@@ -490,7 +508,7 @@ export class FlightScene extends Phaser.Scene {
       this.cameras.main.shake(600, result.quality === 'crash' ? 14 : 6);
     }
 
-    this.scene.start('PostFlightScene', { result, contractId: this.contractId });
+    this.scene.start('PostFlightScene', { result, contractId: this.contractId, finalState: this.state });
   }
 
   private evaluateLanding(): LandingResult {

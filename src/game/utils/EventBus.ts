@@ -15,6 +15,7 @@ export interface GameEvents {
   'flight:state-update': FlightState;
   'flight:event-triggered': { event: FlightEventDefinition };
   'flight:event-choice': { eventId: string; choiceId: string };
+  'flight:apply-event-choice': { choiceId: string };
   'flight:fuel-critical': { fuelRemaining: number };
   'flight:gear-toggled': { down: boolean };
   'flight:flaps-toggled': { deployed: boolean };

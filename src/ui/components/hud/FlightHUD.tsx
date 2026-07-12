@@ -1,6 +1,6 @@
 import React from 'react';
 import { useFlightState, useNotification, useEventModal, useGearFlaps } from '../../store/gameStore';
-import { FlightEventService } from '../../../services/FlightEventService';
+import { EventBus } from '../../../game/utils/EventBus';
 
 export function FlightHUD(): React.ReactElement | null {
   const state = useFlightState();
@@ -51,7 +51,7 @@ export function FlightHUD(): React.ReactElement | null {
                 <button
                   key={choice.id}
                   style={styles.choiceBtn}
-                  onClick={() => FlightEventService.applyChoice(choice.id, state)}
+                  onClick={() => EventBus.emit('flight:apply-event-choice', { choiceId: choice.id })}
                 >
                   {choice.label}
                 </button>
