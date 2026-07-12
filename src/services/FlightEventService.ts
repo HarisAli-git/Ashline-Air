@@ -25,27 +25,43 @@ class FlightEventServiceClass {
     if (this.pendingChoice) return null; // one event at a time
 
     for (const def of this.definitions) {
+      if (def.trigger === 'on_weather_change') continue; // fired via checkWeatherEvents
       if (!this.shouldTrigger(def, state)) continue;
       if (Math.random() > def.probability) continue;
-
-      const tracked = this.activeEvents.find(e => e.event.id === def.id);
-      const elapsed = state.elapsedSeconds;
-      if (tracked && elapsed - tracked.lastFiredAt < def.cooldownSeconds) continue;
-
-      // Mark as triggered
-      if (tracked) {
-        tracked.lastFiredAt = elapsed;
-      } else {
-        this.activeEvents.push({ event: def, lastFiredAt: elapsed });
-      }
-
-      this.pendingChoice = def;
-      EventBus.emit('ui:show-event-modal', { event: def });
-      EventBus.emit('flight:event-triggered', { event: def });
-      return def;
+      if (this.tryFire(def, state.elapsedSeconds)) return def;
     }
 
     return null;
+  }
+
+  /** Called when the WeatherSystem announces a condition change. */
+  checkWeatherEvents(state: FlightState): FlightEventDefinition | null {
+    if (this.pendingChoice) return null;
+
+    for (const def of this.definitions) {
+      if (def.trigger !== 'on_weather_change') continue;
+      if (Math.random() > def.probability) continue;
+      if (this.tryFire(def, state.elapsedSeconds)) return def;
+    }
+
+    return null;
+  }
+
+  /** Cooldown-gated firing shared by all trigger paths. */
+  private tryFire(def: FlightEventDefinition, elapsed: number): boolean {
+    const tracked = this.activeEvents.find(e => e.event.id === def.id);
+    if (tracked && elapsed - tracked.lastFiredAt < def.cooldownSeconds) return false;
+
+    if (tracked) {
+      tracked.lastFiredAt = elapsed;
+    } else {
+      this.activeEvents.push({ event: def, lastFiredAt: elapsed });
+    }
+
+    this.pendingChoice = def;
+    EventBus.emit('ui:show-event-modal', { event: def });
+    EventBus.emit('flight:event-triggered', { event: def });
+    return true;
   }
 
   applyChoice(choiceId: string, state: FlightState): FlightState {

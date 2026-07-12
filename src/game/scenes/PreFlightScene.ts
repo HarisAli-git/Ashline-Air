@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
-import { EconomyService } from '../../services/EconomyService';
 import { EventBus } from '../utils/EventBus';
+import { fadeIn, fadeToScene } from '../utils/transitions';
 import type { SettlementDefinition, SettlementState, Contract } from '../../types';
 
 interface PreFlightSceneData {
@@ -24,6 +24,7 @@ export class PreFlightScene extends Phaser.Scene {
 
   create(): void {
     this.cameras.main.setBackgroundColor('#100c04');
+    fadeIn(this);
     const { width, height } = this.cameras.main;
     const cx = width / 2;
 
@@ -48,7 +49,7 @@ export class PreFlightScene extends Phaser.Scene {
       .on('pointerout',  function(this: Phaser.GameObjects.Text) { this.setStyle({ color: '#8a7a5a' }); })
       .on('pointerdown', () => {
         EventBus.emit('scene:return-to-map');
-        this.scene.start('MapScene');
+        fadeToScene(this, 'MapScene');
       });
 
     // "Fly" button — enabled only when a contract is active
@@ -75,7 +76,7 @@ export class PreFlightScene extends Phaser.Scene {
         const s = SaveService.get();
         if (!s.player.activeContractId) return;
         EventBus.emit('scene:start-flight', { contractId: s.player.activeContractId });
-        this.scene.start('FlightScene', { contractId: s.player.activeContractId });
+        fadeToScene(this, 'FlightScene', { contractId: s.player.activeContractId });
       });
     };
 

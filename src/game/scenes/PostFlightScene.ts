@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
 import { EventBus } from '../utils/EventBus';
+import { fadeIn, fadeToScene } from '../utils/transitions';
 import { ContractService } from '../../services/ContractService';
 import type { LandingResult, Contract, FlightState } from '../../types';
 import { clamp } from '../utils/math';
@@ -25,6 +26,7 @@ export class PostFlightScene extends Phaser.Scene {
     EventBus.emit('scene:flight-complete', { result, contractId });
 
     this.cameras.main.setBackgroundColor('#100c04');
+    fadeIn(this, 400);
 
     const save = SaveService.get();
     const contract = save.world.availableContracts.find(c => c.id === contractId)
@@ -126,7 +128,7 @@ export class PostFlightScene extends Phaser.Scene {
 
     this.makeButton(cx, height - 60, 'RETURN TO MAP', () => {
       EventBus.emit('scene:return-to-map');
-      this.scene.start('MapScene');
+      fadeToScene(this, 'MapScene');
     });
   }
 

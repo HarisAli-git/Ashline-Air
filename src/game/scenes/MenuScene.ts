@@ -3,16 +3,20 @@ import { SaveService } from '../../services/SaveService';
 import { EconomyService } from '../../services/EconomyService';
 import { ContractService } from '../../services/ContractService';
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
+import { fadeIn, fadeToScene } from '../utils/transitions';
 import type { FlightState } from '../../types';
 
-interface Star  { x: number; y: number; r: number; phase: number; spd: number; }
-interface Dust  { x: number; y: number; alpha: number; sz: number; vx: number; vy: number; }
+interface Star   { x: number; y: number; r: number; phase: number; spd: number; }
+interface Dust   { x: number; y: number; alpha: number; sz: number; vx: number; vy: number; }
+interface Meteor { x: number; y: number; vx: number; vy: number; life: number; }
 
 export class MenuScene extends Phaser.Scene {
   private staticGfx!: Phaser.GameObjects.Graphics;
   private animGfx!:   Phaser.GameObjects.Graphics;
   private stars:  Star[]  = [];
   private dust:   Dust[]  = [];
+  private meteors: Meteor[] = [];
+  private nextMeteorIn = 4;
   private menuPlane: AircraftSprite | null = null;
   private menuPlaneState!: FlightState;
   private t = 0;
@@ -25,6 +29,10 @@ export class MenuScene extends Phaser.Scene {
     const { width, height } = this.cameras.main;
     const cx = width / 2;
     const horizonY = Math.round(height * 0.62);
+    fadeIn(this, 400);
+    this.stars = [];
+    this.dust = [];
+    this.meteors = [];
 
     // ── Static scene layers ─────────────────────────────────────────────────
     this.staticGfx = this.add.graphics();
@@ -101,12 +109,12 @@ export class MenuScene extends Phaser.Scene {
         save.world.gameTimestamp
       );
       SaveService.save(save.player, save.world);
-      this.scene.start('MapScene');
+      fadeToScene(this, 'MapScene');
     });
 
     if (SaveService.hasSave()) {
       this.makeButton(cx, height * 0.595, 'CONTINUE', () => {
-        this.scene.start('MapScene');
+        fadeToScene(this, 'MapScene');
       });
     } else {
       this.add.text(cx, height * 0.595, 'CONTINUE', {
@@ -220,6 +228,32 @@ export class MenuScene extends Phaser.Scene {
       const tw = 0.5 + 0.5 * Math.sin(this.t * s.spd + s.phase);
       g.fillStyle(0xfff4e0, tw * 0.45);
       g.fillRect(s.x, s.y, s.r, s.r);
+    }
+
+    // Occasional meteor streaking down the night sky
+    this.nextMeteorIn -= delta / 1000;
+    if (this.nextMeteorIn <= 0) {
+      this.nextMeteorIn = 5 + Math.random() * 9;
+      this.meteors.push({
+        x: Phaser.Math.FloatBetween(width * 0.2, width),
+        y: Phaser.Math.FloatBetween(10, horizonY * 0.4),
+        vx: -Phaser.Math.FloatBetween(240, 420),
+        vy: Phaser.Math.FloatBetween(90, 160),
+        life: 1,
+      });
+    }
+    for (let i = this.meteors.length - 1; i >= 0; i--) {
+      const m = this.meteors[i];
+      m.x += m.vx * (delta / 1000);
+      m.y += m.vy * (delta / 1000);
+      m.life -= delta / 900;
+      if (m.life <= 0 || m.y > horizonY) { this.meteors.splice(i, 1); continue; }
+      // Tail trails opposite the velocity vector
+      const tail = 26 * m.life;
+      g.lineStyle(1.5, 0xffe0b0, 0.7 * m.life);
+      g.lineBetween(m.x, m.y, m.x - (m.vx / 420) * tail, m.y - (m.vy / 420) * tail);
+      g.fillStyle(0xfff4e0, 0.9 * m.life);
+      g.fillCircle(m.x, m.y, 1.4);
     }
 
     // Floating dust
