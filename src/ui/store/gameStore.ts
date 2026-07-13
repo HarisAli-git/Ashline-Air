@@ -23,6 +23,16 @@ export function useMoney(): number {
   return money;
 }
 
+export function useRouteInfo(): { routeKm: number; destinationName: string } | null {
+  const [info, setInfo] = useState<{ routeKm: number; destinationName: string } | null>(null);
+  useEffect(() => {
+    const u1 = EventBus.on('flight:route-info', setInfo);
+    const u2 = EventBus.on('scene:flight-complete', () => setInfo(null));
+    return () => { u1(); u2(); };
+  }, []);
+  return info;
+}
+
 export function useCargo(): { average: number; count: number } | null {
   const [cargo, setCargo] = useState<{ average: number; count: number } | null>(null);
   useEffect(() => {

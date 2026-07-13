@@ -10,16 +10,17 @@ const GRAVITY = 9.81; // m/s²
  * stats (see the constructor) so every airframe obeys the same equations.
  */
 export const TUNING = {
-  throttleRate: 0.6,        // throttle change per second of key held
+  throttleRate: 0.9,        // throttle change per second of key held
   pitchRate: 40,            // degrees per second
   pitchAutoLevel: 4,        // 1/s exponential ground auto-level
-  thrustTimeConstant: 8,    // seconds to ~63% of vMax at full throttle
+  thrustTimeConstant: 6,    // seconds to ~63% of vMax at full throttle
   aoa0Deg: 3,               // built-in wing incidence
   cruisePitchDeg: 2,        // pitch needed for level flight at cruise speed
   vsLiftFactor: 1.2,        // (lift − g) → target vertical speed
-  vsResponse: 2.5,          // 1/s convergence of vertical speed
+  vsResponse: 3.2,          // 1/s convergence of vertical speed
   maxSink: -22,             // m/s hard sink limit
-  climbHeadroom: 2,         // vsTarget cap = climbRate × this
+  climbHeadroom: 2.5,       // vsTarget cap = climbRate × this
+  minClimbCap: 6,           // even the weakest airframe can climb this (m/s)
   stallBand: 0.25,          // stall develops over this fraction below vStall
   stallLiftLoss: 0.8,       // lift multiplier lost at full stall
   stallNoseDownRate: 12,    // deg/s nose-drop at full stall
@@ -161,7 +162,7 @@ export class AircraftController {
     const vsTarget = clamp(
       (lift - GRAVITY) * TUNING.vsLiftFactor,
       TUNING.maxSink,
-      stats.climbRate * TUNING.climbHeadroom,
+      Math.max(TUNING.minClimbCap, stats.climbRate * TUNING.climbHeadroom),
     );
     s.verticalSpeed += (vsTarget - s.verticalSpeed) * (1 - Math.exp(-dt * TUNING.vsResponse));
 

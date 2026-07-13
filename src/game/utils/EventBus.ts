@@ -26,6 +26,9 @@ export interface GameEvents {
   // Cargo
   'flight:cargo-update': { average: number; count: number };
 
+  // Route (emitted once when a flight starts)
+  'flight:route-info': { routeKm: number; destinationName: string };
+
   // Economy
   'economy:tick': { gameTimestamp: number };
   'economy:price-changed': { settlementId: string; goodId: string; newPrice: number };

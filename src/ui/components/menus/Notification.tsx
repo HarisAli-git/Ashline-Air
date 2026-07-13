@@ -14,7 +14,7 @@ export function GlobalNotification(): React.ReactElement | null {
   return (
     <div style={{
       position: 'fixed',
-      top: 20,
+      top: 48, // below the flight route strip
       left: '50%',
       transform: 'translateX(-50%)',
       background: 'rgba(10,8,4,0.94)',
