@@ -72,6 +72,7 @@ export class AircraftSprite {
   private damageFade = 0;
   private t = 0;              // local clock
   private coneOn = false;
+  private turb = 0;           // weather turbulence 0–1, rocks the airframe
 
   constructor(
     scene: Phaser.Scene,
@@ -230,6 +231,11 @@ export class AircraftSprite {
   /** Persistent fuel-mist trail from the wing (fuel-leak event). */
   setFuelLeak(on: boolean): void {
     this.particles?.setFuelLeak(on);
+  }
+
+  /** Weather turbulence 0–1: the airframe visibly rocks and jolts with it. */
+  setTurbulence(t: number): void {
+    this.turb = t;
   }
 
   /** Body-local design units → scene coordinates (respects pitch + scale). */
@@ -409,9 +415,15 @@ export class AircraftSprite {
 
     let yOff = -this.spec.groundContactY;
     if (state.altitude > 0.5) {
-      // Airborne: gentle bob + faint bank noise
-      yOff += Math.sin(this.t * 1.4) * 1.5;
-      rot += Math.sin(this.t * 1.7) * 0.008 + Math.sin(this.t * 3.3) * 0.005;
+      // Airborne: gentle bob + faint bank noise, both amplified by turbulence
+      const rock = 1 + this.turb * 5;
+      yOff += Math.sin(this.t * 1.4) * 1.5 * (1 + this.turb * 2);
+      rot += (Math.sin(this.t * 1.7) * 0.008 + Math.sin(this.t * 3.3) * 0.005) * rock;
+      if (this.turb > 0.05) {
+        // High-frequency jolts in rough air
+        yOff += Math.sin(this.t * 8.3) * 2.4 * this.turb + Math.sin(this.t * 13.7) * 1.1 * this.turb;
+        rot += Math.sin(this.t * 6.1) * 0.035 * this.turb;
+      }
     } else if (state.speed > 1) {
       // Ground roll vibration scales with speed
       yOff += Math.sin(this.t * 22) * 0.35 * Math.min(1, state.speed / 10);

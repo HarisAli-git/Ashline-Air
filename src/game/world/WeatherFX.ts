@@ -152,7 +152,7 @@ export class WeatherFX {
       if (this.nextLightningIn <= 0) {
         this.flashLeft = 0.1;
         this.nextLightningIn = 4 + Math.random() * 9;
-        this.scene.cameras.main.shake(120, 2);
+        this.scene.cameras.main.shake(120, 0.003);
       }
     }
     if (this.flashLeft > 0) {

@@ -1,11 +1,10 @@
 import React from 'react';
-import { useFlightState, useNotification, useEventModal, useGearFlaps, useCargo, useRouteInfo } from '../../store/gameStore';
+import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo } from '../../store/gameStore';
 import { EventBus } from '../../../game/utils/EventBus';
 import { SaveService } from '../../../services/SaveService';
 
 export function FlightHUD(): React.ReactElement | null {
   const state = useFlightState();
-  const notification = useNotification();
   const event = useEventModal();
   const { gearDown, flapsDeployed } = useGearFlaps();
   const cargo = useCargo();
@@ -47,6 +46,7 @@ export function FlightHUD(): React.ReactElement | null {
 
       {/* Main instrument panel — bottom strip */}
       <div style={styles.panel}>
+        <AttitudeIndicator pitch={state.pitch} />
         <Gauge label="ALT" value={`${state.altitude.toFixed(0)} m`} />
         <Gauge label="SPD" value={`${speedKmh} km/h`} />
         <Gauge label="V/S" value={`${state.verticalSpeed.toFixed(1)} m/s`} color={state.verticalSpeed < -4 ? '#ff4444' : undefined} />
@@ -72,12 +72,7 @@ export function FlightHUD(): React.ReactElement | null {
         </div>
       </div>
 
-      {/* Notification toast */}
-      {notification && (
-        <div style={{ ...styles.notification, borderColor: notifColor(notification.type) }}>
-          {notification.message}
-        </div>
-      )}
+      {/* Notifications are rendered by the always-mounted GlobalNotification */}
 
       {/* Flight event modal */}
       {event && (
@@ -103,6 +98,24 @@ export function FlightHUD(): React.ReactElement | null {
   );
 }
 
+/** Mini artificial horizon: the sky/ground card shifts with pitch. */
+function AttitudeIndicator({ pitch }: { pitch: number }): React.ReactElement {
+  const shift = Math.max(-30, Math.min(30, pitch)) * 0.55;
+  return (
+    <div style={styles.adi}>
+      <div style={{ ...styles.adiCard, transform: `translateY(${shift}px)` }}>
+        <div style={styles.adiSky} />
+        <div style={styles.adiGround} />
+        <div style={styles.adiHorizon} />
+      </div>
+      {/* Fixed aircraft reference */}
+      <div style={styles.adiWingL} />
+      <div style={styles.adiWingR} />
+      <div style={styles.adiDot} />
+    </div>
+  );
+}
+
 function Gauge({
   label, value, color = '#e8d5b7', pct, barColor,
 }: {
@@ -123,10 +136,6 @@ function Gauge({
       )}
     </div>
   );
-}
-
-function notifColor(type: string): string {
-  return { info: '#88ccff', warning: '#ffd080', danger: '#ff4444', success: '#00ff88' }[type] ?? '#888';
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -189,11 +198,35 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 22,
     padding: '8px 24px 10px',
-    background: 'rgba(10,8,4,0.88)',
-    borderTop: '1px solid #3a2a10',
+    background: 'linear-gradient(180deg, rgba(16,12,6,0.92) 0%, rgba(8,6,3,0.95) 100%)',
+    borderTop: '2px solid #3a2a10',
+    boxShadow: '0 -4px 18px rgba(0,0,0,0.55)',
     fontFamily: 'monospace',
     zIndex: 100,
   },
+  adi: {
+    position: 'relative',
+    width: 46,
+    height: 46,
+    borderRadius: '50%',
+    overflow: 'hidden',
+    border: '2px solid #3a2a10',
+    flexShrink: 0,
+  },
+  adiCard: {
+    position: 'absolute',
+    left: 0,
+    top: '-50%',
+    width: '100%',
+    height: '200%',
+    transition: 'transform 0.12s linear',
+  },
+  adiSky: { position: 'absolute', top: 0, width: '100%', height: '50%', background: '#3d5a74' },
+  adiGround: { position: 'absolute', top: '50%', width: '100%', height: '50%', background: '#5a4226' },
+  adiHorizon: { position: 'absolute', top: 'calc(50% - 1px)', width: '100%', height: 2, background: '#e8d5b7' },
+  adiWingL: { position: 'absolute', top: 'calc(50% - 1px)', left: 5, width: 12, height: 2, background: '#ffd080' },
+  adiWingR: { position: 'absolute', top: 'calc(50% - 1px)', right: 5, width: 12, height: 2, background: '#ffd080' },
+  adiDot: { position: 'absolute', top: 'calc(50% - 2px)', left: 'calc(50% - 2px)', width: 4, height: 4, borderRadius: '50%', background: '#ffd080' },
   gauge: {
     display: 'flex',
     flexDirection: 'column',
@@ -229,20 +262,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontFamily: 'monospace',
     marginLeft: 'auto',
-  },
-  notification: {
-    position: 'fixed',
-    top: 48,
-    left: '50%',
-    transform: 'translateX(-50%)',
-    background: 'rgba(10,8,4,0.92)',
-    border: '1px solid',
-    padding: '10px 24px',
-    fontFamily: 'monospace',
-    fontSize: 15,
-    color: '#e8d5b7',
-    zIndex: 200,
-    borderRadius: 4,
   },
   modalBackdrop: {
     position: 'fixed',

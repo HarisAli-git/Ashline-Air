@@ -65,6 +65,11 @@ export class FlightScene extends Phaser.Scene {
   private notifiedApproach = false;
   private notifiedArrival  = false;
 
+  // ── Time warp ─────────────────────────────────────────────────────────────
+  private timeScale = 1;
+  private warpText!: Phaser.GameObjects.Text;
+  private baseTimestamp = 480; // world clock at takeoff (minutes)
+
   constructor() { super({ key: 'FlightScene' }); }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -86,6 +91,7 @@ export class FlightScene extends Phaser.Scene {
     this.gustTimer           = 0;
     this.notifiedApproach    = false;
     this.notifiedArrival     = false;
+    this.timeScale           = 1;
   }
 
   create(): void {
@@ -103,8 +109,13 @@ export class FlightScene extends Phaser.Scene {
     this.state.engineTemp  = owned.engineTemp;
 
     // Stall buffet shakes the camera; touchdown captures true impact values
-    this.controller.onBuffet = () => { this.shakeDuration = Math.max(this.shakeDuration, 150); };
+    this.controller.onBuffet = () => {
+      this.shakeDuration = Math.max(this.shakeDuration, 150);
+      this.disengageWarp('stall warning');
+    };
     this.controller.onTouchdown = (vs, speed) => { this.pendingTouchdown = { vs, speed }; };
+
+    this.baseTimestamp = SaveService.get().world.gameTimestamp;
 
     this.weather = new WeatherSystem();
     FlightEventService.reset(definition);
@@ -144,10 +155,15 @@ export class FlightScene extends Phaser.Scene {
     }).setOrigin(0.5).setDepth(10).setAlpha(0);
 
     this.add.text(width - 12, height - 12,
-      'W/S: Throttle   A/D: Pitch   E: Engine   G: Gear   F: Flaps   ESC: Abort',
+      'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine   T: ×4 Time   ESC: Abort',
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
     ).setOrigin(1, 1).setDepth(10);
+
+    this.warpText = this.add.text(14, 14, '»» TIME ×4', {
+      fontSize: '15px', color: '#ffd080', fontFamily: 'monospace', fontStyle: 'bold',
+      backgroundColor: '#00000088', padding: { x: 8, y: 4 },
+    }).setDepth(10).setVisible(false);
 
     // ── Input ─────────────────────────────────────────────────────────────
     this.keys = {
@@ -158,6 +174,7 @@ export class FlightScene extends Phaser.Scene {
       E:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E),
       G:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
       F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
+      T:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.T),
       ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
     };
 
@@ -181,10 +198,12 @@ export class FlightScene extends Phaser.Scene {
       EventBus.on('weather:changed', ({ state: weather }) => {
         this.world.setWeather(weather.condition);
         this.fx.setCondition(weather.condition);
+        this.disengageWarp('weather changing');
         FlightEventService.checkWeatherEvents(this.state);
       }),
       // Events play their visual cinematic first, then the modal opens
       EventBus.on('flight:event-triggered', ({ event }) => {
+        this.disengageWarp(event.title.toLowerCase());
         this.playEventCinematic(event, () => EventBus.emit('ui:show-event-modal', { event }));
       }),
     ];
@@ -197,6 +216,8 @@ export class FlightScene extends Phaser.Scene {
     this.world.update(0, {
       scrollX: 0, altitude: 0, windX: 0,
       routeTotalKm: this.routeKm, condition: this.weather.current.condition,
+      minutesOfDay: this.baseTimestamp % 1440,
+      visibility: this.weather.current.visibility,
     });
     EventBus.emit('flight:state-update', this.state);
   }
@@ -248,6 +269,25 @@ export class FlightScene extends Phaser.Scene {
       this.state.flapsDeployed = !this.state.flapsDeployed;
       this.flapsToggleCooldown = 500;
       EventBus.emit('flight:flaps-toggled', { deployed: this.state.flapsDeployed });
+      EventBus.emit('ui:show-notification', {
+        message: this.state.flapsDeployed
+          ? 'Flaps DOWN — extra lift and a lower stall speed for takeoff/landing, at the cost of drag.'
+          : 'Flaps UP — clean wing for cruise.',
+        type: 'info',
+      });
+    }
+    if (Phaser.Input.Keyboard.JustDown(this.keys.T)) {
+      if (this.timeScale > 1) {
+        this.timeScale = 1;
+        this.warpText.setVisible(false);
+        EventBus.emit('ui:show-notification', { message: 'Time warp off.', type: 'info' });
+      } else if (this.state.altitude > 60 && !this.rollout) {
+        this.timeScale = 4;
+        this.warpText.setVisible(true);
+        EventBus.emit('ui:show-notification', { message: '»» Time warp ×4 — auto-disengages when something needs you.', type: 'info' });
+      } else {
+        EventBus.emit('ui:show-notification', { message: 'Time warp needs stable flight above 60 m.', type: 'warning' });
+      }
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.ESC)) {
       EventBus.emit('scene:return-to-map');
@@ -256,24 +296,37 @@ export class FlightScene extends Phaser.Scene {
       return;
     }
 
+    // ── Time warp: everything below advances on scaled time ───────────────
+    const sdt = dt * this.timeScale;
+
     // ── Weather → wind ─────────────────────────────────────────────────────
-    this.weather.update(delta);
+    this.weather.update(delta * this.timeScale);
     const windX = this.weather.windX() * 0.4;
 
     // ── Physics (fixed-step, frame-rate independent) ───────────────────────
-    this.state = this.controller.update(this.state, input, dt, windX);
+    this.state = this.controller.update(this.state, input, sdt, windX);
 
     // ── Turbulence: gusts nudge the aircraft, dt-scaled so a storm is rough
     //    but flyable (previously this was per-frame and slammed you down) ────
     const turbulence = this.weather.current.turbulenceIntensity;
     if (turbulence > 0 && this.state.altitude > 25) {
-      this.state.verticalSpeed += (Math.random() - 0.5) * turbulence * 7 * dt;
-      this.state.pitch = clamp(this.state.pitch + (Math.random() - 0.5) * turbulence * 9 * dt, -30, 30);
-      this.gustTimer -= dt;
+      this.state.verticalSpeed += (Math.random() - 0.5) * turbulence * 7 * sdt;
+      this.state.pitch = clamp(this.state.pitch + (Math.random() - 0.5) * turbulence * 9 * sdt, -30, 30);
+      this.gustTimer -= sdt;
       if (turbulence > 0.3 && this.gustTimer <= 0) {
         this.gustTimer = 0.8 + Math.random() * 1.4;
-        this.cameras.main.shake(200, 2 + turbulence * 3);
+        this.cameras.main.shake(200, 0.003 + turbulence * 0.005);
       }
+    }
+
+    // ── Warp auto-disengage: anything needing attention hands control back ─
+    if (this.timeScale > 1) {
+      const remaining = this.routeKm - this.state.distanceTravelled;
+      if (this.state.engineTemp >= 0.85)      this.disengageWarp('engine overheating');
+      else if (this.state.fuel < 15)          this.disengageWarp('fuel critical');
+      else if (remaining <= 1.8)              this.disengageWarp('destination ahead');
+      else if (this.state.altitude < 60)      this.disengageWarp('low altitude');
+      else if (this.state.integrity < 30)     this.disengageWarp('airframe critical');
     }
 
     // Fuel warning (every 5s)
@@ -297,7 +350,7 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Cargo condition ────────────────────────────────────────────────────
     if (this.cargo.hasCargo) {
-      this.cargo.update(dt, turbulence);
+      this.cargo.update(sdt, turbulence);
       if (this.state.elapsedSeconds - this.lastCargoEmit >= 1) {
         this.lastCargoEmit = this.state.elapsedSeconds;
         EventBus.emit('flight:cargo-update', {
@@ -315,11 +368,11 @@ export class FlightScene extends Phaser.Scene {
       this.cargo.applyDamage(result.cargoDamagePercent);
 
       if (result.quality === 'crash') {
-        this.cameras.main.shake(600, 14);
+        this.cameras.main.shake(600, 0.014);
         this.finishFlight(result);
         return;
       }
-      if (result.quality === 'hard') this.cameras.main.shake(450, 7);
+      if (result.quality === 'hard') this.cameras.main.shake(450, 0.008);
       this.rollout = true;
       this.rolloutResult = result;
     }
@@ -331,7 +384,7 @@ export class FlightScene extends Phaser.Scene {
         this.rollout = false;
         this.rolloutResult = null;
       } else {
-        this.state.speed = Math.max(0, this.state.speed - 6 * dt);
+        this.state.speed = Math.max(0, this.state.speed - 6 * sdt);
         this.state.groundSpeed = this.state.speed;
         if (this.state.speed < 3) {
           this.finishFlight(this.rolloutResult!);
@@ -368,24 +421,27 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // ── World & weather visuals ────────────────────────────────────────────
-    this.scrollX += this.state.groundSpeed * dt * WORLD_PX_PER_M;
-    this.world.update(dt, {
+    this.scrollX += this.state.groundSpeed * sdt * WORLD_PX_PER_M;
+    this.world.update(sdt, {
       scrollX: this.scrollX,
       altitude: this.state.altitude,
       windX,
       routeTotalKm: this.routeKm,
       condition: this.weather.current.condition,
+      minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
+      visibility: this.weather.current.visibility,
     });
-    this.fx.update(dt);
+    this.fx.update(sdt);
 
     // ── Aircraft ───────────────────────────────────────────────────────────
+    this.aircraft.setTurbulence(turbulence);
     this.aircraft.container.setY(this.world.altitudeToScreenY(this.state.altitude));
-    this.aircraft.update(dt, this.state);
+    this.aircraft.update(sdt, this.state);
 
     // ── Camera shake (stall buffet) ────────────────────────────────────────
     if (this.shakeDuration > 0) {
       this.shakeDuration -= delta;
-      this.cameras.main.shake(80, 2.5);
+      this.cameras.main.shake(80, 0.003);
     }
 
     // ── Approach guidance ──────────────────────────────────────────────────
@@ -424,6 +480,14 @@ export class FlightScene extends Phaser.Scene {
     }
 
     this.approachText.setText(label).setStyle({ color }).setAlpha(1);
+  }
+
+  /** Drop out of time warp with a reason the player can act on. */
+  private disengageWarp(reason: string): void {
+    if (this.timeScale === 1) return;
+    this.timeScale = 1;
+    this.warpText.setVisible(false);
+    EventBus.emit('ui:show-notification', { message: `Time warp off — ${reason}.`, type: 'warning' });
   }
 
   // ── Event cinematics ──────────────────────────────────────────────────────
@@ -472,7 +536,7 @@ export class FlightScene extends Phaser.Scene {
         emitting: false,
       }).setDepth(7);
       feathers.explode(20);
-      this.cameras.main.shake(260, 6);
+      this.cameras.main.shake(260, 0.007);
       this.time.delayedCall(1100, () => feathers.destroy());
     });
 
@@ -510,7 +574,7 @@ export class FlightScene extends Phaser.Scene {
       emitting: false,
     }).setDepth(7);
     smoke.explode(14);
-    this.cameras.main.shake(180, 3);
+    this.cameras.main.shake(180, 0.004);
     this.time.delayedCall(1100, () => smoke.destroy());
     this.time.delayedCall(650, done);
   }

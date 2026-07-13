@@ -40,7 +40,7 @@ function makeDefaultSave(): SaveData {
       },
     },
     world: {
-      gameTimestamp: 0,
+      gameTimestamp: 480, // day 1, 08:00 — start in morning light
       settlements: [],
       availableContracts: [],
     },

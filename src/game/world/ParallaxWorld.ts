@@ -12,7 +12,7 @@ import type { WeatherCondition } from '../../types';
 export const ALT_BAND = 250;       // metres of altitude mapped linearly to screen
 export const PLANE_MIN_Y = 160;    // screen y the aircraft pins to above the band
 /** World px per metre flown — >1 so motion reads fast on screen. */
-export const WORLD_PX_PER_M = 1.7;
+export const WORLD_PX_PER_M = 2.6;
 
 interface Palette {
   skyTop: number; skyBot: number; glow: number;
@@ -82,11 +82,28 @@ function propRand(i: number): number {
 }
 
 export interface WorldFrame {
-  scrollX: number;      // metres travelled (1 m = 1 px at ground parallax)
+  scrollX: number;      // world px travelled
   altitude: number;     // metres
   windX: number;        // along-track wind, m/s (+ = tailwind)
   routeTotalKm: number; // contract distance; destination runway lives there
   condition: WeatherCondition;
+  minutesOfDay: number; // world-clock minutes 0–1439, drives the day/night cycle
+  visibility: number;   // 0–1 from weather, dims the sun/moon
+}
+
+/** 0 = deep night, 1 = full day. Dawn 05:00–07:00, dusk 18:00–20:00. */
+function daylight(minutes: number): number {
+  const m = ((minutes % 1440) + 1440) % 1440;
+  if (m < 300 || m >= 1200) return 0;
+  if (m < 420) return (m - 300) / 120;
+  if (m < 1080) return 1;
+  return 1 - (m - 1080) / 120;
+}
+
+/** Push a palette colour toward deep night blue as daylight fades. */
+function applyDaylight(c: number, dl: number): number {
+  const night = lerpColor(c, 0x070a14, 0.82);
+  return lerpColor(night, c, 0.22 + 0.78 * dl);
 }
 
 export class ParallaxWorld {
@@ -106,8 +123,10 @@ export class ParallaxWorld {
 
   private fromPal: Palette = resolve('clear');
   private toPal: Palette = resolve('clear');
-  private pal: Palette = resolve('clear');
+  private weatherPal: Palette = resolve('clear'); // weather-blended, daylight-agnostic
+  private pal: Palette = resolve('clear');        // final: weather + time of day
   private blendT = 1;
+  private dl = 1; // current daylight factor
 
   private t = 0;
   private readonly cloudOffsets = [0, 200, 450, 700, 900];
@@ -131,7 +150,7 @@ export class ParallaxWorld {
 
   /** Blend the palette toward a weather condition over ~4 s. */
   setWeather(condition: WeatherCondition): void {
-    this.fromPal = { ...this.pal };
+    this.fromPal = { ...this.weatherPal };
     this.toPal = resolve(condition);
     this.blendT = 0;
   }
@@ -147,21 +166,27 @@ export class ParallaxWorld {
   update(dt: number, f: WorldFrame): void {
     this.t += dt;
 
-    // Palette blend
+    // Weather palette blend, then day/night grading on top
     if (this.blendT < 1) {
       this.blendT = Math.min(1, this.blendT + dt / 4);
       const p = {} as Palette;
       for (const k of Object.keys(this.toPal) as Array<keyof Palette>) {
         p[k] = lerpColor(this.fromPal[k], this.toPal[k], this.blendT);
       }
-      this.pal = p;
+      this.weatherPal = p;
     }
+    this.dl = daylight(f.minutesOfDay);
+    const graded = {} as Palette;
+    for (const k of Object.keys(this.weatherPal) as Array<keyof Palette>) {
+      graded[k] = applyDaylight(this.weatherPal[k], this.dl);
+    }
+    this.pal = graded;
 
     // Above the linear band the world sinks away beneath the aircraft
     const sink = Phaser.Math.Clamp((f.altitude - ALT_BAND) * 0.35, 0, 420);
     const hMult = Phaser.Math.Linear(1, 0.55, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 2200, 0, 1));
 
-    this.drawSky(f.altitude);
+    this.drawSky(f);
     this.drawFar(f.scrollX, sink * 0.30, hMult);
     this.drawMountains(f.scrollX, sink * 0.55, hMult);
     this.drawCloudDeck(f.altitude, f.scrollX);
@@ -178,33 +203,65 @@ export class ParallaxWorld {
 
   // ── Layers ─────────────────────────────────────────────────────────────────
 
-  private drawSky(alt: number): void {
+  private drawSky(f: WorldFrame): void {
     const g = this.skyGfx;
+    const alt = f.altitude;
+    const dl = this.dl;
     g.clear();
 
     // Altitude darkens the sky toward near-space navy
     const hiT = Phaser.Math.Clamp(alt / 3500, 0, 1);
-    const top = lerpColor(this.pal.skyTop, 0x050a18, hiT);
-    const bot = lerpColor(this.pal.skyBot, 0x18304a, hiT * 0.85);
+    const top = lerpColor(this.pal.skyTop, 0x030710, hiT);
+    const bot = lerpColor(this.pal.skyBot, 0x122436, hiT * 0.85);
 
     g.fillGradientStyle(top, top, bot, bot, 1);
     g.fillRect(0, 0, this.width, this.height);
 
-    // Warm horizon band, fading with altitude
-    const glowAlpha = Math.max(0, 1 - alt / 260) * 0.4;
+    // Sun arcs across the sky through the day, dimmed by bad weather
+    const vis = Phaser.Math.Clamp(f.visibility, 0.12, 1);
+    if (dl > 0.04) {
+      const sunT = Phaser.Math.Clamp((f.minutesOfDay - 300) / 900, 0, 1);
+      const sx = this.width * (0.08 + 0.84 * sunT);
+      const sy = this.groundY - Math.sin(sunT * Math.PI) * (this.groundY - 110) - 16;
+      const sa = dl * vis;
+      // Low sun is redder
+      const lowSun = 1 - Math.sin(sunT * Math.PI);
+      const sunCol = lerpColor(0xfff2cc, 0xff9a50, lowSun * 0.8);
+      g.fillStyle(sunCol, 0.08 * sa); g.fillCircle(sx, sy, 52);
+      g.fillStyle(sunCol, 0.16 * sa); g.fillCircle(sx, sy, 32);
+      g.fillStyle(sunCol, 0.9 * sa);  g.fillCircle(sx, sy, 16);
+    }
+
+    // Moon rides the night arc, with a crescent bite
+    if (dl < 0.5) {
+      const m = f.minutesOfDay;
+      const nm = m >= 1200 ? m - 1200 : m + 240; // 0..540 across 20:00–05:00
+      const mT = Phaser.Math.Clamp(nm / 540, 0, 1);
+      const mx = this.width * (0.1 + 0.8 * mT);
+      const my = this.groundY - Math.sin(mT * Math.PI) * (this.groundY - 130) - 20;
+      const ma = (1 - dl * 2) * vis;
+      if (ma > 0.02) {
+        g.fillStyle(0xd8e2ec, 0.12 * ma); g.fillCircle(mx, my, 26);
+        g.fillStyle(0xe8eef6, 0.9 * ma);  g.fillCircle(mx, my, 12);
+        g.fillStyle(top, 0.95 * ma);      g.fillCircle(mx + 5, my - 3, 10);
+      }
+    }
+
+    // Warm horizon band, fading with altitude and daylight
+    const glowAlpha = Math.max(0, 1 - alt / 260) * 0.4 * (0.2 + 0.8 * dl);
     if (glowAlpha > 0.01) {
       g.fillStyle(this.pal.glow, glowAlpha);
       g.fillRect(0, this.groundY - 80, this.width, 80);
     }
 
-    // Stars fade in when very high
-    if (hiT > 0.55) {
-      const a = (hiT - 0.55) / 0.45;
-      for (let i = 0; i < 40; i++) {
+    // Stars: out at night, and again near the edge of the sky when very high
+    const starA = Math.max(hiT > 0.55 ? (hiT - 0.55) / 0.45 : 0, (1 - dl) * vis);
+    if (starA > 0.03) {
+      for (let i = 0; i < 54; i++) {
         const sx = (propRand(i) * this.width * 1.3 + i * 37) % this.width;
-        const sy = propRand(i + 100) * this.height * 0.5;
+        const sy = propRand(i + 100) * this.height * 0.55;
         const tw = 0.4 + 0.6 * Math.abs(Math.sin(this.t * (0.5 + propRand(i + 200)) + i));
-        g.fillStyle(0xfff4e0, a * tw * 0.5);
+        g.fillStyle(0xfff4e0, starA * tw * 0.55);
         g.fillRect(sx, sy, 1.5, 1.5);
       }
     }
@@ -227,6 +284,12 @@ export class ParallaxWorld {
         g.fillStyle(this.pal.far, 0.75);
         g.fillTriangle(mx - 170, baseY, mx, baseY - h * hMult, mx + 170, baseY);
       }
+    }
+
+    // Atmospheric distance haze over the far range
+    for (let i = 0; i < 3; i++) {
+      g.fillStyle(this.pal.skyBot, 0.07 - i * 0.018);
+      g.fillRect(0, baseY - 130 + i * 44, this.width, 130 - i * 44);
     }
   }
 
@@ -286,8 +349,9 @@ export class ParallaxWorld {
     g.clear();
     if (alt < 50) return;
 
-    const alpha = Math.min(alt / 200, 0.85) * 0.15;
-    g.fillStyle(0xffffff, alpha);
+    const alpha = Math.min(alt / 200, 0.85) * 0.16;
+    const body = lerpColor(0x1e2632, 0xffffff, this.dl);           // night clouds go dark
+    const shade = lerpColor(0x141a24, 0x9aa8b4, this.dl);
 
     const baseY = this.groundY * 0.35;
     for (let i = 0; i < this.cloudOffsets.length; i++) {
@@ -295,9 +359,15 @@ export class ParallaxWorld {
       const ox = ((this.cloudOffsets[i] - scrollX * 0.05) % span + span) % span - 150;
       const oy = baseY + (i % 3) * 40;
       const w = 80 + (i % 3) * 40;
+      // Shaded underside first, then the sunlit body
+      g.fillStyle(shade, alpha * 0.8);
+      g.fillEllipse(ox + 4, oy + 7, w * 0.95, 20);
+      g.fillStyle(body, alpha);
       g.fillEllipse(ox, oy, w, 28);
       g.fillEllipse(ox + 30, oy - 12, w * 0.7, 22);
       g.fillEllipse(ox - 20, oy - 8, w * 0.5, 18);
+      g.fillStyle(lerpColor(body, 0xffffff, 0.4), alpha * 0.5);
+      g.fillEllipse(ox + 8, oy - 14, w * 0.4, 10);
     }
   }
 
@@ -528,12 +598,17 @@ export class ParallaxWorld {
       g.fillRect(dx, gy + 7, dashW, 2.5);
     }
 
-    // Pulsing edge lights
+    // Pulsing edge lights — brighter and haloed at night
     const pulse = 0.5 + 0.5 * Math.sin(this.t * 3.2);
+    const night = 1 - this.dl;
     for (let wx = fromM + 30; wx < toM - 20; wx += 92) {
       const lx = wx - scrollX;
       if (lx < -10 || lx > this.width + 10) continue;
-      g.fillStyle(0xffb350, 0.35 + pulse * 0.45);
+      if (night > 0.2) {
+        g.fillStyle(0xffb350, (0.12 + pulse * 0.1) * night);
+        g.fillCircle(lx, gy + 2, 5);
+      }
+      g.fillStyle(0xffb350, 0.35 + pulse * 0.45 + night * 0.2);
       g.fillCircle(lx, gy + 2, 1.8);
     }
 
