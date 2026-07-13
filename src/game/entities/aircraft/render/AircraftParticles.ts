@@ -14,9 +14,12 @@ export class AircraftParticles {
   private readonly rollDust: Phaser.GameObjects.Particles.ParticleEmitter;
   private readonly burst: Phaser.GameObjects.Particles.ParticleEmitter;
 
+  private readonly fuelMist: Phaser.GameObjects.Particles.ParticleEmitter;
+
   private exhaustOn = false;
   private fireOn = false;
   private rollOn = false;
+  private leakOn = false;
 
   private readonly spec: AircraftVisualSpec;
 
@@ -77,6 +80,24 @@ export class AircraftParticles {
       tint: 0xb08a50,
       emitting: false,
     });
+
+    this.fuelMist = scene.add.particles(0, 0, 'px_soft', {
+      lifespan: { min: 500, max: 900 },
+      speedX: { min: -170, max: -100 },
+      speedY: { min: 4, max: 28 },
+      scale: { start: 0.1, end: 0.42 },
+      alpha: { start: 0.35, end: 0 },
+      tint: 0xcfe8f2,
+      frequency: 30,
+      emitting: false,
+    });
+  }
+
+  /** Persistent thin mist streaming off the wing after a fuel-leak event. */
+  setFuelLeak(on: boolean): void {
+    if (on === this.leakOn) return;
+    this.leakOn = on;
+    if (on) this.fuelMist.start(); else this.fuelMist.stop();
   }
 
   /** Reposition + toggle emitters. (x, y) = container position, rot = body rotation. */
@@ -117,6 +138,13 @@ export class AircraftParticles {
       this.embers.setPosition(fx, fy);
     }
 
+    // Fuel-leak mist trails from the wing
+    if (this.leakOn) {
+      const w = this.spec.wing;
+      const [mx, my] = at(w.rootX - w.chord * 0.5, w.y + 2);
+      this.fuelMist.setPosition(mx, my);
+    }
+
     // Ground-roll dust behind the wheels
     const wantRoll = state.altitude <= 0 && state.speed > 3;
     if (wantRoll !== this.rollOn) {
@@ -141,5 +169,6 @@ export class AircraftParticles {
     this.embers.destroy();
     this.rollDust.destroy();
     this.burst.destroy();
+    this.fuelMist.destroy();
   }
 }

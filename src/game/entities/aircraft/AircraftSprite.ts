@@ -227,6 +227,37 @@ export class AircraftSprite {
     this.particles?.touchdownBurst(this.container.x, this.groundY, vSpeedAtImpact);
   }
 
+  /** Persistent fuel-mist trail from the wing (fuel-leak event). */
+  setFuelLeak(on: boolean): void {
+    this.particles?.setFuelLeak(on);
+  }
+
+  /** Body-local design units → scene coordinates (respects pitch + scale). */
+  localToScene(lx: number, ly: number): { x: number; y: number } {
+    const s = this.container.scaleX; // menu fly-by overrides the spec scale
+    const rot = this.body.rotation;
+    const bx = lx * s;
+    const by = (ly - this.spec.groundContactY) * s;
+    return {
+      x: this.container.x + bx * Math.cos(rot) - by * Math.sin(rot),
+      y: this.container.y + bx * Math.sin(rot) + by * Math.cos(rot),
+    };
+  }
+
+  nosePoint(): { x: number; y: number } {
+    return this.localToScene(this.spec.length / 2, 0);
+  }
+
+  enginePoint(): { x: number; y: number } {
+    const e = this.spec.engines[0];
+    return this.localToScene(e.x, e.y);
+  }
+
+  wingPoint(): { x: number; y: number } {
+    const w = this.spec.wing;
+    return this.localToScene(w.rootX - w.chord * 0.4, w.y);
+  }
+
   /** Per-frame update. dt in seconds. */
   update(dt: number, state: FlightState): void {
     this.t += dt;

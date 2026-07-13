@@ -74,7 +74,8 @@ class FlightEventServiceClass {
     }
 
     this.pendingChoice = def;
-    EventBus.emit('ui:show-event-modal', { event: def });
+    // FlightScene listens for this, plays the event's visual cinematic
+    // (bird flock, fuel mist, …), then opens the modal itself.
     EventBus.emit('flight:event-triggered', { event: def });
     return true;
   }

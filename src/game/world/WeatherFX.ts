@@ -146,18 +146,18 @@ export class WeatherFX {
       }
     }
 
-    // Lightning
+    // Lightning — brief and soft; it should read as distant weather, not strobe
     if (this.current.lightning) {
       this.nextLightningIn -= dt;
       if (this.nextLightningIn <= 0) {
-        this.flashLeft = 0.13;
-        this.nextLightningIn = 3 + Math.random() * 8;
-        this.scene.cameras.main.shake(160, 3);
+        this.flashLeft = 0.1;
+        this.nextLightningIn = 4 + Math.random() * 9;
+        this.scene.cameras.main.shake(120, 2);
       }
     }
     if (this.flashLeft > 0) {
       this.flashLeft -= dt;
-      this.flash.setFillStyle(0xffffff, Math.max(0, this.flashLeft / 0.13) * 0.5);
+      this.flash.setFillStyle(0xffffff, Math.max(0, this.flashLeft / 0.1) * 0.3);
     } else if (this.flash.fillAlpha > 0) {
       this.flash.setFillStyle(0xffffff, 0);
     }

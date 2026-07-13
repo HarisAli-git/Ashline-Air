@@ -11,6 +11,8 @@ import type { WeatherCondition } from '../../types';
 
 export const ALT_BAND = 250;       // metres of altitude mapped linearly to screen
 export const PLANE_MIN_Y = 160;    // screen y the aircraft pins to above the band
+/** World px per metre flown — >1 so motion reads fast on screen. */
+export const WORLD_PX_PER_M = 1.7;
 
 interface Palette {
   skyTop: number; skyBot: number; glow: number;
@@ -399,22 +401,90 @@ export class ParallaxWorld {
     g.lineStyle(1, lerpColor(this.pal.ground, 0xffffff, 0.08), 0.3);
     for (let i = 1; i <= 3; i++) g.lineBetween(0, gy + i * 22, this.width, gy + i * 22);
 
-    // Runway zones — origin at world 0, destination at the contract distance
-    const destM = Math.max(2000, f.routeTotalKm * 1000);
-    this.drawRunway(g, -320, 760, scrollX, gy, f);
-    this.drawRunway(g, destM - 460, destM + 620, scrollX, gy, f);
+    // Runway zones — origin at world 0, destination at the contract distance.
+    // Proper-length strips (~1.2 km of runway) with the settlements beyond them.
+    const PXM = WORLD_PX_PER_M;
+    const destPx = Math.max(2000 * PXM, f.routeTotalKm * 1000 * PXM);
+    const oriFrom = -350 * PXM, oriTo = 900 * PXM;
+    const dstFrom = destPx - 500 * PXM, dstTo = destPx + 900 * PXM;
+    this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f);
+    this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f);
+    this.drawSettlement(g, oriFrom - 80, scrollX, gy, -1);
+    this.drawSettlement(g, dstTo + 80, scrollX, gy, 1);
 
     // Cracks / ruts between runways so open terrain isn't sterile
     const spacing = 170;
     const first = Math.floor((scrollX - 60) / spacing);
     for (let i = first; i < first + Math.ceil(this.width / spacing) + 1; i++) {
       const wx = i * spacing + propRand(i + 13) * 80;
-      if (wx > -320 && wx < 760) continue;
-      if (wx > destM - 460 && wx < destM + 620) continue;
+      if (wx > oriFrom - 700 && wx < oriTo + 700) continue;
+      if (wx > dstFrom - 700 && wx < dstTo + 700) continue;
       const sx = wx - scrollX;
       if (sx < -40 || sx > this.width + 40) continue;
       g.lineStyle(1.5, 0x000000, 0.18);
       g.lineBetween(sx, gy + 6 + propRand(i + 7) * 10, sx + 26 + propRand(i) * 30, gy + 8 + propRand(i + 3) * 12);
+    }
+  }
+
+  /** Fortified settlement silhouette beyond a runway: buildings, water tower,
+   *  antenna with a blinking beacon, perimeter wall. `dir` = which way it extends. */
+  private drawSettlement(
+    g: Phaser.GameObjects.Graphics,
+    anchorPx: number,
+    scrollX: number,
+    gy: number,
+    dir: 1 | -1,
+  ): void {
+    const sx0 = anchorPx - scrollX;
+    if (sx0 < -700 || sx0 > this.width + 700) return;
+
+    const dark = 0x120d06;
+    const wall = 0x1c1509;
+
+    // Perimeter wall with a gate gap
+    g.fillStyle(wall, 1);
+    g.fillRect(sx0, gy - 12, dir * 460, 12);
+    g.fillRect(sx0 + dir * 60, gy - 20, dir * 6, 20); // gate post
+    g.fillRect(sx0 + dir * 110, gy - 20, dir * 6, 20);
+
+    // Buildings
+    const heights = [34, 58, 26, 70, 42, 30];
+    for (let i = 0; i < heights.length; i++) {
+      const bx = sx0 + dir * (40 + i * 72);
+      const bw = 46 + (i % 3) * 12;
+      const bh = heights[i];
+      g.fillStyle(dark, 1);
+      g.fillRect(Math.min(bx, bx + dir * bw), gy - bh, bw, bh);
+      // Lit windows
+      g.fillStyle(0xd08a30, 0.8);
+      for (let wy = gy - bh + 8; wy < gy - 8; wy += 14) {
+        for (let wxo = 8; wxo < bw - 6; wxo += 14) {
+          if (propRand(i * 31 + wy + wxo) < 0.45) {
+            g.fillRect(Math.min(bx, bx + dir * bw) + wxo, wy, 4, 5);
+          }
+        }
+      }
+    }
+
+    // Water tower
+    const wtx = sx0 + dir * 250;
+    g.lineStyle(2.5, dark, 1);
+    g.lineBetween(wtx - 10, gy, wtx - 4, gy - 42);
+    g.lineBetween(wtx + 10, gy, wtx + 4, gy - 42);
+    g.fillStyle(dark, 1);
+    g.fillEllipse(wtx, gy - 50, 34, 20);
+
+    // Antenna mast with blinking beacon
+    const ax = sx0 + dir * 400;
+    g.lineStyle(2, dark, 1);
+    g.lineBetween(ax, gy, ax, gy - 88);
+    g.lineBetween(ax - 12, gy, ax, gy - 60);
+    g.lineBetween(ax + 12, gy, ax, gy - 60);
+    if (Math.sin(this.t * 3.5) > 0.2) {
+      g.fillStyle(0xff4030, 0.9);
+      g.fillCircle(ax, gy - 90, 2.5);
+      g.fillStyle(0xff4030, 0.25);
+      g.fillCircle(ax, gy - 90, 6);
     }
   }
 
