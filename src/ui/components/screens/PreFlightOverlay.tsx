@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { ContractBoard } from './ContractBoard';
 import { EconomyScreen } from './EconomyScreen';
-import { useNotification } from '../../store/gameStore';
 
 type Tab = 'contracts' | 'economy';
 
@@ -11,17 +10,11 @@ interface Props {
 
 export function PreFlightOverlay({ settlementId }: Props): React.ReactElement {
   const [tab, setTab] = useState<Tab>('contracts');
-  const [contractAccepted, setContractAccepted] = useState(false);
-  const notification = useNotification();
+  const [, setContractAccepted] = useState(false);
 
   return (
     <div style={styles.overlay}>
-      {/* Notification */}
-      {notification && (
-        <div style={{ ...styles.toast, borderColor: toastColor(notification.type) }}>
-          {notification.message}
-        </div>
-      )}
+      {/* Notifications are rendered by the always-mounted GlobalNotification */}
 
       {/* Tab bar */}
       <div style={styles.tabs}>
@@ -51,10 +44,6 @@ export function PreFlightOverlay({ settlementId }: Props): React.ReactElement {
       </div>
     </div>
   );
-}
-
-function toastColor(type: string): string {
-  return { info: '#88ccff', warning: '#ffd080', danger: '#ff4444', success: '#00ff88' }[type] ?? '#888';
 }
 
 const styles: Record<string, React.CSSProperties> = {

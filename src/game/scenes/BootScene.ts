@@ -51,15 +51,9 @@ export class BootScene extends Phaser.Scene {
         save.world.settlements = EconomyService.initialise(gameData.settlements);
       }
 
-      // Generate initial contract board if empty
-      if (save.world.availableContracts.length === 0) {
-        save.world.availableContracts = ContractService.refreshBoard(
-          gameData.settlements,
-          save.player.unlockedSettlementIds,
-          save.player.reputation,
-          save.world.gameTimestamp
-        );
-      }
+      // Generate/maintain the contract board (tops up an empty board and
+      // guarantees each settlement offers work the player can accept)
+      ContractService.maintainBoard(save);
 
       this.scene.start('MenuScene');
     } catch (err) {

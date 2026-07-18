@@ -102,12 +102,7 @@ export class MenuScene extends Phaser.Scene {
       SaveService.deleteSave();
       const save = SaveService.load();
       save.world.settlements = EconomyService.initialise(window.gameData.settlements);
-      save.world.availableContracts = ContractService.refreshBoard(
-        window.gameData.settlements,
-        save.player.unlockedSettlementIds,
-        save.player.reputation,
-        save.world.gameTimestamp
-      );
+      ContractService.maintainBoard(save);
       SaveService.save(save.player, save.world);
       fadeToScene(this, 'MapScene');
     });

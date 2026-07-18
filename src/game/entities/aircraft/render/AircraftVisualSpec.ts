@@ -61,6 +61,11 @@ export interface AircraftVisualSpec {
   exhaust: { x: number; y: number }; // exhaust stack / stain origin
   /** Distance from datum to wheel-bottom with gear down (container ground offset). */
   groundContactY: number;
+  /**
+   * Taildraggers rest nose-high on their tail wheel; this is the parked
+   * attitude in degrees. The tail lifts as the takeoff roll gains speed.
+   */
+  groundStanceDeg?: number;
 }
 
 /** Hinge point of the trailing-edge flap, derived from the wing. */
@@ -90,6 +95,7 @@ export const AIRCRAFT_SPECS: Record<string, AircraftVisualSpec> = {
     beacon: { x: -58, y: -36 },
     exhaust: { x: 40, y: 10 },
     groundContactY: 38,
+    groundStanceDeg: 8,
   },
 
   bush_plane: {
@@ -112,6 +118,7 @@ export const AIRCRAFT_SPECS: Record<string, AircraftVisualSpec> = {
     beacon: { x: -62, y: -38 },
     exhaust: { x: 44, y: 12 },
     groundContactY: 44,
+    groundStanceDeg: 8,
   },
 
   old_cargo_aircraft: {
@@ -137,6 +144,7 @@ export const AIRCRAFT_SPECS: Record<string, AircraftVisualSpec> = {
     beacon: { x: -84, y: -52 },
     exhaust: { x: 22, y: 22 },
     groundContactY: 58,
+    groundStanceDeg: 7,
   },
 
   twin_turboprop: {
