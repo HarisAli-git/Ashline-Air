@@ -180,8 +180,8 @@ export class AircraftSprite {
     const g = this.spec.gear;
     const bellyY = this.spec.height / 2;
 
-    const makeLeg = (hx: number, stowedRad: number, scale = 1): GearLeg => {
-      const root = this.scene.add.container(hx, g.hingeY);
+    const makeLeg = (hx: number, stowedRad: number, scale = 1, hingeY = g.hingeY): GearLeg => {
+      const root = this.scene.add.container(hx, hingeY);
       root.setScale(scale);
       const strut = this.scene.add.image(0, 0, this.tex.gearStrut).setScale(1 / SS).setOrigin(0.5, 0.06);
       const wheel = this.scene.add.image(0, g.strutLen, this.tex.wheel).setScale(1 / SS);
@@ -202,17 +202,36 @@ export class AircraftSprite {
     this.legs.push(makeLeg(g.mainX, MAIN_STOWED_RAD));
     if (g.noseX !== null) this.legs.push(makeLeg(g.noseX, NOSE_STOWED_RAD));
     if (g.tailWheelX !== null) {
-      // Taildragger tail wheel: never retracts. Solve its leg length so the
-      // wheel actually touches the runway at the nose-high parked stance.
+      // Taildragger tail wheel: never retracts. Anchor the leg to the actual
+      // tail-cone belly line and solve the STRUT length so a deliberately
+      // small wheel (real tail wheels are tiny) touches the runway at the
+      // nose-high parked stance — the tilt comes from the aircraft, not from
+      // inflating the wheel.
+      const L = this.spec.length, H = this.spec.height;
+      const coneStartX = -0.12 * L, coneEndX = -0.5 * L;
+      const frac = Phaser.Math.Clamp((g.tailWheelX - coneStartX) / (coneEndX - coneStartX), 0, 1);
+      const bellyAtTail = Phaser.Math.Linear(H / 2, H * 0.08, frac);
+      const tailHinge = bellyAtTail - 2; // tuck the leg root into the hull
+
       const theta = Phaser.Math.DegToRad(this.spec.groundStanceDeg ?? 0);
       const reach =
         (this.spec.groundContactY + g.mainX * Math.sin(theta) - Math.abs(g.tailWheelX) * Math.sin(theta)) /
         Math.max(0.7, Math.cos(theta));
-      const scale = Phaser.Math.Clamp((reach - g.hingeY) / (g.strutLen + g.wheelR), 0.4, 1.2);
-      const tail = makeLeg(g.tailWheelX, 0, scale);
-      tail.door = null;
-      this.legs.push(tail);
-      tail.root.setRotation(0);
+
+      const wheelScale = 0.5;                                  // tiny tail wheel
+      const smallWheelR = g.wheelR * wheelScale;
+      const strutNeeded = Math.max(6, reach - tailHinge - smallWheelR);
+
+      const root = this.scene.add.container(g.tailWheelX, tailHinge);
+      const strut = this.scene.add.image(0, 0, this.tex.gearStrut)
+        .setOrigin(0.5, 0.06)
+        .setScale((1 / SS) * 0.7, (1 / SS) * (strutNeeded / g.strutLen));
+      const wheel = this.scene.add.image(0, strutNeeded, this.tex.wheel)
+        .setScale((1 / SS) * wheelScale);
+      root.add(strut);
+      root.add(wheel);
+      this.body.add(root);
+      this.legs.push({ root, wheel, stowedRad: 0, door: null });
     }
 
     this.gearProgress = 1;
@@ -415,9 +434,10 @@ export class AircraftSprite {
   }
 
   private updateAttitude(state: FlightState): void {
-    // Nose-up (positive pitch) = counter-clockwise = negative Phaser rotation
+    // Nose-up (positive pitch) = counter-clockwise = negative Phaser rotation.
+    // Full 1:1 rotation — the aircraft points where you point it.
     const clamped = Phaser.Math.Clamp(state.pitch, -30, 30);
-    let rot = -Phaser.Math.DegToRad(clamped * 0.6);
+    let rot = -Phaser.Math.DegToRad(clamped);
 
     let yOff = -this.spec.groundContactY;
 

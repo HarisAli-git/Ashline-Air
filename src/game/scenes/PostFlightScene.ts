@@ -3,6 +3,7 @@ import { SaveService } from '../../services/SaveService';
 import { TimeService } from '../../services/TimeService';
 import { EventBus } from '../utils/EventBus';
 import { fadeIn, fadeToScene } from '../utils/transitions';
+import { SoundEngine } from '../audio/SoundEngine';
 import { ContractService } from '../../services/ContractService';
 import type { LandingResult, Contract, FlightState, CargoSlot } from '../../types';
 import { clamp } from '../utils/math';
@@ -204,6 +205,6 @@ export class PostFlightScene extends Phaser.Scene {
       .setInteractive({ useHandCursor: true })
       .on('pointerover', function(this: Phaser.GameObjects.Text) { this.setStyle({ color: '#ffd080' }); })
       .on('pointerout',  function(this: Phaser.GameObjects.Text) { this.setStyle({ color: '#e8d5b7' }); })
-      .on('pointerdown', onClick);
+      .on('pointerdown', () => { SoundEngine.click(); onClick(); });
   }
 }

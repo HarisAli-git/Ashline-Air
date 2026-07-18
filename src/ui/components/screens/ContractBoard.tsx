@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { SaveService } from '../../../services/SaveService';
 import { ContractService } from '../../../services/ContractService';
 import { EventBus } from '../../../game/utils/EventBus';
+import { SoundEngine } from '../../../game/audio/SoundEngine';
 import type { Contract, GoodDefinition } from '../../../types';
 
 interface Props {
@@ -65,6 +66,7 @@ export function ContractBoard({ settlementId, onContractAccepted }: Props): Reac
     s.player.activeContractId = contract.id;
     SaveService.save(s.player, s.world);
 
+    SoundEngine.chime();
     setAccepted(contract.id);
     onContractAccepted();
 

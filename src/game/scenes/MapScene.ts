@@ -3,6 +3,7 @@ import { SaveService } from '../../services/SaveService';
 import { EventBus } from '../utils/EventBus';
 import { fadeIn, fadeToScene } from '../utils/transitions';
 import { ensureSharedTextures } from '../entities/aircraft/render/AircraftPainter';
+import { SoundEngine } from '../audio/SoundEngine';
 import { distance, pixelsToKm } from '../utils/math';
 import type { SettlementDefinition } from '../../types';
 
@@ -270,6 +271,7 @@ export class MapScene extends Phaser.Scene {
     container.on('pointerover', () => { drawDot(true); this.showTooltip(settlement); });
     container.on('pointerout', () => { drawDot(false); this.hideTooltip(); });
     container.on('pointerdown', () => {
+      SoundEngine.click();
       EventBus.emit('scene:open-preflight', { settlementId: settlement.id });
       fadeToScene(this, 'PreFlightScene', { settlementId: settlement.id });
     });

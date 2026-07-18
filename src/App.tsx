@@ -7,6 +7,7 @@ import { PreFlightScene }  from './game/scenes/PreFlightScene';
 import { FlightScene }     from './game/scenes/FlightScene';
 import { PostFlightScene } from './game/scenes/PostFlightScene';
 import { EventBus }        from './game/utils/EventBus';
+import { SoundEngine }     from './game/audio/SoundEngine';
 import { FlightHUD }       from './ui/components/hud/FlightHUD';
 import { PreFlightOverlay }from './ui/components/screens/PreFlightOverlay';
 import { GlobalNotification } from './ui/components/menus/Notification';
@@ -22,6 +23,17 @@ export default function App(): React.ReactElement {
   const gameRef = useRef<Phaser.Game | null>(null);
   const [uiLayer, setUiLayer] = useState<UILayer>('none');
   const [preflightState, setPreflightState] = useState<PreflightState | null>(null);
+
+  // Browsers only allow audio after a user gesture — unlock on the first one
+  useEffect(() => {
+    const unlock = (): void => SoundEngine.unlock();
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current || gameRef.current) return;

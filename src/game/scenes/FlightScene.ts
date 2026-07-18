@@ -9,13 +9,15 @@ import { SaveService } from '../../services/SaveService';
 import { CargoHold } from '../entities/CargoHold';
 import { EventBus } from '../utils/EventBus';
 import { fadeIn, fadeToScene, flashToScene } from '../utils/transitions';
+import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
 import { clamp, distance, pixelsToKm } from '../utils/math';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
 const GROUND_Y_OFFSET = 110;  // px from screen bottom to ground line
-const AIRCRAFT_X      = 190;  // screen x when stationary
-const AIRCRAFT_X_FAST = 430;  // screen x at max speed — acceleration reads on screen
+// TU-46 camera: the aircraft holds a fixed screen position and the WORLD does
+// all the moving — speed reads through scroll, never by sliding the sprite.
+const AIRCRAFT_X      = 300;
 
 interface FlightSceneData { contractId: string; }
 
@@ -71,9 +73,6 @@ export class FlightScene extends Phaser.Scene {
   private warpText!: Phaser.GameObjects.Text;
   private baseTimestamp = 480; // world clock at takeoff (minutes)
 
-  // ── Speed-reactive camera framing ─────────────────────────────────────────
-  private planeX = AIRCRAFT_X;
-  private maxSpeedMs = 50;
 
   constructor() { super({ key: 'FlightScene' }); }
 
@@ -97,7 +96,6 @@ export class FlightScene extends Phaser.Scene {
     this.notifiedApproach    = false;
     this.notifiedArrival     = false;
     this.timeScale           = 1;
-    this.planeX              = AIRCRAFT_X;
   }
 
   create(): void {
@@ -109,7 +107,6 @@ export class FlightScene extends Phaser.Scene {
     const { owned, def: definition } = SaveService.getActiveAircraft();
 
     this.controller = new AircraftController(definition);
-    this.maxSpeedMs = definition.stats.maxSpeed / 3.6;
     this.state      = this.controller.initialState();
     this.state.fuel        = owned.fuel;
     this.state.integrity   = owned.integrity;
@@ -117,6 +114,7 @@ export class FlightScene extends Phaser.Scene {
 
     // Stall buffet shakes the camera; touchdown captures true impact values
     this.controller.onBuffet = () => {
+      if (this.shakeDuration < 50) SoundEngine.stallBuffet();
       this.shakeDuration = Math.max(this.shakeDuration, 150);
       this.disengageWarp('stall warning');
     };
@@ -162,7 +160,7 @@ export class FlightScene extends Phaser.Scene {
     }).setOrigin(0.5).setDepth(10).setAlpha(0);
 
     this.add.text(width - 12, height - 12,
-      'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine   T: ×4 Time   ESC: Abort',
+      'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine   T: Time ×4/×8   M: Mute   ESC: Abort',
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
     ).setOrigin(1, 1).setDepth(10);
@@ -182,6 +180,7 @@ export class FlightScene extends Phaser.Scene {
       G:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
       F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
       T:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.T),
+      M:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.M),
       ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
     };
 
@@ -217,7 +216,10 @@ export class FlightScene extends Phaser.Scene {
     this.events.once('shutdown', () => {
       this.eventUnsubs.forEach(u => u());
       this.eventUnsubs = [];
+      SoundEngine.stopFlightLoop();
     });
+    SoundEngine.unlock();
+    SoundEngine.startFlightLoop();
 
     // ── First draw ────────────────────────────────────────────────────────
     this.world.update(0, {
@@ -269,12 +271,18 @@ export class FlightScene extends Phaser.Scene {
         this.state.gearDown = !this.state.gearDown;
         this.aircraft.setGearDown(this.state.gearDown);
         this.gearToggleCooldown = 500;
+        SoundEngine.gearMove();
         EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
       }
+    }
+    if (Phaser.Input.Keyboard.JustDown(this.keys.M)) {
+      const muted = SoundEngine.toggleMute();
+      EventBus.emit('ui:show-notification', { message: muted ? 'Sound muted.' : 'Sound on.', type: 'info' });
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.F) && this.flapsToggleCooldown === 0) {
       this.state.flapsDeployed = !this.state.flapsDeployed;
       this.flapsToggleCooldown = 500;
+      SoundEngine.flapMove();
       EventBus.emit('flight:flaps-toggled', { deployed: this.state.flapsDeployed });
       EventBus.emit('ui:show-notification', {
         message: this.state.flapsDeployed
@@ -284,14 +292,18 @@ export class FlightScene extends Phaser.Scene {
       });
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.T)) {
-      if (this.timeScale > 1) {
+      if (this.timeScale === 4) {
+        this.timeScale = 8;
+        this.warpText.setText('»» TIME ×8').setVisible(true);
+        EventBus.emit('ui:show-notification', { message: '»» Time warp ×8.', type: 'info' });
+      } else if (this.timeScale > 4) {
         this.timeScale = 1;
         this.warpText.setVisible(false);
         EventBus.emit('ui:show-notification', { message: 'Time warp off.', type: 'info' });
       } else if (this.state.altitude > 60 && !this.rollout) {
         this.timeScale = 4;
-        this.warpText.setVisible(true);
-        EventBus.emit('ui:show-notification', { message: '»» Time warp ×4 — auto-disengages when something needs you.', type: 'info' });
+        this.warpText.setText('»» TIME ×4').setVisible(true);
+        EventBus.emit('ui:show-notification', { message: '»» Time warp ×4 — press T again for ×8. Auto-disengages when something needs you.', type: 'info' });
       } else {
         EventBus.emit('ui:show-notification', { message: 'Time warp needs stable flight above 60 m.', type: 'warning' });
       }
@@ -338,6 +350,7 @@ export class FlightScene extends Phaser.Scene {
 
     // Fuel warning (every 5s)
     if (this.state.fuel < 15 && Math.floor(time / 5000) !== Math.floor((time - delta) / 5000)) {
+      SoundEngine.warn();
       EventBus.emit('ui:show-notification', {
         message: `⚠ FUEL CRITICAL: ${this.state.fuel.toFixed(0)} L remaining`,
         type: 'danger',
@@ -346,6 +359,7 @@ export class FlightScene extends Phaser.Scene {
 
     // Engine overheat warning
     if (this.state.engineTemp > 0.85 && Math.floor(time / 8000) !== Math.floor((time - delta) / 8000)) {
+      SoundEngine.warn();
       EventBus.emit('ui:show-notification', {
         message: 'ENGINE OVERHEATING — reduce throttle',
         type: 'warning',
@@ -372,7 +386,8 @@ export class FlightScene extends Phaser.Scene {
       const { vs, speed } = this.pendingTouchdown;
       const result = this.evaluateLanding(vs, speed);
       this.aircraft.notifyTouchdown(vs);
-      this.world.addSkidMark(this.scrollX + this.planeX);
+      SoundEngine.touchdown(vs);
+      this.world.addSkidMark(this.scrollX + AIRCRAFT_X);
       this.cargo.applyDamage(result.cargoDamagePercent);
 
       if (result.quality === 'crash') {
@@ -441,12 +456,8 @@ export class FlightScene extends Phaser.Scene {
     });
     this.fx.update(sdt);
 
-    // ── Aircraft: screen x slides forward with speed so acceleration shows ─
-    const speedFrac = clamp(this.state.groundSpeed / this.maxSpeedMs, 0, 1);
-    const targetX = AIRCRAFT_X + (AIRCRAFT_X_FAST - AIRCRAFT_X) * speedFrac;
-    this.planeX += (targetX - this.planeX) * (1 - Math.exp(-dt * 1.4));
+    // ── Aircraft ───────────────────────────────────────────────────────────
     this.aircraft.setTurbulence(turbulence);
-    this.aircraft.container.setX(this.planeX);
     this.aircraft.container.setY(this.world.altitudeToScreenY(this.state.altitude));
     this.aircraft.update(sdt, this.state);
 
@@ -458,6 +469,15 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Approach guidance ──────────────────────────────────────────────────
     this.updateApproachIndicator();
+
+    // ── Audio: engine drone + wind rush follow the flight state ───────────
+    const rpm = this.engineRunning ? 0.15 + this.state.throttle * 0.85 : 0;
+    SoundEngine.updateFlight(
+      rpm,
+      this.state.throttle,
+      clamp(this.state.speed / 60, 0, 1),
+      this.timeScale,
+    );
 
     // ── Events to React ────────────────────────────────────────────────────
     EventBus.emit('flight:state-update', this.state);
@@ -603,6 +623,7 @@ export class FlightScene extends Phaser.Scene {
       cargoSlots: this.cargo.slots,
       reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
     };
+    if (result.quality === 'crash') SoundEngine.crash(); else SoundEngine.chime();
     if (result.quality === 'crash') {
       flashToScene(this, 'PostFlightScene', data);
     } else {
