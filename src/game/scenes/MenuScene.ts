@@ -4,6 +4,7 @@ import { EconomyService } from '../../services/EconomyService';
 import { ContractService } from '../../services/ContractService';
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { fadeIn, fadeToScene } from '../utils/transitions';
+import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState } from '../../types';
 
 interface Star   { x: number; y: number; r: number; phase: number; spd: number; }
@@ -293,6 +294,6 @@ export class MenuScene extends Phaser.Scene {
 
     text.on('pointerover',  () => { drawBox(true);  text.setStyle({ color: '#ffd080' }); });
     text.on('pointerout',   () => { drawBox(false); text.setStyle({ color: '#b8a878' }); });
-    text.on('pointerdown', onClick);
+    text.on('pointerdown', () => { SoundEngine.click(); onClick(); });
   }
 }

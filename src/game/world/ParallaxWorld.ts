@@ -11,8 +11,8 @@ import type { WeatherCondition } from '../../types';
 
 export const ALT_BAND = 250;       // metres of altitude mapped linearly to screen
 export const PLANE_MIN_Y = 160;    // screen y the aircraft pins to above the band
-/** World px per metre flown — >1 so motion reads fast on screen. */
-export const WORLD_PX_PER_M = 3.2;
+/** World px per metre flown — high so speed genuinely reads on screen. */
+export const WORLD_PX_PER_M = 6;
 
 interface Palette {
   skyTop: number; skyBot: number; glow: number;
@@ -355,7 +355,8 @@ export class ParallaxWorld {
       if (open) g.strokePath();
     }
 
-    // Conifer silhouettes planted on the surface
+    // Tree silhouettes planted on the surface — nature returning, but a lot
+    // of it burned: a mix of live conifers and dead snags
     if (opts.trees !== undefined) {
       const spacing = 64;
       const first = Math.floor((scrollX * factor - 40) / spacing);
@@ -365,9 +366,143 @@ export class ParallaxWorld {
         if (sx < -20 || sx > this.width + 20) continue;
         const ty = baseY - heightAt(sx);
         const s = 0.7 + propRand(i + 77) * 0.8;
-        g.fillStyle(opts.trees, 0.9);
-        g.fillTriangle(sx - 4 * s, ty + 2, sx, ty - 10 * s, sx + 4 * s, ty + 2);
-        g.fillTriangle(sx - 3 * s, ty - 5 * s, sx, ty - 14 * s, sx + 3 * s, ty - 5 * s);
+        if (propRand(i + 555) < 0.35) {
+          // Burnt snag
+          g.lineStyle(1.6 * s, opts.trees, 0.9);
+          g.lineBetween(sx, ty + 2, sx, ty - 12 * s);
+          g.lineBetween(sx, ty - 7 * s, sx + 4 * s, ty - 10 * s);
+          g.lineBetween(sx, ty - 4 * s, sx - 3 * s, ty - 7 * s);
+        } else {
+          g.fillStyle(opts.trees, 0.9);
+          g.fillTriangle(sx - 4 * s, ty + 2, sx, ty - 10 * s, sx + 4 * s, ty + 2);
+          g.fillTriangle(sx - 3 * s, ty - 5 * s, sx, ty - 14 * s, sx + 3 * s, ty - 5 * s);
+        }
+      }
+    }
+  }
+
+  /**
+   * A shambling figure — the reason every settlement has walls. Lurches
+   * forward with a dragging gait; `face` = which way it's stumbling.
+   */
+  private drawShambler(
+    g: Phaser.GameObjects.Graphics,
+    x: number,
+    groundLine: number,
+    i: number,
+    scale = 1,
+    face: 1 | -1 = 1,
+  ): void {
+    const s = scale;
+    const ph = i * 1.7;
+    const lean = (0.14 + Math.sin(this.t * 0.9 + ph) * 0.05) * face;
+    const step = Math.sin(this.t * 2.4 + ph);
+    const col = 0x110d07;
+
+    const hipX = x, hipY = groundLine - 8 * s;
+    g.lineStyle(1.8 * s, col, 0.95);
+    g.lineBetween(hipX, hipY, hipX + step * 3 * s, groundLine);
+    g.lineBetween(hipX, hipY, hipX - step * 2.4 * s, groundLine);
+
+    const shX = hipX + lean * 11 * s, shY = hipY - 7 * s;
+    g.lineStyle(2.4 * s, col, 0.95);
+    g.lineBetween(hipX, hipY, shX, shY);
+    g.fillStyle(col, 0.95);
+    g.fillCircle(shX + 1.5 * s * face, shY - 2.5 * s, 2.2 * s);
+
+    // Arms out, reaching
+    const armDrop = Math.sin(this.t * 1.8 + ph) * 1.6;
+    g.lineStyle(1.5 * s, col, 0.95);
+    g.lineBetween(shX, shY, shX + 6 * s * face, shY + 3 * s + armDrop);
+    g.lineBetween(shX, shY, shX + 5 * s * face, shY + 5.5 * s - armDrop);
+  }
+
+  /** Dead city blocks to overfly: broken towers with jagged tops, a leaning
+   *  high-rise, rubble mounds — the world that was. */
+  private drawRuinedCities(g: Phaser.GameObjects.Graphics, scrollX: number, baseY: number): void {
+    const cellW = 3600;
+    const factor = 0.55;
+    const first = Math.floor((scrollX * factor - 400) / cellW);
+    for (let c = first; c <= first + Math.ceil(this.width / cellW) + 1; c++) {
+      if (propRand(c + 71) < 0.45) continue;
+      const cx = c * cellW + propRand(c + 5) * 1400 - scrollX * factor;
+      if (cx < -400 || cx > this.width + 400) continue;
+
+      const n = 4 + Math.floor(propRand(c + 13) * 3);
+      for (let b = 0; b < n; b++) {
+        const bx = cx + b * (46 + propRand(c * 7 + b) * 26);
+        const bw = 26 + propRand(c + b * 3) * 18;
+        const bh = 42 + propRand(c + b * 11) * 78;
+        const col = propRand(c + b) > 0.5 ? 0x171310 : 0x1d1813;
+
+        if (b === 2 && propRand(c + 99) > 0.5) {
+          // One tower leans, mid-collapse
+          g.fillStyle(col, 1);
+          g.beginPath();
+          g.moveTo(bx, baseY);
+          g.lineTo(bx + bw * 0.28, baseY - bh);
+          g.lineTo(bx + bw * 1.28, baseY - bh * 0.92);
+          g.lineTo(bx + bw, baseY);
+          g.closePath();
+          g.fillPath();
+        } else {
+          // Jagged broken top: a polygon whose roofline steps down and up
+          const notchL = 10 + propRand(b + c) * 8;
+          const notchR = 6 + propRand(b * 2 + c) * 9;
+          g.fillStyle(col, 1);
+          g.beginPath();
+          g.moveTo(bx, baseY);
+          g.lineTo(bx, baseY - bh + notchL);
+          g.lineTo(bx + bw * 0.34, baseY - bh);
+          g.lineTo(bx + bw * 0.6, baseY - bh);
+          g.lineTo(bx + bw, baseY - bh + notchR);
+          g.lineTo(bx + bw, baseY);
+          g.closePath();
+          g.fillPath();
+        }
+
+        // Dead windows, a couple of scorch streaks
+        g.fillStyle(0x000000, 0.5);
+        for (let wy = baseY - bh + 14; wy < baseY - 8; wy += 12) {
+          for (let wx = bx + 5; wx < bx + bw - 4; wx += 9) {
+            if (propRand(wx + wy + c) < 0.55) g.fillRect(wx, wy, 3.5, 5);
+          }
+        }
+        g.fillStyle(0x0a0806, 0.6);
+        g.fillRect(bx + bw * 0.3, baseY - bh + 8, 4, bh * 0.4);
+      }
+      // Rubble mounds at the feet
+      g.fillStyle(0x14100b, 1);
+      g.fillEllipse(cx + 40, baseY - 3, 90, 12);
+      g.fillEllipse(cx + 150, baseY - 2, 70, 9);
+    }
+  }
+
+  /** Distant smoke columns — something is always burning out there. */
+  private drawSmokeColumns(g: Phaser.GameObjects.Graphics, scrollX: number, baseY: number): void {
+    const cellW = 2400;
+    const factor = 0.55;
+    const first = Math.floor((scrollX * factor - 300) / cellW);
+    for (let c = first; c <= first + Math.ceil(this.width / cellW) + 1; c++) {
+      if (propRand(c + 7) < 0.45) continue;
+      const cx = c * cellW + propRand(c) * 1200 - scrollX * factor;
+      if (cx < -80 || cx > this.width + 80) continue;
+
+      const colH = 90 + propRand(c + 11) * 70;
+      for (let k = 0; k < 7; k++) {
+        const yy = baseY - (k / 7) * colH;
+        const sway = Math.sin(this.t * 0.7 + k * 0.8 + c) * (2 + k * 2.4);
+        const r = 4 + k * 2.8;
+        g.fillStyle(0x17140f, 0.30 * (1 - k / 8.5));
+        g.fillEllipse(cx + sway + k * 3, yy, r * 2, r * 1.3);
+      }
+      // Half of them still burn at the base
+      if (propRand(c + 3) < 0.5) {
+        const fl = 0.5 + Math.sin(this.t * 7 + c * 2) * 0.3;
+        g.fillStyle(0xff7726, 0.30 * fl);
+        g.fillEllipse(cx, baseY - 3, 14, 7);
+        g.fillStyle(0xffb040, 0.22 * fl);
+        g.fillEllipse(cx, baseY - 5, 7, 4);
       }
     }
   }
@@ -489,12 +624,15 @@ export class ParallaxWorld {
     }
   }
 
-  /** Near-foreground strip of seeded wasteland props: rocks, dead trees, wrecks. */
+  /** Near-foreground strip of seeded wasteland props: rocks, wrecks, walkers. */
   private drawScrub(scrollX: number, sink: number): void {
     const g = this.scrubGfx;
     g.clear();
     const baseY = this.groundY + sink;
     if (baseY > this.height + 30) return;
+
+    this.drawSmokeColumns(g, scrollX, baseY);
+    this.drawRuinedCities(g, scrollX, baseY);
 
     const spacing = 240;
     const scroll = scrollX * 0.55;
@@ -502,7 +640,7 @@ export class ParallaxWorld {
     for (let i = first; i < first + Math.ceil(this.width / spacing) + 2; i++) {
       const sx = i * spacing - scroll + (propRand(i) - 0.5) * 120;
       if (sx < -60 || sx > this.width + 60) continue;
-      const kind = Math.floor(propRand(i + 50) * 4);
+      const kind = Math.floor(propRand(i + 50) * 6);
       const s = 0.7 + propRand(i + 90) * 0.7;
       g.fillStyle(this.pal.scrub, 1);
       g.lineStyle(2 * s, this.pal.scrub, 1);
@@ -520,6 +658,22 @@ export class ParallaxWorld {
           g.fillRect(sx - 14 * s, baseY - 5 * s, 28 * s, 5 * s);
           g.fillTriangle(sx - 2 * s, baseY - 5 * s, sx + 8 * s, baseY - 14 * s, sx + 10 * s, baseY - 5 * s);
           break;
+        case 3: { // abandoned car, doors hanging open
+          g.fillRect(sx - 11 * s, baseY - 6 * s, 22 * s, 5 * s);
+          g.fillRect(sx - 6 * s, baseY - 9 * s, 12 * s, 4 * s);
+          g.lineStyle(1.4 * s, this.pal.scrub, 1);
+          g.lineBetween(sx + 11 * s, baseY - 6 * s, sx + 15 * s, baseY - 2 * s); // sprung door
+          break;
+        }
+        case 4: { // walkers — one to three, drifting through the waste
+          const n = 1 + Math.floor(propRand(i + 31) * 3);
+          const face: 1 | -1 = propRand(i + 44) > 0.5 ? 1 : -1;
+          for (let z = 0; z < n; z++) {
+            const wander = Math.sin(this.t * 0.35 + i + z * 2.1) * 7;
+            this.drawShambler(g, sx + z * 12 * s + wander, baseY, i * 3 + z, 0.85 * s, face);
+          }
+          break;
+        }
         default: // scrub brush
           for (let b = 0; b < 3; b++) {
             g.fillCircle(sx + (b - 1) * 5 * s, baseY - 3 * s, 3 * s);
@@ -568,29 +722,104 @@ export class ParallaxWorld {
       g.fillRect(sx - 30, gy + 6, 26, 1.6);
     }
 
+    // Lone walkers in the open between the settlements — full-parallax, same
+    // plane as the aircraft: real danger on a forced landing out here
+    {
+      const PXM2 = WORLD_PX_PER_M;
+      const dPx = Math.max(2000 * PXM2, f.routeTotalKm * 1000 * PXM2);
+      const zoneA: [number, number] = [-150 * PXM2 - 900, 450 * PXM2 + 900];
+      const zoneB: [number, number] = [dPx - 300 * PXM2 - 900, dPx + 300 * PXM2 + 900];
+      const cellW = 760;
+      const first = Math.floor((scrollX - 100) / cellW);
+      for (let c = first; c <= first + Math.ceil(this.width / cellW) + 1; c++) {
+        if (propRand(c + 313) < 0.55) continue;
+        const wx = c * cellW + propRand(c + 17) * 500;
+        if (wx > zoneA[0] && wx < zoneA[1]) continue;
+        if (wx > zoneB[0] && wx < zoneB[1]) continue;
+        const sx = wx - scrollX;
+        if (sx < -30 || sx > this.width + 30) continue;
+        const face: 1 | -1 = propRand(c + 91) > 0.5 ? 1 : -1;
+        this.drawShambler(g, sx + Math.sin(this.t * 0.3 + c) * 9, gy + 1, c, 1.2, face);
+      }
+    }
+
     // Runway zones — origin at world 0, destination at the contract distance.
-    // Proper-length strips (~1.2 km of runway) with the settlements beyond them.
+    // Compact ~600 m strips with the airfield buildings right on them and the
+    // settlements beyond.
     const PXM = WORLD_PX_PER_M;
     const destPx = Math.max(2000 * PXM, f.routeTotalKm * 1000 * PXM);
-    const oriFrom = -350 * PXM, oriTo = 900 * PXM;
-    const dstFrom = destPx - 500 * PXM, dstTo = destPx + 900 * PXM;
+    const oriFrom = -150 * PXM, oriTo = 450 * PXM;
+    const dstFrom = destPx - 300 * PXM, dstTo = destPx + 300 * PXM;
     this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f);
     this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f);
-    this.drawSettlement(g, oriFrom - 80, scrollX, gy, -1);
-    this.drawSettlement(g, dstTo + 80, scrollX, gy, 1);
+    // Origin airfield sits just behind the spawn point (aircraft spawns at
+    // screen/world ~300) so the field is on screen from the first frame; the
+    // destination's is at its strip entrance, overflown on approach.
+    this.drawAirfield(g, 10, scrollX, gy);
+    this.drawAirfield(g, dstFrom + 60, scrollX, gy);
+    this.drawSettlement(g, oriFrom - 60, scrollX, gy, -1);
+    this.drawSettlement(g, dstTo + 60, scrollX, gy, 1);
 
     // Cracks / ruts between runways so open terrain isn't sterile
     const spacing = 170;
     const first = Math.floor((scrollX - 60) / spacing);
     for (let i = first; i < first + Math.ceil(this.width / spacing) + 1; i++) {
       const wx = i * spacing + propRand(i + 13) * 80;
-      if (wx > oriFrom - 700 && wx < oriTo + 700) continue;
-      if (wx > dstFrom - 700 && wx < dstTo + 700) continue;
+      if (wx > oriFrom - 500 && wx < oriTo + 500) continue;
+      if (wx > dstFrom - 500 && wx < dstTo + 500) continue;
       const sx = wx - scrollX;
       if (sx < -40 || sx > this.width + 40) continue;
       g.lineStyle(1.5, 0x000000, 0.18);
       g.lineBetween(sx, gy + 6 + propRand(i + 7) * 10, sx + 26 + propRand(i) * 30, gy + 8 + propRand(i + 3) * 12);
     }
+  }
+
+  /** Airfield buildings along the strip: hangar, control tower, fuel drums.
+   *  Drawn behind the aircraft so the field reads as a real place. */
+  private drawAirfield(
+    g: Phaser.GameObjects.Graphics,
+    startPx: number,
+    scrollX: number,
+    gy: number,
+  ): void {
+    const sx = startPx - scrollX;
+    if (sx < -600 || sx > this.width + 600) return;
+
+    const dark = 0x15100a;
+    const mid = 0x241b10;
+
+    // Hangar: arched roof over a box, door cracked open
+    const hx = sx + 20;
+    g.fillStyle(mid, 1);
+    g.fillRect(hx, gy - 34, 92, 34);
+    g.fillStyle(dark, 1);
+    g.fillEllipse(hx + 46, gy - 34, 92, 26);
+    g.fillStyle(0x0a0805, 1);
+    g.fillRect(hx + 30, gy - 24, 32, 24); // open door gap
+    g.lineStyle(1, 0x4a3a22, 0.7);
+    for (let i = 0; i < 4; i++) g.lineBetween(hx + 8 + i * 22, gy - 32, hx + 8 + i * 22, gy - 2);
+
+    // Control tower: legs, cab, blinking light
+    const tx = sx + 160;
+    g.lineStyle(2.5, dark, 1);
+    g.lineBetween(tx - 8, gy, tx - 4, gy - 34);
+    g.lineBetween(tx + 8, gy, tx + 4, gy - 34);
+    g.fillStyle(dark, 1);
+    g.fillRect(tx - 14, gy - 50, 28, 17);
+    g.fillStyle(0x86a0aa, 0.55);
+    g.fillRect(tx - 11, gy - 47, 22, 8); // glazing
+    if (Math.sin(this.t * 5) > 0) {
+      g.fillStyle(0x30ff70, 0.9);
+      g.fillCircle(tx, gy - 53, 1.8);
+    }
+
+    // Fuel drums + stack of crates
+    const dx = sx + 220;
+    g.fillStyle(0x3a2c18, 1);
+    for (let i = 0; i < 3; i++) g.fillRect(dx + i * 9, gy - 10, 7, 10);
+    g.fillStyle(mid, 1);
+    g.fillRect(dx + 34, gy - 8, 10, 8);
+    g.fillRect(dx + 38, gy - 15, 10, 8);
   }
 
   /** Fortified settlement silhouette beyond a runway: buildings, water tower,
@@ -653,6 +882,23 @@ export class ParallaxWorld {
       g.fillStyle(0xff4030, 0.25);
       g.fillCircle(ax, gy - 90, 6);
     }
+
+    // Why the walls exist: a knot of the dead pressing at the perimeter
+    const hordeN = 4 + Math.floor(propRand(Math.round(anchorPx)) * 3);
+    for (let z = 0; z < hordeN; z++) {
+      const hx = sx0 - dir * (16 + z * 11 + propRand(z + 5) * 8);
+      const push = Math.abs(Math.sin(this.t * 1.1 + z)) * 3;
+      this.drawShambler(g, hx + dir * push, gy + 1, z * 7 + 3, 0.95 + propRand(z) * 0.25, dir);
+    }
+
+    // Quarantine sign on the approach
+    const qx = sx0 - dir * 150;
+    g.lineStyle(2, 0x6a6458, 1);
+    g.lineBetween(qx, gy, qx, gy - 22);
+    g.fillStyle(0xa88a28, 0.9);
+    g.fillTriangle(qx - 8, gy - 22, qx + 8, gy - 22, qx, gy - 36);
+    g.fillStyle(0x111111, 0.95);
+    g.fillCircle(qx, gy - 27.5, 2.6);
   }
 
   private drawRunway(

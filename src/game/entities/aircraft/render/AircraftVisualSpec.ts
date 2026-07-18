@@ -95,7 +95,7 @@ export const AIRCRAFT_SPECS: Record<string, AircraftVisualSpec> = {
     beacon: { x: -58, y: -36 },
     exhaust: { x: 40, y: 10 },
     groundContactY: 38,
-    groundStanceDeg: 8,
+    groundStanceDeg: 11,
   },
 
   bush_plane: {
@@ -118,7 +118,7 @@ export const AIRCRAFT_SPECS: Record<string, AircraftVisualSpec> = {
     beacon: { x: -62, y: -38 },
     exhaust: { x: 44, y: 12 },
     groundContactY: 44,
-    groundStanceDeg: 8,
+    groundStanceDeg: 11,
   },
 
   old_cargo_aircraft: {
@@ -144,7 +144,7 @@ export const AIRCRAFT_SPECS: Record<string, AircraftVisualSpec> = {
     beacon: { x: -84, y: -52 },
     exhaust: { x: 22, y: 22 },
     groundContactY: 58,
-    groundStanceDeg: 7,
+    groundStanceDeg: 9,
   },
 
   twin_turboprop: {

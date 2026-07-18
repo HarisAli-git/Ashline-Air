@@ -2,8 +2,10 @@ import type { WeatherState, WeatherCondition } from '../../../types';
 import { randomBetween, clamp } from '../../utils/math';
 import { EventBus } from '../../utils/EventBus';
 
-const MIN_CHANGE_INTERVAL = 45;   // s before the weather can shift
-const CHANGE_CHANCE_PER_SECOND = 0.012;
+const MIN_CHANGE_INTERVAL = 25;   // s before the weather can shift
+const CHANGE_CHANCE_PER_SECOND = 0.035;
+const SQUALL_CHANCE = 0.45;       // a change may be a short violent burst…
+const SQUALL_CONDITIONS: WeatherCondition[] = ['dust_storm', 'strong_winds', 'thunderstorm', 'blizzard'];
 
 const WEIGHTS: Array<[WeatherCondition, number]> = [
   ['clear', 0.35],
@@ -34,6 +36,8 @@ export class WeatherSystem {
   private state: WeatherState;
   private timeSinceChange = 0;
   private driftAccum = 0;
+  private squallLeft = 0;                       // seconds of squall remaining
+  private preSquall: WeatherCondition | null = null;
 
   constructor(initial?: Partial<WeatherState>) {
     this.state = {
@@ -67,8 +71,30 @@ export class WeatherSystem {
       this.state.windSpeed = clamp(this.state.windSpeed + randomBetween(-0.5, 0.5), 0, 25);
       this.state.windDirection = (this.state.windDirection + randomBetween(-2, 2) + 360) % 360;
 
+      // Squalls blow over on their own
+      if (this.squallLeft > 0) {
+        this.squallLeft -= 1;
+        if (this.squallLeft <= 0 && this.preSquall !== null) {
+          const back = this.preSquall;
+          this.preSquall = null;
+          this.applyCondition(back);
+          EventBus.emit('ui:show-notification', { message: 'The squall blows itself out.', type: 'info' });
+        }
+        continue; // no new change while a squall is running
+      }
+
       if (this.timeSinceChange >= MIN_CHANGE_INTERVAL && Math.random() < CHANGE_CHANCE_PER_SECOND) {
-        this.changeWeather();
+        if (Math.random() < SQUALL_CHANCE) {
+          // …a sudden burst of violent weather that lasts seconds, not minutes
+          const squall = SQUALL_CONDITIONS[Math.floor(Math.random() * SQUALL_CONDITIONS.length)];
+          if (squall !== this.state.condition) {
+            this.preSquall = this.state.condition;
+            this.squallLeft = 9 + Math.random() * 10;
+            this.applyCondition(squall);
+          }
+        } else {
+          this.changeWeather();
+        }
         this.timeSinceChange = 0;
       }
     }
