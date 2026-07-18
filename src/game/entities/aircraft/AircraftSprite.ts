@@ -202,8 +202,14 @@ export class AircraftSprite {
     this.legs.push(makeLeg(g.mainX, MAIN_STOWED_RAD));
     if (g.noseX !== null) this.legs.push(makeLeg(g.noseX, NOSE_STOWED_RAD));
     if (g.tailWheelX !== null) {
-      // Taildragger tail wheel: small, never retracts
-      const tail = makeLeg(g.tailWheelX, 0, 0.55);
+      // Taildragger tail wheel: never retracts. Solve its leg length so the
+      // wheel actually touches the runway at the nose-high parked stance.
+      const theta = Phaser.Math.DegToRad(this.spec.groundStanceDeg ?? 0);
+      const reach =
+        (this.spec.groundContactY + g.mainX * Math.sin(theta) - Math.abs(g.tailWheelX) * Math.sin(theta)) /
+        Math.max(0.7, Math.cos(theta));
+      const scale = Phaser.Math.Clamp((reach - g.hingeY) / (g.strutLen + g.wheelR), 0.4, 1.2);
+      const tail = makeLeg(g.tailWheelX, 0, scale);
       tail.door = null;
       this.legs.push(tail);
       tail.root.setRotation(0);
@@ -414,6 +420,16 @@ export class AircraftSprite {
     let rot = -Phaser.Math.DegToRad(clamped * 0.6);
 
     let yOff = -this.spec.groundContactY;
+
+    // Taildragger stance: parked nose-high on the tail wheel; the tail rises
+    // off the runway as the takeoff roll builds speed (and settles on landing).
+    const stanceDeg = this.spec.groundStanceDeg ?? 0;
+    if (stanceDeg > 0 && state.altitude <= 0.5) {
+      const stanceT = Phaser.Math.Clamp(1 - state.speed / 16, 0, 1);
+      const theta = Phaser.Math.DegToRad(stanceDeg) * stanceT;
+      rot -= theta;                                      // nose up
+      yOff += this.spec.gear.mainX * Math.sin(theta);    // keep the mains planted
+    }
     if (state.altitude > 0.5) {
       // Airborne: gentle bob + faint bank noise, both amplified by turbulence
       const rock = 1 + this.turb * 5;

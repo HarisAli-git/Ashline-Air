@@ -67,15 +67,24 @@ class ContractServiceClass {
     origin: SettlementDefinition,
     dest: SettlementDefinition,
     _reputation: FactionReputation[],
-    gameTimestamp: number
+    gameTimestamp: number,
+    constraints?: { forceType?: ContractType; maxWeightKg?: number },
   ): Contract | null {
-    const availableGoods = origin.goods
+    let availableGoods = origin.goods
       .map(g => this.goods.find(gd => gd.id === g.goodId))
       .filter((g): g is GoodDefinition => g !== undefined);
+    if (constraints?.maxWeightKg !== undefined) {
+      const cap = constraints.maxWeightKg;
+      availableGoods = availableGoods.filter(g => g.weightPerUnit <= cap);
+    }
+    if (constraints?.forceType === 'cargo') {
+      // Guaranteed-accessible offers must not smuggle in rep-gated goods
+      availableGoods = availableGoods.filter(g => !g.illegal);
+    }
 
     if (availableGoods.length === 0) return null;
 
-    let type = this.rollType();
+    let type = constraints?.forceType ?? this.rollType();
     const illegalGoods = availableGoods.filter(g => g.illegal);
     if (type === 'secret' && illegalGoods.length === 0) type = 'cargo';
 
@@ -104,7 +113,10 @@ class ContractServiceClass {
     } else {
       const pool = type === 'secret' ? illegalGoods : availableGoods;
       const good = pool[randomInt(0, pool.length - 1)];
-      const quantity = randomInt(1, 5);
+      let quantity = randomInt(1, 5);
+      if (constraints?.maxWeightKg !== undefined) {
+        quantity = Math.max(1, Math.min(quantity, Math.floor(constraints.maxWeightKg / good.weightPerUnit)));
+      }
       payload = [{
         goodId: good.id,
         quantity,
@@ -207,6 +219,51 @@ class ContractServiceClass {
           save.world.availableContracts.push(contract);
           changed = true;
         }
+      }
+    }
+
+    // Guarantee: never soft-lock the player — every settlement keeps at least
+    // two contracts they can actually accept with their current aircraft/rep.
+    const activeOwned =
+      save.player.ownedAircraft[Number.parseInt(save.player.activeAircraftId, 10)] ??
+      save.player.ownedAircraft[0];
+    const activeDef = window.gameData.aircraft.find(a => a.id === activeOwned?.definitionId);
+    const capacity = activeDef?.stats.cargoCapacity ?? 200;
+    const repFor = (factionId: string): number =>
+      save.player.reputation.find(r => r.factionId === factionId)?.points ?? 0;
+    const isAccessible = (c: Contract): boolean =>
+      repFor(c.factionId) >= c.reputationRequirement &&
+      c.payload.reduce((s, p) => s + p.totalWeightKg, 0) <= capacity;
+
+    for (const settlement of settlements) {
+      if (!save.player.unlockedSettlementIds.includes(settlement.id)) continue;
+      const destinations = settlements.filter(
+        s => s.id !== settlement.id && save.player.unlockedSettlementIds.includes(s.id)
+      );
+      if (destinations.length === 0) continue;
+
+      let guard = 0;
+      while (guard++ < 8) {
+        const atSettlement = save.world.availableContracts.filter(
+          c => c.originId === settlement.id && c.status === 'available'
+        );
+        if (atSettlement.filter(isAccessible).length >= Math.min(2, CONTRACTS_PER_SETTLEMENT)) break;
+
+        // Make room by dropping an inaccessible offer if the board is full
+        if (atSettlement.length >= CONTRACTS_PER_SETTLEMENT) {
+          const drop = atSettlement.find(c => !isAccessible(c));
+          if (!drop) break;
+          save.world.availableContracts = save.world.availableContracts.filter(c => c.id !== drop.id);
+        }
+
+        const dest = destinations[randomInt(0, destinations.length - 1)];
+        const forced = this.buildContract(settlement, dest, save.player.reputation, now, {
+          forceType: 'cargo',
+          maxWeightKg: capacity,
+        });
+        if (!forced) break;
+        save.world.availableContracts.push(forced);
+        changed = true;
       }
     }
 

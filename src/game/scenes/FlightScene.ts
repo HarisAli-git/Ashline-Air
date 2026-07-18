@@ -14,7 +14,8 @@ import { clamp, distance, pixelsToKm } from '../utils/math';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
 const GROUND_Y_OFFSET = 110;  // px from screen bottom to ground line
-const AIRCRAFT_X      = 240;  // fixed screen x (world scrolls past it)
+const AIRCRAFT_X      = 190;  // screen x when stationary
+const AIRCRAFT_X_FAST = 430;  // screen x at max speed — acceleration reads on screen
 
 interface FlightSceneData { contractId: string; }
 
@@ -70,6 +71,10 @@ export class FlightScene extends Phaser.Scene {
   private warpText!: Phaser.GameObjects.Text;
   private baseTimestamp = 480; // world clock at takeoff (minutes)
 
+  // ── Speed-reactive camera framing ─────────────────────────────────────────
+  private planeX = AIRCRAFT_X;
+  private maxSpeedMs = 50;
+
   constructor() { super({ key: 'FlightScene' }); }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -92,6 +97,7 @@ export class FlightScene extends Phaser.Scene {
     this.notifiedApproach    = false;
     this.notifiedArrival     = false;
     this.timeScale           = 1;
+    this.planeX              = AIRCRAFT_X;
   }
 
   create(): void {
@@ -103,6 +109,7 @@ export class FlightScene extends Phaser.Scene {
     const { owned, def: definition } = SaveService.getActiveAircraft();
 
     this.controller = new AircraftController(definition);
+    this.maxSpeedMs = definition.stats.maxSpeed / 3.6;
     this.state      = this.controller.initialState();
     this.state.fuel        = owned.fuel;
     this.state.integrity   = owned.integrity;
@@ -365,6 +372,7 @@ export class FlightScene extends Phaser.Scene {
       const { vs, speed } = this.pendingTouchdown;
       const result = this.evaluateLanding(vs, speed);
       this.aircraft.notifyTouchdown(vs);
+      this.world.addSkidMark(this.scrollX + this.planeX);
       this.cargo.applyDamage(result.cargoDamagePercent);
 
       if (result.quality === 'crash') {
@@ -433,8 +441,12 @@ export class FlightScene extends Phaser.Scene {
     });
     this.fx.update(sdt);
 
-    // ── Aircraft ───────────────────────────────────────────────────────────
+    // ── Aircraft: screen x slides forward with speed so acceleration shows ─
+    const speedFrac = clamp(this.state.groundSpeed / this.maxSpeedMs, 0, 1);
+    const targetX = AIRCRAFT_X + (AIRCRAFT_X_FAST - AIRCRAFT_X) * speedFrac;
+    this.planeX += (targetX - this.planeX) * (1 - Math.exp(-dt * 1.4));
     this.aircraft.setTurbulence(turbulence);
+    this.aircraft.container.setX(this.planeX);
     this.aircraft.container.setY(this.world.altitudeToScreenY(this.state.altitude));
     this.aircraft.update(sdt, this.state);
 

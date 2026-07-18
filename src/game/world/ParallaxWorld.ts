@@ -12,7 +12,7 @@ import type { WeatherCondition } from '../../types';
 export const ALT_BAND = 250;       // metres of altitude mapped linearly to screen
 export const PLANE_MIN_Y = 160;    // screen y the aircraft pins to above the band
 /** World px per metre flown — >1 so motion reads fast on screen. */
-export const WORLD_PX_PER_M = 2.6;
+export const WORLD_PX_PER_M = 3.2;
 
 interface Palette {
   skyTop: number; skyBot: number; glow: number;
@@ -81,6 +81,19 @@ function propRand(i: number): number {
   return x - Math.floor(x);
 }
 
+/**
+ * Multi-octave ridge profile, continuous in world space — no tiling, no
+ * repeating triangles. Returns roughly -1..1.
+ */
+function ridge(x: number, seed: number): number {
+  return (
+    Math.sin(x * 0.0019 + seed) * 0.45 +
+    Math.sin(x * 0.0047 + seed * 2.7) * 0.30 +
+    Math.sin(x * 0.0113 + seed * 5.1) * 0.16 +
+    Math.sin(x * 0.0257 + seed * 9.3) * 0.09
+  );
+}
+
 export interface WorldFrame {
   scrollX: number;      // world px travelled
   altitude: number;     // metres
@@ -130,6 +143,7 @@ export class ParallaxWorld {
 
   private t = 0;
   private readonly cloudOffsets = [0, 200, 450, 700, 900];
+  private readonly skids: number[] = []; // world-px of touchdown tire marks
 
   constructor(scene: Phaser.Scene, width: number, height: number, groundY: number) {
     this.scene = scene;
@@ -153,6 +167,12 @@ export class ParallaxWorld {
     this.fromPal = { ...this.weatherPal };
     this.toPal = resolve(condition);
     this.blendT = 0;
+  }
+
+  /** Leave a persistent tire mark on the ground where the wheels touched. */
+  addSkidMark(worldPx: number): void {
+    this.skids.push(worldPx);
+    if (this.skids.length > 24) this.skids.shift();
   }
 
   /** Screen y for a given altitude (two-band camera). */
@@ -267,24 +287,99 @@ export class ParallaxWorld {
     }
   }
 
+  /**
+   * Fills a continuous ridgeline silhouette sampled from world-space noise,
+   * with optional shading mass, crest highlight, snow line and conifers.
+   */
+  private drawRidgeLayer(
+    g: Phaser.GameObjects.Graphics,
+    scrollX: number,
+    factor: number,
+    baseY: number,
+    ampBase: number,
+    ampVar: number,
+    seed: number,
+    color: number,
+    opts: {
+      alpha?: number; shade?: number; highlight?: number;
+      snow?: number; snowMin?: number; trees?: number;
+    } = {},
+  ): void {
+    const step = 14;
+    const heightAt = (sx: number): number => {
+      const r = ridge(sx + scrollX * factor, seed);
+      const sharp = Math.sign(r) * Math.pow(Math.abs(r), 0.85); // peakier crests
+      return Math.max(6, ampBase + sharp * ampVar);
+    };
+
+    // Silhouette
+    g.fillStyle(color, opts.alpha ?? 1);
+    g.beginPath();
+    g.moveTo(-20, baseY + 60);
+    for (let sx = -20; sx <= this.width + 20; sx += step) g.lineTo(sx, baseY - heightAt(sx));
+    g.lineTo(this.width + 20, baseY + 60);
+    g.closePath();
+    g.fillPath();
+
+    // Darker lower mass — reads as valley shadow and gives the range depth
+    if (opts.shade !== undefined) {
+      g.fillStyle(opts.shade, 0.55);
+      g.beginPath();
+      g.moveTo(-20, baseY + 60);
+      for (let sx = -20; sx <= this.width + 20; sx += step) g.lineTo(sx, baseY - heightAt(sx) * 0.55);
+      g.lineTo(this.width + 20, baseY + 60);
+      g.closePath();
+      g.fillPath();
+    }
+
+    // Lit crest line
+    if (opts.highlight !== undefined) {
+      g.lineStyle(1.4, opts.highlight, 0.45 * this.dl + 0.1);
+      g.beginPath();
+      g.moveTo(-20, baseY - heightAt(-20));
+      for (let sx = -20; sx <= this.width + 20; sx += step) g.lineTo(sx, baseY - heightAt(sx));
+      g.strokePath();
+    }
+
+    // Snow along the high crests
+    if (opts.snow !== undefined && opts.snowMin !== undefined) {
+      g.lineStyle(2.6, opts.snow, 0.8);
+      let open = false;
+      for (let sx = -20; sx <= this.width + 20; sx += step) {
+        const h = heightAt(sx);
+        if (h > opts.snowMin) {
+          if (!open) { g.beginPath(); g.moveTo(sx, baseY - h); open = true; }
+          else g.lineTo(sx, baseY - h);
+        } else if (open) { g.strokePath(); open = false; }
+      }
+      if (open) g.strokePath();
+    }
+
+    // Conifer silhouettes planted on the surface
+    if (opts.trees !== undefined) {
+      const spacing = 64;
+      const first = Math.floor((scrollX * factor - 40) / spacing);
+      for (let i = first; i < first + Math.ceil(this.width / spacing) + 2; i++) {
+        if (propRand(i + 400) < 0.4) continue;
+        const sx = i * spacing + propRand(i) * 40 - scrollX * factor;
+        if (sx < -20 || sx > this.width + 20) continue;
+        const ty = baseY - heightAt(sx);
+        const s = 0.7 + propRand(i + 77) * 0.8;
+        g.fillStyle(opts.trees, 0.9);
+        g.fillTriangle(sx - 4 * s, ty + 2, sx, ty - 10 * s, sx + 4 * s, ty + 2);
+        g.fillTriangle(sx - 3 * s, ty - 5 * s, sx, ty - 14 * s, sx + 3 * s, ty - 5 * s);
+      }
+    }
+  }
+
   private drawFar(scrollX: number, sink: number, hMult: number): void {
     const g = this.farGfx;
     g.clear();
     const baseY = this.groundY + sink;
-    const period = 1600;
-    const ridges = [
-      { x: 0, h: 70 }, { x: 260, h: 110 }, { x: 520, h: 80 },
-      { x: 800, h: 130 }, { x: 1100, h: 90 }, { x: 1380, h: 115 },
-    ];
-    for (let rep = -1; rep <= 2; rep++) {
-      const bx = rep * period - ((scrollX * 0.03) % period);
-      for (const { x, h } of ridges) {
-        const mx = bx + x;
-        if (mx < -200 || mx > this.width + 200) continue;
-        g.fillStyle(this.pal.far, 0.75);
-        g.fillTriangle(mx - 170, baseY, mx, baseY - h * hMult, mx + 170, baseY);
-      }
-    }
+
+    // Two overlapping far ranges for a deep horizon
+    this.drawRidgeLayer(g, scrollX, 0.022, baseY, 42 * hMult, 55 * hMult, 13.4, this.pal.far, { alpha: 0.6 });
+    this.drawRidgeLayer(g, scrollX, 0.038, baseY, 55 * hMult, 70 * hMult, 1.7, this.pal.far, { alpha: 0.85 });
 
     // Atmospheric distance haze over the far range
     for (let i = 0; i < 3; i++) {
@@ -298,28 +393,19 @@ export class ParallaxWorld {
     g.clear();
     const baseY = this.groundY + sink;
 
-    const peaks = [
-      { x: 0, h: 100 }, { x: 160, h: 170 }, { x: 310, h: 115 },
-      { x: 480, h: 195 }, { x: 650, h: 135 }, { x: 820, h: 180 },
-      { x: 980, h: 100 }, { x: 1150, h: 155 },
-    ];
-    const period = 1200;
+    this.drawRidgeLayer(
+      g, scrollX, 0.08, baseY, 85 * hMult, 115 * hMult, 4.2, this.pal.mountain, {
+        shade: this.pal.mountainDark,
+        highlight: lerpColor(this.pal.mountain, 0xffffff, 0.35),
+        snow: this.pal.snow,
+        snowMin: 150 * hMult,
+      },
+    );
 
-    for (let rep = -1; rep <= 2; rep++) {
-      const baseX = rep * period - ((scrollX * 0.06) % period);
-      for (const { x, h } of peaks) {
-        const mx = baseX + x;
-        if (mx < -120 || mx > this.width + 120) continue;
-        const hh = h * hMult;
-        g.fillStyle(this.pal.mountain, 0.85);
-        g.fillTriangle(mx - 90, baseY, mx, baseY - hh, mx + 90, baseY);
-        g.fillStyle(this.pal.mountainDark, 0.6);
-        g.fillTriangle(mx, baseY - hh, mx + 90, baseY, mx + 10, baseY - hh * 0.4);
-        if (h > 120) {
-          g.fillStyle(this.pal.snow, 0.55);
-          g.fillTriangle(mx - 22 * hMult, baseY - hh + 42 * hMult, mx, baseY - hh, mx + 22 * hMult, baseY - hh + 42 * hMult);
-        }
-      }
+    // Light haze at the mountain feet
+    for (let i = 0; i < 2; i++) {
+      g.fillStyle(this.pal.skyBot, 0.05 - i * 0.02);
+      g.fillRect(0, baseY - 70 + i * 34, this.width, 70 - i * 34);
     }
   }
 
@@ -376,24 +462,13 @@ export class ParallaxWorld {
     g.clear();
     const baseY = this.groundY + sink;
 
-    const hills = [
-      { x: 0, h: 55, w: 160 }, { x: 220, h: 75, w: 190 },
-      { x: 450, h: 50, w: 140 }, { x: 640, h: 85, w: 210 },
-      { x: 870, h: 60, w: 170 }, { x: 1080, h: 70, w: 180 },
-    ];
-    const period = 1200;
-
-    for (let rep = -1; rep <= 2; rep++) {
-      const baseX = rep * period - ((scrollX * 0.22) % period);
-      for (const { x, h, w } of hills) {
-        const mx = baseX + x;
-        if (mx < -150 || mx > this.width + 150) continue;
-        g.fillStyle(this.pal.hill, 1);
-        g.fillTriangle(mx - w / 2, baseY, mx, baseY - h, mx + w / 2, baseY);
-        g.fillStyle(this.pal.hillLight, 0.5);
-        g.fillTriangle(mx - w * 0.15, baseY - h + 15, mx, baseY - h, mx + w * 0.15, baseY - h + 15);
-      }
-    }
+    this.drawRidgeLayer(
+      g, scrollX, 0.22, baseY, 26, 46, 8.9, this.pal.hill, {
+        shade: lerpColor(this.pal.hill, 0x000000, 0.35),
+        highlight: this.pal.hillLight,
+        trees: lerpColor(this.pal.hill, 0x000000, 0.5),
+      },
+    );
 
     // Bird flocks in fair weather, low altitude
     if ((f.condition === 'clear' || f.condition === 'cloudy') && f.altitude > 20 && sink < 60) {
@@ -459,17 +534,39 @@ export class ParallaxWorld {
     const gy = this.groundY + sink;
     if (gy > this.height + 10) return;
 
-    // Ground body
+    // Ground body with a subtle depth gradient
     g.fillStyle(this.pal.ground, 1);
     g.fillRect(0, gy, this.width, this.height - gy + 10);
+    g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.35), 1);
+    g.fillRect(0, gy + 60, this.width, this.height - gy - 50);
     g.fillStyle(this.pal.groundTop, 1);
     g.fillRect(0, gy, this.width, 18);
     g.lineStyle(2, this.pal.groundLine, 1);
     g.lineBetween(0, gy, this.width, gy);
 
-    // Texture lines
+    // Texture lines + scrolling dirt speckle so the ground itself shows motion
     g.lineStyle(1, lerpColor(this.pal.ground, 0xffffff, 0.08), 0.3);
     for (let i = 1; i <= 3; i++) g.lineBetween(0, gy + i * 22, this.width, gy + i * 22);
+    {
+      const sp = 26;
+      const first = Math.floor((scrollX - 20) / sp);
+      for (let i = first; i < first + Math.ceil(this.width / sp) + 2; i++) {
+        const sx = i * sp + propRand(i) * 20 - scrollX;
+        if (sx < -4 || sx > this.width + 4) continue;
+        const dy = 8 + propRand(i + 3) * 52;
+        g.fillStyle(propRand(i + 9) > 0.5 ? 0x000000 : 0xffffff, 0.06);
+        g.fillRect(sx, gy + dy, 2.5, 1.6);
+      }
+    }
+
+    // Touchdown tire marks left by this flight's landings
+    for (const wx of this.skids) {
+      const sx = wx - scrollX;
+      if (sx < -60 || sx > this.width + 60) continue;
+      g.fillStyle(0x0a0806, 0.55);
+      g.fillRect(sx - 40, gy + 2.5, 40, 2.2);
+      g.fillRect(sx - 30, gy + 6, 26, 1.6);
+    }
 
     // Runway zones — origin at world 0, destination at the contract distance.
     // Proper-length strips (~1.2 km of runway) with the settlements beyond them.
@@ -573,19 +670,55 @@ export class ParallaxWorld {
     const sx0 = Math.max(-60, x0);
     const sx1 = Math.min(this.width + 60, x1);
 
-    // Slab
-    g.fillStyle(0x1c1c1a, 0.9);
+    // Slab with edge line and worn shoulders
+    g.fillStyle(0x1c1c1a, 0.95);
     g.fillRect(sx0, gy + 1, sx1 - sx0, 13);
+    g.fillStyle(0x2a2a26, 0.9);
+    g.fillRect(sx0, gy + 1, sx1 - sx0, 2);
+    g.lineStyle(1, 0xb8b0a0, 0.35);
+    g.lineBetween(sx0, gy + 1.5, sx1, gy + 1.5); // painted edge line
     g.lineStyle(1, 0x3a3a36, 0.8);
     g.lineBetween(sx0, gy + 14, sx1, gy + 14);
 
-    // Threshold stripes at both ends
+    // Asphalt patchwork speckle
+    {
+      const sp = 34;
+      const first = Math.floor((Math.max(fromM, scrollX - 40)) / sp);
+      const last = Math.floor(Math.min(toM, scrollX + this.width + 40) / sp);
+      for (let i = first; i <= last; i++) {
+        const wx = i * sp + propRand(i + 21) * 26;
+        if (wx < fromM + 6 || wx > toM - 6) continue;
+        const dx = wx - scrollX;
+        g.fillStyle(propRand(i + 55) > 0.5 ? 0x000000 : 0x4a4a44, 0.25);
+        g.fillRect(dx, gy + 3 + propRand(i + 8) * 8, 3 + propRand(i) * 5, 1.4);
+      }
+    }
+
+    // Threshold piano keys at both ends
     for (const endX of [x0 + 14, x1 - 96]) {
       for (let i = 0; i < 6; i++) {
         const tx = endX + i * 15;
         if (tx < -20 || tx > this.width + 20) continue;
         g.fillStyle(0xc8c0a8, 0.75);
         g.fillRect(tx, gy + 3, 7, 9);
+      }
+    }
+
+    // Aiming-point bars past each threshold
+    for (const ax of [x0 + 190, x1 - 265]) {
+      if (ax > -60 && ax < this.width + 60) {
+        g.fillStyle(0xd8d0b8, 0.6);
+        g.fillRect(ax, gy + 4.5, 34, 5);
+      }
+    }
+
+    // Rubber smudges where traffic touches down
+    for (const [endX, dir] of [[x0 + 150, 1], [x1 - 210, -1]] as Array<[number, number]>) {
+      for (let i = 0; i < 5; i++) {
+        const rx = endX + dir * (i * 26 + propRand(i + 61) * 18);
+        if (rx < -40 || rx > this.width + 40) continue;
+        g.fillStyle(0x0c0a08, 0.4);
+        g.fillRect(rx, gy + 5 + propRand(i + 31) * 5, 16 + propRand(i + 41) * 14, 1.8);
       }
     }
 
@@ -596,6 +729,24 @@ export class ParallaxWorld {
       const dx = wx - scrollX;
       if (dx < -40 || dx > this.width + 40) continue;
       g.fillRect(dx, gy + 7, dashW, 2.5);
+    }
+
+    // Sequenced approach strobes leading in to the threshold ("the rabbit")
+    {
+      const seq = Math.floor(this.t * 9) % 7;
+      const litK = seq <= 4 ? 4 - seq : -1; // sweeps toward the threshold, then pauses
+      for (let k = 0; k < 5; k++) {
+        const lx = x0 - 55 - k * 62;
+        if (lx < -30 || lx > this.width + 30) continue;
+        g.fillStyle(0xffffff, 0.18);
+        g.fillCircle(lx, gy + 1, 1.4);
+        if (k === litK) {
+          g.fillStyle(0xffffff, 0.9);
+          g.fillCircle(lx, gy + 1, 2.2);
+          g.fillStyle(0xffffff, 0.2);
+          g.fillCircle(lx, gy + 1, 6);
+        }
+      }
     }
 
     // Pulsing edge lights — brighter and haloed at night
