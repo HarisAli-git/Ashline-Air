@@ -30,6 +30,7 @@ export class MapScene extends Phaser.Scene {
     const { width, height } = this.cameras.main;
     this.cameras.main.setBackgroundColor('#0e0b06');
     fadeIn(this);
+    SoundEngine.startAmbient();
     ensureSharedTextures(this);
     this.motes = [];
     this.t = 0;

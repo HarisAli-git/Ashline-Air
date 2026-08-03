@@ -31,6 +31,7 @@ export class MenuScene extends Phaser.Scene {
     const cx = width / 2;
     const horizonY = Math.round(height * 0.62);
     fadeIn(this, 400);
+    SoundEngine.startAmbient();
     this.stars = [];
     this.dust = [];
     this.meteors = [];

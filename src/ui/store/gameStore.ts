@@ -33,6 +33,24 @@ export function useRouteInfo(): { routeKm: number; destinationName: string } | n
   return info;
 }
 
+export interface FlightStatus {
+  engineFailed: boolean;
+  underFire: boolean;
+  stall: boolean;
+  overspeed: boolean;
+  obstacleAheadM: number | null;
+}
+
+export function useFlightStatus(): FlightStatus | null {
+  const [status, setStatus] = useState<FlightStatus | null>(null);
+  useEffect(() => {
+    const u1 = EventBus.on('flight:status', setStatus);
+    const u2 = EventBus.on('scene:flight-complete', () => setStatus(null));
+    return () => { u1(); u2(); };
+  }, []);
+  return status;
+}
+
 export function useCargo(): { average: number; count: number } | null {
   const [cargo, setCargo] = useState<{ average: number; count: number } | null>(null);
   useEffect(() => {

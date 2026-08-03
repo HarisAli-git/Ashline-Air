@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import type { WeatherCondition } from '../../types';
+import { Hazards } from './Hazards';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -102,6 +103,8 @@ export interface WorldFrame {
   condition: WeatherCondition;
   minutesOfDay: number; // world-clock minutes 0–1439, drives the day/night cycle
   visibility: number;   // 0–1 from weather, dims the sun/moon
+  planeScreenX?: number; // for tracer fire aimed at the aircraft
+  planeScreenY?: number;
 }
 
 /** 0 = deep night, 1 = full day. Dawn 05:00–07:00, dusk 18:00–20:00. */
@@ -133,6 +136,11 @@ export class ParallaxWorld {
   private readonly hillGfx: Phaser.GameObjects.Graphics;
   private readonly scrubGfx: Phaser.GameObjects.Graphics;
   private readonly groundGfx: Phaser.GameObjects.Graphics;
+  private readonly hazardGfx: Phaser.GameObjects.Graphics;
+
+  /** Solid obstacles + raider-held ground along the route. */
+  readonly hazards = new Hazards();
+  private groundFireOn = false;
 
   private fromPal: Palette = resolve('clear');
   private toPal: Palette = resolve('clear');
@@ -160,6 +168,26 @@ export class ParallaxWorld {
     this.hillGfx = scene.add.graphics();
     this.scrubGfx = scene.add.graphics();
     this.groundGfx = scene.add.graphics();
+    // Hazards render in front of the terrain but behind the aircraft, which
+    // is created after this class — so the plane passes in front of them.
+    this.hazardGfx = scene.add.graphics();
+  }
+
+  /** Metres of altitude per screen pixel — shared by hazards so what you
+   *  see is exactly what you collide with. */
+  private get pxPerM(): number {
+    return (this.groundY - PLANE_MIN_Y) / ALT_BAND;
+  }
+
+  /** Lay out the route's obstacles and hostile stretches. */
+  setRoute(routeKm: number, seed: number): void {
+    const destPx = Math.max(2000 * WORLD_PX_PER_M, routeKm * 1000 * WORLD_PX_PER_M);
+    this.hazards.generate(450 * WORLD_PX_PER_M, destPx - 300 * WORLD_PX_PER_M, seed);
+  }
+
+  /** FlightScene tells us when raiders are actively shooting. */
+  setGroundFire(on: boolean): void {
+    this.groundFireOn = on;
   }
 
   /** Blend the palette toward a weather condition over ~4 s. */
@@ -214,11 +242,23 @@ export class ParallaxWorld {
     this.drawHills(f.scrollX, sink * 0.8, f);
     this.drawScrub(f.scrollX, sink);
     this.drawGround(f.scrollX, sink, f);
+
+    // ── Hazards: solid obstacles + raider fire, on the aircraft's own plane ─
+    const gy = this.groundY + sink;
+    this.hazardGfx.clear();
+    if (gy < this.height + 40) {
+      this.hazards.draw(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
+      if (this.groundFireOn && f.planeScreenX !== undefined && f.planeScreenY !== undefined) {
+        this.hazards.drawTracers(
+          this.hazardGfx, f.scrollX, gy, f.planeScreenX, f.planeScreenY, this.t, this.width,
+        );
+      }
+    }
   }
 
   destroy(): void {
     for (const g of [this.skyGfx, this.farGfx, this.mountainGfx, this.deckGfx,
-      this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundGfx]) g.destroy();
+      this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundGfx, this.hazardGfx]) g.destroy();
   }
 
   // ── Layers ─────────────────────────────────────────────────────────────────

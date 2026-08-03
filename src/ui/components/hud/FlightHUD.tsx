@@ -1,5 +1,5 @@
 import React from 'react';
-import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo } from '../../store/gameStore';
+import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo, useFlightStatus } from '../../store/gameStore';
 import { EventBus } from '../../../game/utils/EventBus';
 import { SaveService } from '../../../services/SaveService';
 
@@ -9,6 +9,7 @@ export function FlightHUD(): React.ReactElement | null {
   const { gearDown, flapsDeployed } = useGearFlaps();
   const cargo = useCargo();
   const route = useRouteInfo();
+  const status = useFlightStatus();
 
   if (!state) return null;
 
@@ -72,6 +73,19 @@ export function FlightHUD(): React.ReactElement | null {
         </div>
       </div>
 
+      {/* Annunciator panel — the things that will kill you, in priority order */}
+      {status && (status.engineFailed || status.stall || status.overspeed || status.underFire || status.obstacleAheadM !== null) && (
+        <div style={styles.annunciators}>
+          {status.engineFailed && <Caution label="ENGINE OUT — HOLD E" tone="#ff4444" />}
+          {status.stall && <Caution label="STALL" tone="#ff4444" />}
+          {status.overspeed && <Caution label="OVERSPEED — EASE OFF" tone="#ff4444" />}
+          {status.underFire && <Caution label="TAKING FIRE — CLIMB" tone="#ff8844" />}
+          {status.obstacleAheadM !== null && (
+            <Caution label={`OBSTACLE ${Math.round(status.obstacleAheadM)} m`} tone="#ffd080" />
+          )}
+        </div>
+      )}
+
       {/* Notifications are rendered by the always-mounted GlobalNotification */}
 
       {/* Flight event modal */}
@@ -95,6 +109,15 @@ export function FlightHUD(): React.ReactElement | null {
         </div>
       )}
     </>
+  );
+}
+
+/** Blinking caution light in the annunciator stack. */
+function Caution({ label, tone }: { label: string; tone: string }): React.ReactElement {
+  return (
+    <div style={{ ...styles.caution, color: tone, borderColor: tone }}>
+      {label}
+    </div>
   );
 }
 
@@ -203,6 +226,29 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: '0 -4px 18px rgba(0,0,0,0.55)',
     fontFamily: 'monospace',
     zIndex: 100,
+  },
+  annunciators: {
+    position: 'fixed',
+    top: 92,
+    left: '50%',
+    transform: 'translateX(-50%)',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 6,
+    zIndex: 150,
+    pointerEvents: 'none',
+  },
+  caution: {
+    border: '1px solid',
+    borderRadius: 3,
+    padding: '4px 14px',
+    fontFamily: 'monospace',
+    fontSize: 13,
+    fontWeight: 'bold',
+    letterSpacing: 2,
+    background: 'rgba(10,8,4,0.85)',
+    animation: 'none',
   },
   adi: {
     position: 'relative',

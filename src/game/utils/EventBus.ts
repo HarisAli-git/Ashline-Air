@@ -29,6 +29,15 @@ export interface GameEvents {
   // Route (emitted once when a flight starts)
   'flight:route-info': { routeKm: number; destinationName: string };
 
+  // Threat / systems status for the HUD annunciator panel
+  'flight:status': {
+    engineFailed: boolean;
+    underFire: boolean;
+    stall: boolean;
+    overspeed: boolean;
+    obstacleAheadM: number | null;
+  };
+
   // Economy
   'economy:tick': { gameTimestamp: number };
   'economy:price-changed': { settlementId: string; goodId: string; newPrice: number };

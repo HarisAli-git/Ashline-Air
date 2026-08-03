@@ -14,6 +14,7 @@ interface PostFlightData {
   finalState: FlightState;
   cargoSlots: CargoSlot[];
   reachedDestination: boolean;
+  landedOnRunway: boolean;
 }
 
 type Outcome = 'delivered' | 'cargo_ruined' | 'diverted' | 'crashed' | 'ferry';
@@ -25,6 +26,7 @@ export class PostFlightScene extends Phaser.Scene {
 
   create(data: PostFlightData): void {
     const { result, contractId, finalState, cargoSlots, reachedDestination } = data;
+    const landedOnRunway = data.landedOnRunway ?? true;
     const { width, height } = this.cameras.main;
     const cx = width / 2;
 
@@ -33,6 +35,7 @@ export class PostFlightScene extends Phaser.Scene {
 
     this.cameras.main.setBackgroundColor('#100c04');
     fadeIn(this, 400);
+    SoundEngine.stopFlightLoop();
 
     const save = SaveService.get();
     const contract = save.world.availableContracts.find(c => c.id === contractId);
@@ -83,6 +86,14 @@ export class PostFlightScene extends Phaser.Scene {
 
         // Condition scaling: half the pay rides on cargo state
         payout = Math.round(payout * (0.5 + 0.5 * (avgCondition / 100)));
+
+        // Precision matters: putting it on the asphalt pays, dropping it in
+        // the open means somebody hauls it the rest of the way through
+        // walker country — and they charge for that.
+        if (!landedOnRunway) {
+          payout = Math.round(payout * 0.65);
+          repGain = Math.max(0, Math.round(repGain * 0.5));
+        }
 
         save.player.money += payout;
         save.player.completedContractIds.push(contractId);
@@ -136,7 +147,9 @@ export class PostFlightScene extends Phaser.Scene {
     }).setOrigin(0.5);
 
     const outcomeLabel: Record<Outcome, [string, string]> = {
-      delivered:    ['CARGO DELIVERED', '#00ff88'],
+      delivered:    landedOnRunway
+        ? ['CARGO DELIVERED — ON-FIELD', '#00ff88']
+        : ['DELIVERED OFF-FIELD — recovery fee deducted', '#ffd080'],
       cargo_ruined: ['CARGO RUINED — DELIVERY REJECTED', '#ff4444'],
       diverted:     ['DIVERTED — CONTRACT STILL ACTIVE', '#ffd080'],
       crashed:      ['CONTRACT FAILED', '#ff4444'],
@@ -190,6 +203,9 @@ export class PostFlightScene extends Phaser.Scene {
         fontSize: '14px', color: '#8a7a5a', fontFamily: 'monospace',
       }).setOrigin(0.5);
     }
+
+    if (outcome === 'delivered') SoundEngine.success();
+    else if (outcome === 'crashed' || outcome === 'cargo_ruined') SoundEngine.failure();
 
     this.makeButton(cx, height - 52, 'RETURN TO MAP', () => {
       EventBus.emit('scene:return-to-map');

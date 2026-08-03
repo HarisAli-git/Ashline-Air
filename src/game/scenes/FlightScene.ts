@@ -3,6 +3,7 @@ import { AircraftController, type FlightInput } from '../entities/aircraft/Aircr
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
+import { GROUND_FIRE_CEILING } from '../world/Hazards';
 import { WeatherFX } from '../world/WeatherFX';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
@@ -68,6 +69,16 @@ export class FlightScene extends Phaser.Scene {
   private notifiedApproach = false;
   private notifiedArrival  = false;
 
+  // ── Threat / systems state ────────────────────────────────────────────────
+  private stallWarning   = false;
+  private fireTimer      = 0;     // raider burst cadence
+  private underFire      = false;
+  private hazardAlertAt  = -99;   // last obstacle klaxon
+  private overspeedWarnAt = -99;
+  private engineFailed   = false;
+  private failureCheckAt = 0;
+  private restartHoldFor = 0;     // seconds of cranking left
+
   // ── Time warp ─────────────────────────────────────────────────────────────
   private timeScale = 1;
   private warpText!: Phaser.GameObjects.Text;
@@ -96,6 +107,14 @@ export class FlightScene extends Phaser.Scene {
     this.notifiedApproach    = false;
     this.notifiedArrival     = false;
     this.timeScale           = 1;
+    this.stallWarning        = false;
+    this.fireTimer           = 0;
+    this.underFire           = false;
+    this.hazardAlertAt       = -99;
+    this.overspeedWarnAt     = -99;
+    this.engineFailed        = false;
+    this.failureCheckAt      = 0;
+    this.restartHoldFor      = 0;
   }
 
   create(): void {
@@ -150,6 +169,9 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Build scene (back → front) ────────────────────────────────────────
     this.world    = new ParallaxWorld(this, width, height, groundY);
+    // Obstacles and raider ground are deterministic per contract, so a route
+    // you have flown before hands you the same threats.
+    this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
     this.fx       = new WeatherFX(this, width, height);
 
@@ -160,7 +182,7 @@ export class FlightScene extends Phaser.Scene {
     }).setOrigin(0.5).setDepth(10).setAlpha(0);
 
     this.add.text(width - 12, height - 12,
-      'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine   T: Time ×4/×8   M: Mute   ESC: Abort',
+      'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine/Restart   T: Time   M: Mute   ESC: Abort',
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
     ).setOrigin(1, 1).setDepth(10);
@@ -219,6 +241,7 @@ export class FlightScene extends Phaser.Scene {
       SoundEngine.stopFlightLoop();
     });
     SoundEngine.unlock();
+    SoundEngine.stopAmbient();
     SoundEngine.startFlightLoop();
 
     // ── First draw ────────────────────────────────────────────────────────
@@ -254,13 +277,24 @@ export class FlightScene extends Phaser.Scene {
     };
 
     if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
-      this.engineRunning = !this.engineRunning;
-      if (this.engineRunning) {
-        this.aircraft.startEngine();
-        EventBus.emit('ui:show-notification', { message: 'Engine started.', type: 'success' });
+      if (this.engineFailed) {
+        // A failed engine needs cranking — it does not just snap back on
+        if (this.restartHoldFor <= 0) {
+          this.restartHoldFor = 2.2;
+          SoundEngine.engineSputter();
+          EventBus.emit('ui:show-notification', { message: 'Cranking…', type: 'warning' });
+        }
       } else {
-        this.aircraft.stopEngine();
-        EventBus.emit('ui:show-notification', { message: 'Engine shut down.', type: 'warning' });
+        this.engineRunning = !this.engineRunning;
+        if (this.engineRunning) {
+          this.aircraft.startEngine();
+          SoundEngine.engineStart();
+          EventBus.emit('ui:show-notification', { message: 'Engine started.', type: 'success' });
+        } else {
+          this.aircraft.stopEngine();
+          SoundEngine.engineStop();
+          EventBus.emit('ui:show-notification', { message: 'Engine shut down.', type: 'warning' });
+        }
       }
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.G) && this.gearToggleCooldown === 0) {
@@ -271,7 +305,7 @@ export class FlightScene extends Phaser.Scene {
         this.state.gearDown = !this.state.gearDown;
         this.aircraft.setGearDown(this.state.gearDown);
         this.gearToggleCooldown = 500;
-        SoundEngine.gearMove();
+        SoundEngine.gearMove(this.state.gearDown);
         EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
       }
     }
@@ -443,6 +477,10 @@ export class FlightScene extends Phaser.Scene {
       FlightEventService.checkEvents(this.state);
     }
 
+    // ── Hazards: obstacles are solid, raider ground is hostile ────────────
+    const worldX = this.scrollX + AIRCRAFT_X;
+    this.updateHazards(worldX, sdt);
+
     // ── World & weather visuals ────────────────────────────────────────────
     this.scrollX += this.state.groundSpeed * sdt * WORLD_PX_PER_M;
     this.world.update(sdt, {
@@ -453,6 +491,8 @@ export class FlightScene extends Phaser.Scene {
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
+      planeScreenX: AIRCRAFT_X,
+      planeScreenY: this.world.altitudeToScreenY(this.state.altitude),
     });
     this.fx.update(sdt);
 
@@ -470,17 +510,183 @@ export class FlightScene extends Phaser.Scene {
     // ── Approach guidance ──────────────────────────────────────────────────
     this.updateApproachIndicator();
 
-    // ── Audio: engine drone + wind rush follow the flight state ───────────
+    // ── Audio: every continuous layer follows the flight state ────────────
     const rpm = this.engineRunning ? 0.15 + this.state.throttle * 0.85 : 0;
-    SoundEngine.updateFlight(
-      rpm,
-      this.state.throttle,
-      clamp(this.state.speed / 60, 0, 1),
-      this.timeScale,
+    const roughness = clamp(
+      Math.max((this.state.engineTemp - 0.7) / 0.3, (60 - this.state.integrity) / 60), 0, 1,
     );
+    SoundEngine.updateFlight({
+      rpm,
+      throttle: this.engineRunning ? this.state.throttle : 0,
+      speedFrac: clamp(this.state.speed / 60, 0, 1),
+      onGround: this.state.altitude <= 0.5,
+      gearDown: this.state.gearDown,
+      flapsDeployed: this.state.flapsDeployed,
+      turbulence,
+      roughness,
+      timeScale: this.timeScale,
+    });
+    SoundEngine.setStallWarning(this.stallWarning);
 
     // ── Events to React ────────────────────────────────────────────────────
     EventBus.emit('flight:state-update', this.state);
+  }
+
+  /** True when the given world position is on either airfield's asphalt. */
+  private isOnRunway(worldX: number): boolean {
+    const PXM = WORLD_PX_PER_M;
+    const destPx = Math.max(2000 * PXM, this.routeKm * 1000 * PXM);
+    const onOrigin = worldX > -150 * PXM && worldX < 450 * PXM;
+    const onDest   = worldX > destPx - 300 * PXM && worldX < destPx + 300 * PXM;
+    return onOrigin || onDest;
+  }
+
+  /** Stable numeric seed from a contract id. */
+  private hashRoute(id: string): number {
+    let h = 2166136261;
+    for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return (h >>> 0) % 100000;
+  }
+
+  // ── Threats: obstacles, raider fire, engine reliability ───────────────────
+
+  /**
+   * The cruise decision loop: staying low is fast and cheap but runs you
+   * through masts and gunfire; climbing is safe but costs fuel and time.
+   */
+  private updateHazards(worldX: number, sdt: number): void {
+    const hz = this.world.hazards;
+    const alt = this.state.altitude;
+
+    // ── Solid obstacles ───────────────────────────────────────────────────
+    const hit = hz.collisionAt(worldX, alt);
+    if (hit && this.hasBeenAirborne) {
+      SoundEngine.impact();
+      this.cameras.main.shake(500, 0.012);
+      this.state.integrity = clamp(this.state.integrity - 45, 0, 100);
+      this.state.speed *= 0.55;
+      this.cargo.applyDamage(30);
+      EventBus.emit('ui:show-notification', {
+        message: `⚠ STRUCK A ${hit.kind.toUpperCase()} — airframe critical`,
+        type: 'danger',
+      });
+      this.disengageWarp('collision');
+      if (this.state.integrity <= 0) {
+        this.finishFlight({
+          verticalSpeed: Math.abs(this.state.verticalSpeed),
+          horizontalSpeed: this.state.speed,
+          gearDown: this.state.gearDown,
+          quality: 'crash',
+          integrityDamage: 100,
+          cargoDamagePercent: 100,
+        });
+        return;
+      }
+      // Shove the aircraft clear so a single structure can't register twice
+      this.scrollX += hit.halfWidth * 2 + 40;
+    }
+
+    // Klaxon for a tall obstacle we are not currently above. The range is set
+    // so the call always lands with enough room to out-climb the obstacle.
+    const ahead = hz.ahead(worldX, 2600);
+    if (ahead && alt < ahead.hazard.heightM + 25 &&
+        this.state.elapsedSeconds - this.hazardAlertAt > 2.5) {
+      this.hazardAlertAt = this.state.elapsedSeconds;
+      SoundEngine.alarm();
+      EventBus.emit('ui:show-notification', {
+        message: `▲ OBSTACLE AHEAD — ${Math.round(ahead.hazard.heightM)} m — CLIMB`,
+        type: 'warning',
+      });
+      this.disengageWarp('obstacle ahead');
+    }
+
+    // ── Raider ground fire ────────────────────────────────────────────────
+    const inHostile = hz.isHostile(worldX) && alt < GROUND_FIRE_CEILING && alt > 2;
+    if (inHostile !== this.underFire) {
+      this.underFire = inHostile;
+      this.world.setGroundFire(inHostile);
+      if (inHostile) {
+        SoundEngine.warn();
+        EventBus.emit('ui:show-notification', {
+          message: '⚠ TAKING FIRE FROM THE GROUND — CLIMB ABOVE 130 m',
+          type: 'danger',
+        });
+        this.disengageWarp('under fire');
+      }
+    }
+    if (inHostile) {
+      this.fireTimer -= sdt;
+      if (this.fireTimer <= 0) {
+        this.fireTimer = 0.55 + Math.random() * 0.5;
+        SoundEngine.gunfire();
+        // Lower and slower = easier target
+        const exposure = 1 - alt / GROUND_FIRE_CEILING;
+        if (Math.random() < 0.35 + exposure * 0.4) {
+          SoundEngine.bulletHit();
+          this.state.integrity = clamp(this.state.integrity - (2 + exposure * 5), 0, 100);
+          this.cameras.main.shake(120, 0.004);
+          if (Math.random() < 0.2) this.cargo.applyDamage(4);
+        }
+      }
+    }
+
+    // ── Engine reliability: tired engines quit, and you can restart them ──
+    if (this.hasBeenAirborne && this.state.elapsedSeconds - this.failureCheckAt >= 5) {
+      this.failureCheckAt = this.state.elapsedSeconds;
+      if (this.engineRunning && !this.engineFailed) {
+        const { def } = SaveService.getActiveAircraft();
+        // Heat, damage and a worn airframe all raise the odds
+        const risk =
+          (1 - def.stats.engineReliability) * 0.05 +
+          Math.max(0, this.state.engineTemp - 0.8) * 0.5 +
+          Math.max(0, (40 - this.state.integrity) / 40) * 0.06;
+        if (Math.random() < risk) {
+          this.engineFailed = true;
+          this.engineRunning = false;
+          this.aircraft.stopEngine();
+          SoundEngine.engineSputter();
+          EventBus.emit('ui:show-notification', {
+            message: '✖ ENGINE FAILURE — hold E to restart, trade height for speed',
+            type: 'danger',
+          });
+          this.disengageWarp('engine failure');
+        }
+      }
+    }
+    if (this.restartHoldFor > 0) {
+      this.restartHoldFor -= sdt;
+      if (this.restartHoldFor <= 0) {
+        this.engineFailed = false;
+        this.engineRunning = true;
+        this.aircraft.startEngine();
+        this.state.engineTemp = Math.max(0, this.state.engineTemp - 0.15);
+        SoundEngine.engineStart();
+        EventBus.emit('ui:show-notification', { message: 'Engine caught — power restored.', type: 'success' });
+      }
+    }
+
+    // Stall horn tracks the wing, not the buffet timer
+    const vStall = SaveService.getActiveAircraft().def.stats.stallSpeed / 3.6;
+    const stallEff = vStall * (this.state.flapsDeployed ? 0.85 : 1);
+    this.stallWarning = alt > 3 && this.state.speed < stallEff * 1.08;
+
+    // Above ~95% of Vne the airframe is being torn up — the player was losing
+    // integrity here with nothing on the panel to explain it.
+    const vMax = SaveService.getActiveAircraft().def.stats.maxSpeed / 3.6;
+    const overspeed = this.state.speed > vMax * 0.95;
+    if (overspeed && this.state.elapsedSeconds - this.overspeedWarnAt > 3) {
+      this.overspeedWarnAt = this.state.elapsedSeconds;
+      SoundEngine.alarm();
+    }
+
+    // Annunciator panel state for the React HUD
+    EventBus.emit('flight:status', {
+      engineFailed: this.engineFailed,
+      underFire: this.underFire,
+      stall: this.stallWarning,
+      overspeed,
+      obstacleAheadM: ahead && alt < ahead.hazard.heightM + 40 ? ahead.hazard.heightM : null,
+    });
   }
 
   // ── Approach indicator ─────────────────────────────────────────────────────
@@ -622,6 +828,7 @@ export class FlightScene extends Phaser.Scene {
       finalState: this.state,
       cargoSlots: this.cargo.slots,
       reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
+      landedOnRunway: this.isOnRunway(this.scrollX + AIRCRAFT_X),
     };
     if (result.quality === 'crash') SoundEngine.crash(); else SoundEngine.chime();
     if (result.quality === 'crash') {

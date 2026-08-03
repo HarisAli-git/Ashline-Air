@@ -50,6 +50,14 @@ export class AircraftSprite {
   private readonly particles: AircraftParticles | null;
   private readonly groundY: number;
 
+  // ── Ground geometry ────────────────────────────────────────────────────────
+  /** Body-local y of the MAIN wheel contact patch — the true ground datum. */
+  private readonly contactY: number;
+  /** Parked nose-up attitude in degrees (0 for nose-gear aircraft). */
+  private stanceDeg: number;
+  /** Ground speed (m/s) at which the tail flies itself off the runway. */
+  private readonly tailLiftSpeed: number;
+
   private readonly props: PropAssembly[] = [];
   private readonly legs: GearLeg[] = [];
   private readonly flapImg: Phaser.GameObjects.Image;
@@ -89,6 +97,16 @@ export class AircraftSprite {
 
     const spec = this.spec;
 
+    // The main wheel contact patch IS the ground datum — deriving it from the
+    // gear geometry (rather than a hand-authored constant) guarantees the
+    // wheels always meet the runway exactly.
+    const g = spec.gear;
+    this.contactY = g.hingeY + g.strutLen + g.wheelR;
+    this.stanceDeg = g.tailWheelX !== null ? (spec.groundStanceDeg ?? 0) : 0;
+    // The tail stays planted through the early roll and flies off well before
+    // rotation speed — the same spread a real taildragger has.
+    this.tailLiftSpeed = Math.max(7, (def.stats.stallSpeed / 3.6) * 0.62);
+
     // Particles first so their emitters render behind the aircraft
     this.particles = opts.particles === false ? null : new AircraftParticles(scene, spec);
 
@@ -98,7 +116,7 @@ export class AircraftSprite {
 
     this.container = scene.add.container(x, groundY);
     this.container.setScale(spec.scale);
-    this.body = scene.add.container(0, -spec.groundContactY);
+    this.body = scene.add.container(0, -this.contactY);
     this.container.add(this.body);
 
     const img = (key: string, lx = 0, ly = 0): Phaser.GameObjects.Image => {
@@ -202,30 +220,46 @@ export class AircraftSprite {
     this.legs.push(makeLeg(g.mainX, MAIN_STOWED_RAD));
     if (g.noseX !== null) this.legs.push(makeLeg(g.noseX, NOSE_STOWED_RAD));
     if (g.tailWheelX !== null) {
-      // Taildragger tail wheel: never retracts. Anchor the leg to the actual
-      // tail-cone belly line and solve the STRUT length so a deliberately
-      // small wheel (real tail wheels are tiny) touches the runway at the
-      // nose-high parked stance — the tilt comes from the aircraft, not from
-      // inflating the wheel.
+      // Taildragger tail wheel — the aircraft rests nose-high on it.
+      //
+      // Geometry: with the fuselage pitched θ nose-up, the tail-wheel contact
+      // patch must sit HIGHER in body coords than the main-wheel patch:
+      //     tailBottom = contactY + (tailX − mainX)·tanθ      (tailX < mainX)
+      // Solving it this way gives a genuinely SHORT leg with a small wheel —
+      // the tilt comes from the airframe geometry, never from stretching the
+      // strut into a pole or inflating the wheel.
       const L = this.spec.length, H = this.spec.height;
       const coneStartX = -0.12 * L, coneEndX = -0.5 * L;
       const frac = Phaser.Math.Clamp((g.tailWheelX - coneStartX) / (coneEndX - coneStartX), 0, 1);
       const bellyAtTail = Phaser.Math.Linear(H / 2, H * 0.08, frac);
-      const tailHinge = bellyAtTail - 2; // tuck the leg root into the hull
+      const tailHinge = bellyAtTail - 1.5; // leg root tucked into the hull
 
-      const theta = Phaser.Math.DegToRad(this.spec.groundStanceDeg ?? 0);
-      const reach =
-        (this.spec.groundContactY + g.mainX * Math.sin(theta) - Math.abs(g.tailWheelX) * Math.sin(theta)) /
-        Math.max(0.7, Math.cos(theta));
-
-      const wheelScale = 0.5;                                  // tiny tail wheel
+      // Small, but big enough to read as a WHEEL rather than a dot on a pole
+      const wheelScale = 0.6;
       const smallWheelR = g.wheelR * wheelScale;
-      const strutNeeded = Math.max(6, reach - tailHinge - smallWheelR);
+      const maxStrut = g.strutLen * 0.85;         // never longer than the mains
+
+      let theta = Phaser.Math.DegToRad(this.stanceDeg);
+      let tailBottom = this.contactY + (g.tailWheelX - g.mainX) * Math.tan(theta);
+      let strutNeeded = tailBottom - tailHinge - smallWheelR;
+
+      // If the authored stance would demand an over-long leg, back the angle
+      // off to whatever the longest sane strut actually supports.
+      if (strutNeeded > maxStrut) {
+        strutNeeded = maxStrut;
+        tailBottom = tailHinge + strutNeeded + smallWheelR;
+        theta = Math.atan2(this.contactY - tailBottom, g.mainX - g.tailWheelX);
+        this.stanceDeg = Phaser.Math.RadToDeg(theta);
+      }
+      strutNeeded = Math.max(4, strutNeeded);
 
       const root = this.scene.add.container(g.tailWheelX, tailHinge);
+      // A stubby sprung leg in airframe colours — a bright thin strut reads
+      // as a pole hanging in space once the tail comes up.
       const strut = this.scene.add.image(0, 0, this.tex.gearStrut)
         .setOrigin(0.5, 0.06)
-        .setScale((1 / SS) * 0.7, (1 / SS) * (strutNeeded / g.strutLen));
+        .setScale((1 / SS) * 1.05, (1 / SS) * (strutNeeded / g.strutLen))
+        .setTint(0x6a6259);
       const wheel = this.scene.add.image(0, strutNeeded, this.tex.wheel)
         .setScale((1 / SS) * wheelScale);
       root.add(strut);
@@ -268,7 +302,7 @@ export class AircraftSprite {
     const s = this.container.scaleX; // menu fly-by overrides the spec scale
     const rot = this.body.rotation;
     const bx = lx * s;
-    const by = (ly - this.spec.groundContactY) * s;
+    const by = (ly - this.contactY) * s;
     return {
       x: this.container.x + bx * Math.cos(rot) - by * Math.sin(rot),
       y: this.container.y + bx * Math.sin(rot) + by * Math.cos(rot),
@@ -436,20 +470,30 @@ export class AircraftSprite {
   private updateAttitude(state: FlightState): void {
     // Nose-up (positive pitch) = counter-clockwise = negative Phaser rotation.
     // Full 1:1 rotation — the aircraft points where you point it.
-    const clamped = Phaser.Math.Clamp(state.pitch, -30, 30);
-    let rot = -Phaser.Math.DegToRad(clamped);
+    const onGround = state.altitude <= 0.5;
+    let thetaDeg: number; // nose-up, degrees
 
-    let yOff = -this.spec.groundContactY;
-
-    // Taildragger stance: parked nose-high on the tail wheel; the tail rises
-    // off the runway as the takeoff roll builds speed (and settles on landing).
-    const stanceDeg = this.spec.groundStanceDeg ?? 0;
-    if (stanceDeg > 0 && state.altitude <= 0.5) {
-      const stanceT = Phaser.Math.Clamp(1 - state.speed / 16, 0, 1);
-      const theta = Phaser.Math.DegToRad(stanceDeg) * stanceT;
-      rot -= theta;                                      // nose up
-      yOff += this.spec.gear.mainX * Math.sin(theta);    // keep the mains planted
+    if (onGround) {
+      // Taildragger ground handling: the tail rests on its wheel until airflow
+      // over the elevator lifts it, and the attitude is simply whichever is
+      // higher — the parked stance or the pilot's rotation input. Pushing the
+      // nose below level is not possible (the prop would strike).
+      const tailDown = Phaser.Math.Clamp(1 - state.speed / this.tailLiftSpeed, 0, 1);
+      thetaDeg = Math.max(0, Math.max(state.pitch, this.stanceDeg * tailDown));
+    } else {
+      thetaDeg = Phaser.Math.Clamp(state.pitch, -30, 30);
     }
+
+    const theta = Phaser.Math.DegToRad(thetaDeg);
+    let rot = -theta;
+
+    // Rotate about the main-wheel contact patch while the wheels are on the
+    // ground so the mains stay planted at any attitude, easing to a datum
+    // pivot once airborne.
+    const planted = this.spec.gear.mainX * Math.sin(theta) - this.contactY * Math.cos(theta);
+    const groundBlend = Phaser.Math.Clamp(1 - state.altitude / 6, 0, 1);
+    let yOff = Phaser.Math.Linear(-this.contactY, planted, groundBlend);
+
     if (state.altitude > 0.5) {
       // Airborne: gentle bob + faint bank noise, both amplified by turbulence
       const rock = 1 + this.turb * 5;

@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import type { WeatherCondition } from '../../types';
+import { SoundEngine } from '../audio/SoundEngine';
 
 /**
  * Screen-space weather visuals: precipitation emitters, drifting fog banks,
@@ -153,6 +154,7 @@ export class WeatherFX {
         this.flashLeft = 0.1;
         this.nextLightningIn = 4 + Math.random() * 9;
         this.scene.cameras.main.shake(120, 0.003);
+        SoundEngine.thunder();
       }
     }
     if (this.flashLeft > 0) {
