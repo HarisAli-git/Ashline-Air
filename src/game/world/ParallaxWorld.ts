@@ -10,7 +10,11 @@ import { Hazards } from './Hazards';
  * past the linear band so high altitude actually reads as high.
  */
 
-export const ALT_BAND = 250;       // metres of altitude mapped linearly to screen
+// Metres of altitude mapped linearly to the usable screen height. Sized so
+// the number on the gauge matches what you SEE: at 90 m the aircraft is near
+// the top of frame, at 10 m it is just off the deck. These are low-level
+// cargo runs, not airliner cruise.
+export const ALT_BAND = 90;
 export const PLANE_MIN_Y = 160;    // screen y the aircraft pins to above the band
 /** World px per metre flown — high so speed genuinely reads on screen. */
 export const WORLD_PX_PER_M = 9;
@@ -241,7 +245,7 @@ export class ParallaxWorld {
 
     // Above the linear band the world sinks away beneath the aircraft
     const sink = Phaser.Math.Clamp((f.altitude - ALT_BAND) * 0.35, 0, 420);
-    const hMult = Phaser.Math.Linear(1, 0.55, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 2200, 0, 1));
+    const hMult = Phaser.Math.Linear(1, 0.55, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 900, 0, 1));
 
     this.drawSky(f);
     this.drawFar(f.scrollX, sink * 0.30, hMult);
@@ -352,7 +356,7 @@ export class ParallaxWorld {
     g.clear();
 
     // Altitude darkens the sky toward near-space navy
-    const hiT = Phaser.Math.Clamp(alt / 3500, 0, 1);
+    const hiT = Phaser.Math.Clamp(alt / 1400, 0, 1);
     const top = lerpColor(this.pal.skyTop, 0x030710, hiT);
     const bot = lerpColor(this.pal.skyBot, 0x122436, hiT * 0.85);
 
@@ -670,7 +674,7 @@ export class ParallaxWorld {
   private drawCloudDeck(alt: number, scrollX: number): void {
     const g = this.deckGfx;
     g.clear();
-    const a = Phaser.Math.Clamp((alt - 450) / 500, 0, 1) * 0.5;
+    const a = Phaser.Math.Clamp((alt - 170) / 220, 0, 1) * 0.5;
     if (a <= 0.01) return;
 
     const y = this.groundY - 30;
@@ -690,9 +694,9 @@ export class ParallaxWorld {
   private drawClouds(scrollX: number, alt: number): void {
     const g = this.cloudGfx;
     g.clear();
-    if (alt < 50) return;
+    if (alt < 18) return;
 
-    const alpha = Math.min(alt / 200, 0.85) * 0.16;
+    const alpha = Math.min(alt / 75, 0.85) * 0.16;
     const body = lerpColor(0x1e2632, 0xffffff, this.dl);           // night clouds go dark
     const shade = lerpColor(0x141a24, 0x9aa8b4, this.dl);
 

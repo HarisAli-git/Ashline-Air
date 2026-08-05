@@ -28,6 +28,7 @@ export const TUNING = {
   thrustTimeConstant: 5.5,  // seconds to ~63% of vMax at full throttle
   pathResponse: 5,          // 1/s — how fast the flight path follows the nose
   energyExchange: 0.9,      // fraction of gravity felt along the flight path
+  powerClimbAuthority: 6,   // m/s of climb/sink from thrust-vs-drag imbalance
   maxSink: -38,             // m/s hard sink limit (terminal-ish dive)
   diveOverspeed: 1.15,      // dives may exceed vMax by this factor
   stallBand: 0.25,          // stall develops over this fraction below vStall
@@ -205,7 +206,14 @@ export class AircraftController {
     const gammaEff = pitchRad > 0
       ? pitchRad * authority * (1 - stallT)
       : pitchRad;
-    let vsTarget = clamp(s.speed * Math.sin(gammaEff), TUNING.maxSink, 1000);
+    // Power balance drives altitude. Without this the aircraft holds height
+    // forever at level pitch no matter what the throttle is doing — cutting
+    // power did literally nothing until the wing finally stalled.
+    // Thrust > drag ⇒ climb, thrust < drag ⇒ sink, matched ⇒ level.
+    const powerBalance = clamp((thrust - drag) / Math.max(0.5, this.tMax), -1.2, 1.2);
+    const vsPower = onGround ? 0 : powerBalance * TUNING.powerClimbAuthority;
+
+    let vsTarget = clamp(s.speed * Math.sin(gammaEff) + vsPower, TUNING.maxSink, 1000);
     // Ground effect: the air cushions the sink close to the runway, so a
     // flare genuinely arrests the descent instead of slamming through it.
     if (!onGround && s.altitude < 14 && vsTarget < 0) {

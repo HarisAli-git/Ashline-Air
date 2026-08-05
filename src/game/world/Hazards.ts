@@ -24,7 +24,7 @@ export interface Hazard {
 }
 
 /** Below this altitude (m) raiders in a hostile stretch open fire. */
-export const GROUND_FIRE_CEILING = 130;
+export const GROUND_FIRE_CEILING = 50;
 
 function hash(i: number): number {
   const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
@@ -51,9 +51,9 @@ export class Hazards {
       const r = hash(i++);
       const kind: HazardKind = r < 0.45 ? 'mast' : r < 0.78 ? 'tower' : 'crane';
       const heightM =
-        kind === 'mast' ? 70 + hash(i++) * 80 :
-        kind === 'tower' ? 45 + hash(i++) * 55 :
-        40 + hash(i++) * 40;
+        kind === 'mast' ? 26 + hash(i++) * 34 :
+        kind === 'tower' ? 17 + hash(i++) * 22 :
+        15 + hash(i++) * 16;
       this.list.push({
         x,
         kind,

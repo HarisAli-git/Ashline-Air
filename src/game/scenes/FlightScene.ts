@@ -334,12 +334,12 @@ export class FlightScene extends Phaser.Scene {
         this.timeScale = 1;
         this.warpText.setVisible(false);
         EventBus.emit('ui:show-notification', { message: 'Time warp off.', type: 'info' });
-      } else if (this.state.altitude > 60 && !this.rollout) {
+      } else if (this.state.altitude > 30 && !this.rollout) {
         this.timeScale = 4;
         this.warpText.setText('»» TIME ×4').setVisible(true);
         EventBus.emit('ui:show-notification', { message: '»» Time warp ×4 — press T again for ×8. Auto-disengages when something needs you.', type: 'info' });
       } else {
-        EventBus.emit('ui:show-notification', { message: 'Time warp needs stable flight above 60 m.', type: 'warning' });
+        EventBus.emit('ui:show-notification', { message: 'Time warp needs stable flight above 30 m.', type: 'warning' });
       }
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.ESC)) {
@@ -362,7 +362,7 @@ export class FlightScene extends Phaser.Scene {
     // ── Turbulence: gusts nudge the aircraft, dt-scaled so a storm is rough
     //    but flyable (previously this was per-frame and slammed you down) ────
     const turbulence = this.weather.current.turbulenceIntensity;
-    if (turbulence > 0 && this.state.altitude > 25) {
+    if (turbulence > 0 && this.state.altitude > 12) {
       this.state.verticalSpeed += (Math.random() - 0.5) * turbulence * 7 * sdt;
       // Gusts shove the airframe and its own stability rides it out — far more
       // alive than teleporting the pitch angle.
@@ -380,7 +380,7 @@ export class FlightScene extends Phaser.Scene {
       if (this.state.engineTemp >= 0.85)      this.disengageWarp('engine overheating');
       else if (this.state.fuel < 15)          this.disengageWarp('fuel critical');
       else if (remaining <= 1.8)              this.disengageWarp('destination ahead');
-      else if (this.state.altitude < 60)      this.disengageWarp('low altitude');
+      else if (this.state.altitude < 30)      this.disengageWarp('low altitude');
       else if (this.state.integrity < 30)     this.disengageWarp('airframe critical');
     }
 
@@ -592,7 +592,7 @@ export class FlightScene extends Phaser.Scene {
     // Klaxon for a tall obstacle we are not currently above. The range is set
     // so the call always lands with enough room to out-climb the obstacle.
     const ahead = hz.ahead(worldX, 2600);
-    if (ahead && alt < ahead.hazard.heightM + 25 &&
+    if (ahead && alt < ahead.hazard.heightM + 12 &&
         this.state.elapsedSeconds - this.hazardAlertAt > 2.5) {
       this.hazardAlertAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
@@ -611,7 +611,7 @@ export class FlightScene extends Phaser.Scene {
       if (inHostile) {
         SoundEngine.warn();
         EventBus.emit('ui:show-notification', {
-          message: '⚠ TAKING FIRE FROM THE GROUND — CLIMB ABOVE 130 m',
+          message: '⚠ TAKING FIRE FROM THE GROUND — CLIMB ABOVE 50 m',
           type: 'danger',
         });
         this.disengageWarp('under fire');
@@ -688,14 +688,14 @@ export class FlightScene extends Phaser.Scene {
       underFire: this.underFire,
       stall: this.stallWarning,
       overspeed,
-      obstacleAheadM: ahead && alt < ahead.hazard.heightM + 40 ? ahead.hazard.heightM : null,
+      obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
     });
   }
 
   // ── Approach indicator ─────────────────────────────────────────────────────
 
   private updateApproachIndicator(): void {
-    if (!this.hasBeenAirborne || this.state.altitude > 250) {
+    if (!this.hasBeenAirborne || this.state.altitude > 90) {
       this.approachText.setAlpha(0);
       return;
     }

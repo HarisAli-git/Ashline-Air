@@ -449,7 +449,7 @@ export class AircraftSprite {
   }
 
   private updateLightCone(state: FlightState): void {
-    const want = state.gearDown && state.altitude < 250 && state.verticalSpeed < -0.3;
+    const want = state.gearDown && state.altitude < 90 && state.verticalSpeed < -0.3;
     if (!want) {
       if (this.coneOn) { this.lightCone.clear(); this.coneOn = false; }
       return;
@@ -508,7 +508,7 @@ export class AircraftSprite {
   }
 
   private updateShadow(state: FlightState): void {
-    const t = Math.max(0, 1 - state.altitude / 300);
+    const t = Math.max(0, 1 - state.altitude / 110);
     this.shadowImg.setX(this.container.x);
     this.shadowImg.setAlpha(t * 0.5);
     const base = ((this.spec.length * this.spec.scale) / 96) * 1.15;
