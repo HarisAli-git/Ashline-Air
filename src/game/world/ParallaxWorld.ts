@@ -13,7 +13,7 @@ import { Hazards } from './Hazards';
 export const ALT_BAND = 250;       // metres of altitude mapped linearly to screen
 export const PLANE_MIN_Y = 160;    // screen y the aircraft pins to above the band
 /** World px per metre flown — high so speed genuinely reads on screen. */
-export const WORLD_PX_PER_M = 6;
+export const WORLD_PX_PER_M = 9;
 
 interface Palette {
   skyTop: number; skyBot: number; glow: number;
@@ -105,6 +105,7 @@ export interface WorldFrame {
   visibility: number;   // 0–1 from weather, dims the sun/moon
   planeScreenX?: number; // for tracer fire aimed at the aircraft
   planeScreenY?: number;
+  speedFrac?: number;   // 0–1 airspeed, drives near-field blur and streaks
 }
 
 /** 0 = deep night, 1 = full day. Dawn 05:00–07:00, dusk 18:00–20:00. */
@@ -137,6 +138,9 @@ export class ParallaxWorld {
   private readonly scrubGfx: Phaser.GameObjects.Graphics;
   private readonly groundGfx: Phaser.GameObjects.Graphics;
   private readonly hazardGfx: Phaser.GameObjects.Graphics;
+  /** Near field, scrolls FASTER than the ground — the main speed cue. */
+  private readonly foreGfx: Phaser.GameObjects.Graphics;
+  private readonly vignetteGfx: Phaser.GameObjects.Graphics;
 
   /** Solid obstacles + raider-held ground along the route. */
   readonly hazards = new Hazards();
@@ -171,6 +175,11 @@ export class ParallaxWorld {
     // Hazards render in front of the terrain but behind the aircraft, which
     // is created after this class — so the plane passes in front of them.
     this.hazardGfx = scene.add.graphics();
+    // Near-field strip and vignette sit ABOVE the aircraft; they occupy the
+    // bottom edge only, so they frame the shot without hiding the plane.
+    this.foreGfx = scene.add.graphics().setDepth(6);
+    this.vignetteGfx = scene.add.graphics().setDepth(7);
+    this.drawVignette();
   }
 
   /** Metres of altitude per screen pixel — shared by hazards so what you
@@ -243,6 +252,8 @@ export class ParallaxWorld {
     this.drawScrub(f.scrollX, sink);
     this.drawGround(f.scrollX, sink, f);
 
+    this.drawNearField(f.scrollX, sink, f.speedFrac ?? 0);
+
     // ── Hazards: solid obstacles + raider fire, on the aircraft's own plane ─
     const gy = this.groundY + sink;
     this.hazardGfx.clear();
@@ -258,10 +269,81 @@ export class ParallaxWorld {
 
   destroy(): void {
     for (const g of [this.skyGfx, this.farGfx, this.mountainGfx, this.deckGfx,
-      this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundGfx, this.hazardGfx]) g.destroy();
+      this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundGfx, this.hazardGfx,
+      this.foreGfx, this.vignetteGfx]) g.destroy();
   }
 
   // ── Layers ─────────────────────────────────────────────────────────────────
+
+  /**
+   * The near field: ground detail at the very bottom of the screen scrolling
+   * ~1.9x the terrain rate. Objects whipping past close to the camera are what
+   * actually sell speed — distant parallax layers barely move by definition.
+   */
+  private drawNearField(scrollX: number, sink: number, speedFrac: number): void {
+    const g = this.foreGfx;
+    g.clear();
+    const bandTop = this.groundY + sink + 34;
+    if (bandTop > this.height) return;
+
+    const scroll = scrollX * 1.9;
+    const spacing = 52;
+    const first = Math.floor((scroll - 120) / spacing);
+    for (let i = first; i < first + Math.ceil(this.width / spacing) + 3; i++) {
+      const sx = i * spacing - scroll + propRand(i * 3.7) * 70;
+      if (sx < -70 || sx > this.width + 70) continue;
+      const depth = 0.35 + propRand(i + 12) * 0.65;      // how close to camera
+      const y = bandTop + depth * (this.height - bandTop) * 0.9;
+      const s = 0.9 + depth * 2.2;
+      const shade = lerpColor(this.pal.ground, 0x000000, 0.62 + depth * 0.3);
+      const kind = Math.floor(propRand(i + 41) * 4);
+
+      g.fillStyle(shade, 1);
+      if (kind === 0) {
+        g.fillTriangle(sx - 6 * s, y, sx - 1 * s, y - 5 * s, sx + 6 * s, y);
+      } else if (kind === 1) {
+        g.lineStyle(1.4 * s, shade, 0.95);
+        for (let b = -1; b <= 1; b++) {
+          g.lineBetween(sx + b * 2.5 * s, y, sx + b * 4.5 * s, y - (5 + propRand(i + b) * 5) * s);
+        }
+      } else if (kind === 2) {
+        g.fillRect(sx - 1.2 * s, y - 9 * s, 2.4 * s, 9 * s);
+      } else {
+        g.fillRect(sx - 4 * s, y - 1.6 * s, 8 * s, 1.8 * s);
+      }
+    }
+
+    // Motion streaks along the very bottom once genuinely quick
+    if (speedFrac > 0.35) {
+      const a = (speedFrac - 0.35) / 0.65;
+      for (let i = 0; i < 7; i++) {
+        const y = this.height - 6 - propRand(i + 71) * 46;
+        const phase = ((this.t * (900 + i * 120) + i * 337) % (this.width + 400)) - 200;
+        const len = 60 + a * 190;
+        g.lineStyle(1.6, lerpColor(this.pal.ground, 0xffffff, 0.35), 0.10 + a * 0.22);
+        g.lineBetween(this.width - phase, y, this.width - phase + len, y);
+      }
+    }
+  }
+
+  /** Soft cinematic vignette — drawn once, purely framing. */
+  private drawVignette(): void {
+    const g = this.vignetteGfx;
+    g.clear();
+    // Many thin bands rather than a few thick ones, so the falloff is smooth
+    const steps = 26;
+    for (let i = 0; i < steps; i++) {
+      const t = i / steps;
+      const a = 0.016 * (1 - t) * (1 - t);
+      g.fillStyle(0x000000, a);
+      const vBand = 54 * (1 - t);
+      const hBand = 88 * (1 - t);
+      g.fillRect(0, 0, this.width, vBand);
+      g.fillRect(0, this.height - vBand, this.width, vBand);
+      g.fillRect(0, 0, hBand, this.height);
+      g.fillRect(this.width - hBand, 0, hBand, this.height);
+    }
+  }
 
   private drawSky(f: WorldFrame): void {
     const g = this.skyGfx;
@@ -738,6 +820,18 @@ export class ParallaxWorld {
     g.lineStyle(2, this.pal.groundLine, 1);
     g.lineBetween(0, gy, this.width, gy);
 
+    // Layered strata so the near ground reads as dirt, not a flat fill
+    for (let i = 0; i < 4; i++) {
+      const y0 = gy + 16 + i * 22;
+      if (y0 > this.height) break;
+      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.12 + i * 0.13), 1);
+      g.fillRect(0, y0, this.width, 22);
+    }
+    // Wheel ruts running the length of the strip
+    g.lineStyle(2, lerpColor(this.pal.ground, 0x000000, 0.45), 0.5);
+    g.lineBetween(0, gy + 30, this.width, gy + 30);
+    g.lineBetween(0, gy + 52, this.width, gy + 52);
+
     // Texture lines + scrolling dirt speckle so the ground itself shows motion
     g.lineStyle(1, lerpColor(this.pal.ground, 0xffffff, 0.08), 0.3);
     for (let i = 1; i <= 3; i++) g.lineBetween(0, gy + i * 22, this.width, gy + i * 22);
@@ -767,8 +861,8 @@ export class ParallaxWorld {
     {
       const PXM2 = WORLD_PX_PER_M;
       const dPx = Math.max(2000 * PXM2, f.routeTotalKm * 1000 * PXM2);
-      const zoneA: [number, number] = [-150 * PXM2 - 900, 450 * PXM2 + 900];
-      const zoneB: [number, number] = [dPx - 300 * PXM2 - 900, dPx + 300 * PXM2 + 900];
+      const zoneA: [number, number] = [-50 * PXM2 - 900, 130 * PXM2 + 900];
+      const zoneB: [number, number] = [dPx - 90 * PXM2 - 900, dPx + 90 * PXM2 + 900];
       const cellW = 760;
       const first = Math.floor((scrollX - 100) / cellW);
       for (let c = first; c <= first + Math.ceil(this.width / cellW) + 1; c++) {
@@ -788,8 +882,9 @@ export class ParallaxWorld {
     // settlements beyond.
     const PXM = WORLD_PX_PER_M;
     const destPx = Math.max(2000 * PXM, f.routeTotalKm * 1000 * PXM);
-    const oriFrom = -150 * PXM, oriTo = 450 * PXM;
-    const dstFrom = destPx - 300 * PXM, dstTo = destPx + 300 * PXM;
+    // Short bush strips — a runway should read as a strip, not a motorway
+    const oriFrom = -50 * PXM, oriTo = 130 * PXM;
+    const dstFrom = destPx - 90 * PXM, dstTo = destPx + 90 * PXM;
     this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f);
     this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f);
     // Origin airfield sits just behind the spawn point (aircraft spawns at
@@ -805,8 +900,8 @@ export class ParallaxWorld {
     const first = Math.floor((scrollX - 60) / spacing);
     for (let i = first; i < first + Math.ceil(this.width / spacing) + 1; i++) {
       const wx = i * spacing + propRand(i + 13) * 80;
-      if (wx > oriFrom - 500 && wx < oriTo + 500) continue;
-      if (wx > dstFrom - 500 && wx < dstTo + 500) continue;
+      if (wx > oriFrom - 400 && wx < oriTo + 400) continue;
+      if (wx > dstFrom - 400 && wx < dstTo + 400) continue;
       const sx = wx - scrollX;
       if (sx < -40 || sx > this.width + 40) continue;
       g.lineStyle(1.5, 0x000000, 0.18);

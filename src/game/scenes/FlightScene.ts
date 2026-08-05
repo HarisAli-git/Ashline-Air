@@ -155,7 +155,7 @@ export class FlightScene extends Phaser.Scene {
         const loreKm = pixelsToKm(
           distance(origin.position.x, origin.position.y, dest.position.x, dest.position.y), 0.5,
         );
-        this.routeKm = clamp(2.5 + loreKm / 60, 2.5, 10);
+        this.routeKm = clamp(1.8 + loreKm / 110, 1.8, 5);
         destinationName = dest.name;
       }
     }
@@ -364,7 +364,9 @@ export class FlightScene extends Phaser.Scene {
     const turbulence = this.weather.current.turbulenceIntensity;
     if (turbulence > 0 && this.state.altitude > 25) {
       this.state.verticalSpeed += (Math.random() - 0.5) * turbulence * 7 * sdt;
-      this.state.pitch = clamp(this.state.pitch + (Math.random() - 0.5) * turbulence * 9 * sdt, -30, 30);
+      // Gusts shove the airframe and its own stability rides it out — far more
+      // alive than teleporting the pitch angle.
+      this.state.pitchRate += (Math.random() - 0.5) * turbulence * 46 * sdt;
       this.gustTimer -= sdt;
       if (turbulence > 0.3 && this.gustTimer <= 0) {
         this.gustTimer = 0.8 + Math.random() * 1.4;
@@ -472,7 +474,7 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // Flight events — only once airborne, at most one check every 3 seconds
-    if (this.hasBeenAirborne && this.state.elapsedSeconds - this.lastEventCheckAt >= 3) {
+    if (this.hasBeenAirborne && this.state.elapsedSeconds - this.lastEventCheckAt >= 9) {
       this.lastEventCheckAt = this.state.elapsedSeconds;
       FlightEventService.checkEvents(this.state);
     }
@@ -493,6 +495,7 @@ export class FlightScene extends Phaser.Scene {
       visibility: this.weather.current.visibility,
       planeScreenX: AIRCRAFT_X,
       planeScreenY: this.world.altitudeToScreenY(this.state.altitude),
+      speedFrac: clamp(this.state.groundSpeed / 55, 0, 1),
     });
     this.fx.update(sdt);
 
@@ -536,8 +539,8 @@ export class FlightScene extends Phaser.Scene {
   private isOnRunway(worldX: number): boolean {
     const PXM = WORLD_PX_PER_M;
     const destPx = Math.max(2000 * PXM, this.routeKm * 1000 * PXM);
-    const onOrigin = worldX > -150 * PXM && worldX < 450 * PXM;
-    const onDest   = worldX > destPx - 300 * PXM && worldX < destPx + 300 * PXM;
+    const onOrigin = worldX > -50 * PXM && worldX < 130 * PXM;
+    const onDest   = worldX > destPx - 90 * PXM && worldX < destPx + 90 * PXM;
     return onOrigin || onDest;
   }
 

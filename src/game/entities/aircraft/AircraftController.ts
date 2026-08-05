@@ -13,8 +13,18 @@ const GRAVITY = 9.81; // m/s²
  */
 export const TUNING = {
   throttleRate: 0.9,        // throttle change per second of key held
-  pitchRate: 44,            // degrees per second
-  pitchAutoLevel: 4,        // 1/s exponential ground auto-level
+
+  // ── Pitch: a driven, damped, self-stabilising airframe ──
+  // The elevator applies a moment; the airframe's own stability applies an
+  // opposing one; damping settles the pair. Holding the stick therefore
+  // reaches an EQUILIBRIUM attitude (≈ controlPower / pitchStability ≈ 24°)
+  // instead of winding up forever, and letting go returns you to level.
+  controlPower: 72,         // elevator moment, deg/s² at cruise
+  pitchStability: 3.0,      // aerodynamic restoring moment toward trim
+  pitchDamping: 2.7,        // pitch-rate damping (ζ ≈ 0.78 — settles, no wallow)
+  maxPitchRate: 60,         // deg/s clamp
+  trimPitchDeg: 0,          // hands off ⇒ straight and level
+  phugoid: 0.9,             // speed↔pitch coupling; the long slow porpoise
   thrustTimeConstant: 5.5,  // seconds to ~63% of vMax at full throttle
   pathResponse: 5,          // 1/s — how fast the flight path follows the nose
   energyExchange: 0.9,      // fraction of gravity felt along the flight path
@@ -84,6 +94,7 @@ export class AircraftController {
     return {
       throttle: 0,
       pitch: 0,
+      pitchRate: 0,
       speed: 0,
       groundSpeed: 0,
       altitude: 0,
@@ -130,14 +141,47 @@ export class AircraftController {
     if (input.throttleUp)   s.throttle = clamp(s.throttle + TUNING.throttleRate * dt, 0, 1);
     if (input.throttleDown) s.throttle = clamp(s.throttle - TUNING.throttleRate * dt, 0, 1);
 
+    // ── Pitch: a real rotating airframe, not a position slider ────────────
+    //
+    // The stick commands a pitch RATE, that rate lags behind the command
+    // (inertia), the airframe's own stability pulls the nose back toward trim
+    // when you let go, and damping settles it. Control power scales with
+    // dynamic pressure, so the elevator is mushy slow and crisp fast. Those
+    // four things together are the difference between flying an aeroplane and
+    // dragging a number up and down.
+
     // On the runway the elevator only bites once there's airflow over it —
     // yanking the stick at parking speed does nothing (rotate ~stall speed).
     const rotateAt = vStallEff * TUNING.rotateSpeedFactor;
     const elevatorAuthority = onGround ? clamp(s.speed / Math.max(1, rotateAt), 0, 1) : 1;
-    if (input.pitchUp)   s.pitch = clamp(s.pitch + TUNING.pitchRate * elevatorAuthority * dt, -30, 30);
-    if (input.pitchDown) s.pitch = clamp(s.pitch - TUNING.pitchRate * elevatorAuthority * dt, -30, 30);
-    if (onGround && !input.pitchUp && !input.pitchDown) {
-      s.pitch += (0 - s.pitch) * (1 - Math.exp(-dt * TUNING.pitchAutoLevel));
+
+    // Dynamic pressure ∝ v²: heavy, mushy stick when slow — crisp when fast
+    const qNorm = clamp((s.speed / this.vCruise) ** 2, 0.12, 1.7);
+
+    const command = (input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0);
+
+    // Elevator moment vs the airframe's restoring moment — both always live,
+    // which is what gives a held stick a natural equilibrium attitude.
+    const controlMoment = command * TUNING.controlPower * qNorm * elevatorAuthority;
+    const stabilityMoment = (TUNING.trimPitchDeg - s.pitch) * TUNING.pitchStability * qNorm;
+
+    s.pitchRate += (controlMoment + stabilityMoment) * dt;
+    s.pitchRate *= Math.exp(-dt * TUNING.pitchDamping);
+
+    if (!onGround) {
+      // Phugoid coupling: carrying extra speed floats the nose up, running
+      // slow lets it sag — the gentle long-period wallow real aircraft have.
+      s.pitchRate += ((s.speed - this.vCruise) / this.vCruise) * TUNING.phugoid * dt;
+    }
+
+    s.pitchRate = clamp(s.pitchRate, -TUNING.maxPitchRate, TUNING.maxPitchRate);
+    s.pitch += s.pitchRate * dt;
+    // Wheels on the ground can't rotate past a tail strike
+    const lo = onGround ? -4 : -35;
+    const hi = onGround ? 17 : 35;
+    if (s.pitch < lo || s.pitch > hi) {
+      s.pitch = clamp(s.pitch, lo, hi);
+      s.pitchRate *= 0.2;   // bleed off against the stop rather than pinning
     }
 
     const effThrottle = input.engineOn && s.fuel > 0 ? s.throttle : 0;
@@ -179,7 +223,9 @@ export class AircraftController {
 
     // ── Stall behaviour: nose drops, buffet warns ─────────────────────────
     if (stallT > 0) {
-      s.pitch = clamp(s.pitch - TUNING.stallNoseDownRate * stallT * dt, -30, 30);
+      // The wing lets go and the nose FALLS — applied as a moment so the
+      // recovery has the same weight as every other input.
+      s.pitchRate -= TUNING.stallNoseDownRate * stallT * dt * 2.2;
       this.onBuffet?.(stallT);
     }
 

@@ -3,6 +3,9 @@ import { EventBus } from '../game/utils/EventBus';
 import { SaveService } from './SaveService';
 import { clamp } from '../game/utils/math';
 
+/** No two flight events may fire closer together than this. */
+const MIN_EVENT_GAP_SECONDS = 55;
+
 interface ActiveEvent {
   event: FlightEventDefinition;
   lastFiredAt: number; // elapsed seconds in flight
@@ -12,6 +15,7 @@ class FlightEventServiceClass {
   private definitions: FlightEventDefinition[] = [];
   private activeEvents: ActiveEvent[] = [];
   private pendingChoice: FlightEventDefinition | null = null;
+  private lastAnyEventAt = -999;
 
   // Active aircraft stats so triggers scale to the airframe being flown
   private fuelCapacity = 80;
@@ -28,6 +32,7 @@ class FlightEventServiceClass {
   reset(def?: AircraftDefinition): void {
     this.activeEvents = [];
     this.pendingChoice = null;
+    this.lastAnyEventAt = -999;
     this.onCargoDamage = null;
     if (def) {
       this.fuelCapacity = def.stats.fuelCapacity;
@@ -64,6 +69,9 @@ class FlightEventServiceClass {
 
   /** Cooldown-gated firing shared by all trigger paths. */
   private tryFire(def: FlightEventDefinition, elapsed: number): boolean {
+    // A hard floor between ANY two events — clustered modals are what make
+    // them feel like noise rather than incident.
+    if (elapsed - this.lastAnyEventAt < MIN_EVENT_GAP_SECONDS) return false;
     const tracked = this.activeEvents.find(e => e.event.id === def.id);
     if (tracked && elapsed - tracked.lastFiredAt < def.cooldownSeconds) return false;
 
@@ -74,6 +82,7 @@ class FlightEventServiceClass {
     }
 
     this.pendingChoice = def;
+    this.lastAnyEventAt = elapsed;
     // FlightScene listens for this, plays the event's visual cinematic
     // (bird flock, fuel mist, …), then opens the modal itself.
     EventBus.emit('flight:event-triggered', { event: def });
@@ -92,6 +101,22 @@ class FlightEventServiceClass {
     let next = { ...state };
     for (const consequence of choice.consequences) {
       next = this.applyConsequence(next, consequence);
+    }
+
+    // Tell the player what their choice actually cost them — without this the
+    // modal reads as a pointless interruption.
+    const outcome = choice.consequences
+      .map(c => c.description)
+      .filter(Boolean)
+      .join(' · ');
+    const harmful = choice.consequences.some(
+      c => (c.type === 'delta' && c.value < 0) || c.type === 'add_cargo_damage',
+    );
+    if (outcome) {
+      EventBus.emit('ui:show-notification', {
+        message: outcome,
+        type: harmful ? 'warning' : 'success',
+      });
     }
 
     EventBus.emit('flight:event-choice', { eventId, choiceId });

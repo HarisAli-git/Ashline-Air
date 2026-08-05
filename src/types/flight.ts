@@ -2,6 +2,7 @@
 export interface FlightState {
   throttle: number;       // 0–1
   pitch: number;          // degrees, positive = nose up
+  pitchRate: number;      // deg/s — the nose has momentum, it is not a slider
   speed: number;          // airspeed, m/s
   groundSpeed: number;    // m/s over ground (airspeed + wind component)
   altitude: number;       // metres
