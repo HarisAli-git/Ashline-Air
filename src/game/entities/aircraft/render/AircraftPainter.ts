@@ -45,6 +45,18 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+/** Blend two packed RGB colours — used for form shading across the airframe. */
+function mixHex(a: number, b: number, t: number): number {
+  const u = Math.max(0, Math.min(1, t));
+  const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+  const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+  return (
+    (Math.round(ar + (br - ar) * u) << 16) |
+    (Math.round(ag + (bg - ag) * u) << 8) |
+    Math.round(ab + (bb - ab) * u)
+  );
+}
+
 function hashId(id: string): number {
   let h = 2166136261;
   for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -213,12 +225,29 @@ export function ensureAircraftTextures(
     p.ellipse(L * 0.37, 0, L * 0.26, H * 0.94, pal.hull, 1);
     p.circle(L * 0.46, 0, H * 0.29, pal.hull, 1);
 
-    // Belly shade
-    p.rrect(-L * 0.14, H * 0.06, L * 0.52, H * 0.40, 4, pal.hullShade, 0.9);
-    p.tri(-L / 2 + 2, H * 0.06, -L * 0.12, H * 0.06, -L * 0.12, H * 0.46, pal.hullShade, 0.75);
-    p.ellipse(L * 0.37, H * 0.18, L * 0.24, H * 0.5, pal.hullShade, 0.55);
-    // Top highlight
-    p.rrect(-L * 0.14, -H / 2 + 1, L * 0.52, 3, 1.5, pal.hullLight, 0.5);
+    // ── Form shading: the fuselage is a CYLINDER, so light wraps around it.
+    // Banded gradient from a lit crown through the base coat to a dark belly.
+    const bands = 9;
+    for (let i = 0; i < bands; i++) {
+      const t0 = i / bands, t1 = (i + 1) / bands;      // 0 = top, 1 = bottom
+      const y0 = -H / 2 + H * t0, hBand = H * (t1 - t0) + 0.6;
+      // Curved falloff — brightest just below the crown, darkest at the keel
+      const shade = Math.cos((t0 - 0.28) * Math.PI * 0.95);
+      const col = shade > 0
+        ? mixHex(pal.hull, pal.hullLight, shade * 0.55)
+        : mixHex(pal.hull, pal.hullShade, Math.min(1, -shade * 1.25));
+      p.rect(-L * 0.15, y0, L * 0.54, hBand, col, 1);
+      // Nose section follows the same wrap
+      p.ellipse(L * 0.36, y0 + hBand / 2, L * 0.25, hBand * 1.25, col, 0.95);
+    }
+    // Tail cone keeps the shading as it tapers
+    p.poly([
+      [-L / 2, -H * 0.30], [-L * 0.12, -H * 0.04],
+      [-L * 0.12, H / 2], [-L / 2, H * 0.08],
+    ], mixHex(pal.hull, pal.hullShade, 0.5), 0.95);
+    // Specular crown line and a hard keel shadow
+    p.rrect(-L * 0.15, -H / 2 + 0.5, L * 0.52, 2.2, 1.1, mixHex(pal.hullLight, 0xffffff, 0.35), 0.7);
+    p.rrect(-L * 0.14, H / 2 - 3, L * 0.5, 3, 1.5, mixHex(pal.hullShade, 0x000000, 0.4), 0.8);
 
     // Panel seams + rivet rows
     for (const fx of [-0.05, 0.12, 0.26]) {
@@ -271,8 +300,20 @@ export function ensureAircraftTextures(
   bake(scene, k('wingNear'), bodyW, bodyH, ox, oy, p => {
     const q = wingQuad(w.rootX, w.y, w.chord, w.span, w.sweep, w.drop);
     p.poly(q, pal.hull, 1);
-    p.line(q[0][0], q[0][1], q[3][0], q[3][1], 1.4, pal.hullLight, 0.7);  // leading edge
+    // Spanwise shading — the wing is lit along the leading edge and falls
+    // into shadow toward the trailing edge
+    p.poly([q[1], q[2], [q[2][0] + 3, q[2][1] - 3], [q[1][0] + 3, q[1][1] - 3]],
+      mixHex(pal.hull, pal.hullShade, 0.65), 0.8);
+    p.line(q[0][0], q[0][1], q[3][0], q[3][1], 1.8,
+      mixHex(pal.hullLight, 0xffffff, 0.3), 0.85);                        // leading edge
     p.line(q[1][0], q[1][1], q[2][0], q[2][1], 1, 0x000000, 0.25);        // trailing edge
+    // Rib stitching across the chord
+    for (let r = 1; r < 6; r++) {
+      const t = r / 6;
+      const xa = q[0][0] + (q[3][0] - q[0][0]) * t, ya = q[0][1] + (q[3][1] - q[0][1]) * t;
+      const xb = q[1][0] + (q[2][0] - q[1][0]) * t, yb = q[1][1] + (q[2][1] - q[1][1]) * t;
+      p.line(xa, ya, xb, yb, 0.7, 0x000000, 0.16);
+    }
     // Aileron hint near the tip
     const ax = (q[1][0] + q[2][0]) / 2, ay = (q[1][1] + q[2][1]) / 2;
     p.line(ax, ay, q[2][0], q[2][1], 0.8, 0x000000, 0.2);
@@ -295,14 +336,30 @@ export function ensureAircraftTextures(
   bake(scene, k('canopy'), bodyW, bodyH, ox, oy, p => {
     const c = spec.canopy;
     if (c.style === 'bubble') {
+      // Glass
       p.poly([
         [c.x, -H / 2 + 1],
         [c.x + c.w * 0.25, -H / 2 - 9],
         [c.x + c.w * 0.7, -H / 2 - 9],
         [c.x + c.w, -H / 2 + 1],
       ], pal.canopy, 1);
-      p.line(c.x + c.w * 0.25, -H / 2 - 9, c.x + c.w * 0.32, -H / 2 + 1, 1, pal.metal, 0.7);
-      p.line(c.x + c.w * 0.28, -H / 2 - 6.5, c.x + c.w * 0.52, -H / 2 - 4, 1.4, pal.canopyGlint, 0.65);
+      // Somebody is actually flying this thing — head and shoulders inside
+      const px = c.x + c.w * 0.46, py = -H / 2 - 1.5;
+      p.ellipse(px - 3, py + 3.5, 11, 6, 0x2b2118, 0.95);        // shoulders
+      p.circle(px + 1.5, py - 1, 3.1, 0x6b4a33, 1);              // head
+      p.circle(px + 2.4, py - 1.8, 3.0, 0x241c14, 0.85);         // flight cap
+      p.rrect(px + 2.6, py - 2.2, 3.2, 1.6, 0.8, 0x8fb0bd, 0.9); // goggles
+      // Glass tint over the occupant, then frame and glare
+      p.poly([
+        [c.x, -H / 2 + 1],
+        [c.x + c.w * 0.25, -H / 2 - 9],
+        [c.x + c.w * 0.7, -H / 2 - 9],
+        [c.x + c.w, -H / 2 + 1],
+      ], pal.canopy, 0.4);
+      p.line(c.x + c.w * 0.25, -H / 2 - 9, c.x + c.w * 0.32, -H / 2 + 1, 1, pal.metal, 0.8);
+      p.line(c.x + c.w * 0.7, -H / 2 - 9, c.x + c.w * 0.78, -H / 2 + 1, 1, pal.metal, 0.6);
+      p.line(c.x + c.w * 0.28, -H / 2 - 6.8, c.x + c.w * 0.55, -H / 2 - 4.2, 1.6, pal.canopyGlint, 0.75);
+      p.line(c.x + c.w * 0.3, -H / 2 - 4.4, c.x + c.w * 0.44, -H / 2 - 3.2, 1, pal.canopyGlint, 0.4);
     } else {
       // Slanted windscreen at the front…
       p.poly([
@@ -312,6 +369,9 @@ export function ensureAircraftTextures(
         [c.x + c.w - 16, -H * 0.5 + 2],
       ], pal.canopy, 1);
       p.line(c.x + c.w - 12, -H * 0.44, c.x + c.w - 4, -H * 0.18, 1, pal.canopyGlint, 0.6);
+      // Crew silhouette behind the windscreen
+      p.ellipse(c.x + c.w - 11, -H * 0.2, 7, 5, 0x2b2118, 0.9);
+      p.circle(c.x + c.w - 9.5, -H * 0.3, 2.4, 0x6b4a33, 0.95);
       // …then a strip of square cabin windows
       const n = Math.max(2, Math.floor((c.w - 18) / 11));
       for (let i = 0; i < n; i++) {
@@ -378,16 +438,33 @@ export function ensureAircraftTextures(
   bake(scene, k('nacelle'), nacW, nacH, nacW / 2, nacH / 2, p => {
     const cl = eng.cowlLen, ch = eng.cowlH;
     p.rrect(-cl / 2, -ch / 2, cl, ch, ch * 0.35, pal.metal, 1);
-    p.rrect(-cl / 2 + 1, ch * 0.05, cl - 2, ch * 0.4, 3, pal.hullShade, 0.75);
+    // Wrapped shading to match the fuselage
+    for (let i = 0; i < 5; i++) {
+      const t0 = i / 5, y0 = -ch / 2 + ch * t0;
+      const sh = Math.cos((t0 - 0.28) * Math.PI);
+      const col = sh > 0 ? mixHex(pal.metal, 0xffffff, sh * 0.3)
+                         : mixHex(pal.metal, 0x000000, Math.min(1, -sh * 0.55));
+      p.rect(-cl / 2 + 0.5, y0, cl - 1, ch / 5 + 0.5, col, 0.9);
+    }
+    // Radial cylinder heads poking out of the cowl
+    for (let i = 0; i < 4; i++) {
+      const cy = -ch / 2 + 3 + i * (ch - 6) / 3;
+      p.rrect(cl * 0.12, cy - 1.4, cl * 0.3, 2.8, 1.2, mixHex(pal.metal, 0x000000, 0.45), 0.9);
+    }
     p.rrect(-cl / 2 + 1, -ch / 2 + 1, cl - 2, 2.5, 1.2, pal.hullLight, 0.55);
     // Cooling gills
     for (let i = 0; i < 3; i++) p.line(-cl * 0.1 + i * 4, -ch * 0.3, -cl * 0.1 + i * 4, ch * 0.3, 0.8, 0x000000, 0.25);
     // Intake lip + spinner cone
-    p.circle(cl / 2 - 1, 0, ch * 0.32, 0x16140f, 1);
-    p.tri(cl / 2, -3.2, cl / 2 + 7, 0, cl / 2, 3.2, pal.metal, 1);
-    p.tri(cl / 2, -3.2, cl / 2 + 7, 0, cl / 2, 0, pal.hullLight, 0.4);
-    // Exhaust stubs
-    p.rect(-cl * 0.28, ch * 0.42, 5, 2.4, 0x211c14, 1);
+    p.circle(cl / 2 - 1, 0, ch * 0.32, 0x16140f, 1);              // intake shadow
+    p.strokeEllipse(cl / 2 - 1, 0, ch * 0.66, ch * 0.66, 1, mixHex(pal.metal, 0xffffff, 0.4), 0.7);
+    // Spinner cone, lit from above
+    p.tri(cl / 2, -4.0, cl / 2 + 9, 0, cl / 2, 4.0, mixHex(pal.accent, 0x000000, 0.25), 1);
+    p.tri(cl / 2, -4.0, cl / 2 + 9, 0, cl / 2, -0.4, mixHex(pal.accent, 0xffffff, 0.45), 1);
+    p.line(cl / 2 + 1, -2.4, cl / 2 + 6.5, -0.6, 1, 0xffffff, 0.5);
+    // Exhaust stack with a heat-stained mouth
+    p.rrect(-cl * 0.30, ch * 0.40, 6.5, 3, 1.2, 0x2a231a, 1);
+    p.rrect(-cl * 0.34, ch * 0.42, 2.6, 2.4, 1, 0x0d0b08, 1);
+    p.rrect(-cl * 0.12, ch * 0.40, 5, 2.6, 1, 0x241e16, 1);
   });
 
   // ── Propeller: blade line, mid-rpm disc, full-rpm blur disc ────────────────

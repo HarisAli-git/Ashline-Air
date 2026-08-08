@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import type { WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
+import { blendBiome, type BiomeId, type BiomeShape } from './Biomes';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -14,8 +15,10 @@ import { Hazards } from './Hazards';
 // the number on the gauge matches what you SEE: at 90 m the aircraft is near
 // the top of frame, at 10 m it is just off the deck. These are low-level
 // cargo runs, not airliner cruise.
-export const ALT_BAND = 90;
-export const PLANE_MIN_Y = 160;    // screen y the aircraft pins to above the band
+export const ALT_BAND = 70;
+/** World altitude (m) of the low cloud layer you climb through. */
+const CLOUD_LAYER_ALT_M = 150;
+export const PLANE_MIN_Y = 250;    // screen y the aircraft pins to above the band
 /** World px per metre flown — high so speed genuinely reads on screen. */
 export const WORLD_PX_PER_M = 9;
 
@@ -110,6 +113,7 @@ export interface WorldFrame {
   planeScreenX?: number; // for tracer fire aimed at the aircraft
   planeScreenY?: number;
   speedFrac?: number;   // 0–1 airspeed, drives near-field blur and streaks
+  progress?: number;    // 0–1 along the route, blends origin country into destination
 }
 
 /** 0 = deep night, 1 = full day. Dawn 05:00–07:00, dusk 18:00–20:00. */
@@ -150,12 +154,14 @@ export class ParallaxWorld {
   readonly hazards = new Hazards();
   private groundFireOn = false;
 
-  private fromPal: Palette = resolve('clear');
-  private toPal: Palette = resolve('clear');
-  private weatherPal: Palette = resolve('clear'); // weather-blended, daylight-agnostic
-  private pal: Palette = resolve('clear');        // final: weather + time of day
+  private pal: Palette = resolve('clear');   // final: biome + weather + daylight
+  private shape: BiomeShape = blendBiome('ashland', 'ashland', 0).shape;
+  private prevWeather: WeatherCondition = 'clear';
+  private curWeather: WeatherCondition = 'clear';
   private blendT = 1;
   private dl = 1; // current daylight factor
+  private biomeFrom: BiomeId = 'ashland';
+  private biomeTo: BiomeId = 'ashland';
 
   private t = 0;
   private readonly cloudOffsets = [0, 200, 450, 700, 900];
@@ -205,9 +211,15 @@ export class ParallaxWorld {
 
   /** Blend the palette toward a weather condition over ~4 s. */
   setWeather(condition: WeatherCondition): void {
-    this.fromPal = { ...this.weatherPal };
-    this.toPal = resolve(condition);
+    this.prevWeather = this.curWeather;
+    this.curWeather = condition;
     this.blendT = 0;
+  }
+
+  /** The country at each end of this route. */
+  setBiomes(from: BiomeId, to: BiomeId): void {
+    this.biomeFrom = from;
+    this.biomeTo = to;
   }
 
   /** Leave a persistent tire mark on the ground where the wheels touched. */
@@ -227,25 +239,31 @@ export class ParallaxWorld {
   update(dt: number, f: WorldFrame): void {
     this.t += dt;
 
-    // Weather palette blend, then day/night grading on top
-    if (this.blendT < 1) {
-      this.blendT = Math.min(1, this.blendT + dt / 4);
-      const p = {} as Palette;
-      for (const k of Object.keys(this.toPal) as Array<keyof Palette>) {
-        p[k] = lerpColor(this.fromPal[k], this.toPal[k], this.blendT);
-      }
-      this.weatherPal = p;
-    }
+    // Palette pipeline: regional biome → weather tint → time of day.
+    // The biome is the base, so crossing from basin into red rock changes the
+    // land itself while weather and daylight still read on top of it.
+    this.blendT = Math.min(1, this.blendT + dt / 4);
+    const biome = blendBiome(this.biomeFrom, this.biomeTo, f.progress ?? 0);
+    this.shape = biome.shape;
     this.dl = daylight(f.minutesOfDay);
+
+    const wPrev = WEATHER_PALETTES[this.prevWeather];
+    const wCur = WEATHER_PALETTES[this.curWeather];
     const graded = {} as Palette;
-    for (const k of Object.keys(this.weatherPal) as Array<keyof Palette>) {
-      graded[k] = applyDaylight(this.weatherPal[k], this.dl);
+    for (const k of Object.keys(biome.palette) as Array<keyof Palette>) {
+      const base = biome.palette[k];
+      const a = wPrev[k] ?? base;
+      const b = wCur[k] ?? base;
+      graded[k] = applyDaylight(lerpColor(a, b, this.blendT), this.dl);
     }
     this.pal = graded;
 
     // Above the linear band the world sinks away beneath the aircraft
-    const sink = Phaser.Math.Clamp((f.altitude - ALT_BAND) * 0.35, 0, 420);
-    const hMult = Phaser.Math.Linear(1, 0.55, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 900, 0, 1));
+    // Above the band the aircraft holds its screen position and the WORLD
+    // drops away beneath it, at the same scale it was climbing at. Climb high
+    // enough and the ground genuinely leaves the bottom of the screen.
+    const sink = Math.max(0, (f.altitude - ALT_BAND) * this.pxPerM);
+    const hMult = Phaser.Math.Linear(1, 0.6, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 600, 0, 1));
 
     this.drawSky(f);
     this.drawFar(f.scrollX, sink * 0.30, hMult);
@@ -432,10 +450,19 @@ export class ParallaxWorld {
     } = {},
   ): void {
     const step = 14;
+    const sh = this.shape;
     const heightAt = (sx: number): number => {
-      const r = ridge(sx + scrollX * factor, seed);
+      const wx = sx + scrollX * factor;
+      const r = ridge(wx, seed) + (sh.roughness - 1) * 0.16 * Math.sin(wx * 0.021 + seed);
       const sharp = Math.sign(r) * Math.pow(Math.abs(r), 0.85); // peakier crests
-      return Math.max(6, ampBase + sharp * ampVar);
+      let h = Math.max(6, ampBase + sharp * ampVar);
+      // Sandstone country: terrace the silhouette into flat-topped mesas
+      if (sh.plateau > 0.02) {
+        const stepH = Math.max(12, ampBase * 0.42);
+        const terraced = Math.round(h / stepH) * stepH;
+        h = h + (terraced - h) * sh.plateau;
+      }
+      return Math.max(6, h);
     };
 
     // Silhouette
@@ -460,7 +487,7 @@ export class ParallaxWorld {
 
     // Lit crest line
     if (opts.highlight !== undefined) {
-      g.lineStyle(1.4, opts.highlight, 0.45 * this.dl + 0.1);
+      g.lineStyle(1.2, opts.highlight, 0.16 * this.dl + 0.04);
       g.beginPath();
       g.moveTo(-20, baseY - heightAt(-20));
       for (let sx = -20; sx <= this.width + 20; sx += step) g.lineTo(sx, baseY - heightAt(sx));
@@ -486,8 +513,9 @@ export class ParallaxWorld {
     if (opts.trees !== undefined) {
       const spacing = 64;
       const first = Math.floor((scrollX * factor - 40) / spacing);
+      const density = Phaser.Math.Clamp(this.shape.trees, 0, 1);
       for (let i = first; i < first + Math.ceil(this.width / spacing) + 2; i++) {
-        if (propRand(i + 400) < 0.4) continue;
+        if (propRand(i + 400) > density) continue;
         const sx = i * spacing + propRand(i) * 40 - scrollX * factor;
         if (sx < -20 || sx > this.width + 20) continue;
         const ty = baseY - heightAt(sx);
@@ -639,8 +667,9 @@ export class ParallaxWorld {
     const baseY = this.groundY + sink;
 
     // Two overlapping far ranges for a deep horizon
-    this.drawRidgeLayer(g, scrollX, 0.022, baseY, 42 * hMult, 55 * hMult, 13.4, this.pal.far, { alpha: 0.6 });
-    this.drawRidgeLayer(g, scrollX, 0.038, baseY, 55 * hMult, 70 * hMult, 1.7, this.pal.far, { alpha: 0.85 });
+    const a = this.shape.ridgeAmp;
+    this.drawRidgeLayer(g, scrollX, 0.022, baseY, 42 * hMult * a, 55 * hMult * a, 13.4, this.pal.far, { alpha: 0.6 });
+    this.drawRidgeLayer(g, scrollX, 0.038, baseY, 55 * hMult * a, 70 * hMult * a, 1.7, this.pal.far, { alpha: 0.85 });
 
     // Atmospheric distance haze over the far range
     for (let i = 0; i < 3; i++) {
@@ -654,12 +683,13 @@ export class ParallaxWorld {
     g.clear();
     const baseY = this.groundY + sink;
 
+    const amp = this.shape.ridgeAmp;
     this.drawRidgeLayer(
-      g, scrollX, 0.08, baseY, 85 * hMult, 115 * hMult, 4.2, this.pal.mountain, {
+      g, scrollX, 0.08, baseY, 85 * hMult * amp, 115 * hMult * amp, 4.2, this.pal.mountain, {
         shade: this.pal.mountainDark,
         highlight: lerpColor(this.pal.mountain, 0xffffff, 0.35),
         snow: this.pal.snow,
-        snowMin: 150 * hMult,
+        snowMin: (this.shape.caps > 0.4 ? 150 : 1e9) * hMult * amp,
       },
     );
 
@@ -697,10 +727,14 @@ export class ParallaxWorld {
     if (alt < 18) return;
 
     const alpha = Math.min(alt / 75, 0.85) * 0.16;
+    // Screen height of the cloud layer, anchored to a real world altitude:
+    // below it they sit overhead, above it they fall away beneath you.
+    const groundScreenY = this.groundY + Math.max(0, (alt - ALT_BAND) * this.pxPerM);
     const body = lerpColor(0x1e2632, 0xffffff, this.dl);           // night clouds go dark
     const shade = lerpColor(0x141a24, 0x9aa8b4, this.dl);
 
-    const baseY = this.groundY * 0.35;
+    const baseY = groundScreenY - CLOUD_LAYER_ALT_M * this.pxPerM;
+    if (baseY > this.height + 120) return;
     for (let i = 0; i < this.cloudOffsets.length; i++) {
       const span = this.width + 300;
       const ox = ((this.cloudOffsets[i] - scrollX * 0.05) % span + span) % span - 150;
@@ -724,7 +758,7 @@ export class ParallaxWorld {
     const baseY = this.groundY + sink;
 
     this.drawRidgeLayer(
-      g, scrollX, 0.22, baseY, 26, 46, 8.9, this.pal.hill, {
+      g, scrollX, 0.22, baseY, 26 * this.shape.hillAmp, 46 * this.shape.hillAmp, 8.9, this.pal.hill, {
         shade: lerpColor(this.pal.hill, 0x000000, 0.35),
         highlight: this.pal.hillLight,
         trees: lerpColor(this.pal.hill, 0x000000, 0.5),

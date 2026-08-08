@@ -32,7 +32,7 @@ export const TUNING = {
   CL0: 0.25,                // lift coefficient at zero angle of attack
   CLalpha: 5.0,             // lift-curve slope, per radian
   CLmax: 1.45,              // stall happens here
-  stallDrop: 0.55,          // fraction of lift lost once fully stalled
+  stallDrop: 0.62,          // fraction of lift lost once fully stalled
   inducedK: 0.07,           // induced-drag factor (k·CL²)
   CD0: 0.075,               // parasitic drag — also sets max-speed thrust
   flapsCL: 0.45,            // extra lift from flaps
@@ -97,6 +97,10 @@ export class AircraftController {
   onTouchdown: ((verticalSpeed: number, speed: number) => void) | null = null;
   /** True while the pilot is braking on the rollout. */
   braking = false;
+  /** How stalled the wing actually is, 0–1. Read by the HUD. */
+  stallIntensity = 0;
+  /** Margin above the stall angle, 1 = plenty, 0 = about to let go. */
+  stallMargin = 1;
 
   constructor(definition: AircraftDefinition) {
     this.def = definition;
@@ -190,6 +194,12 @@ export class AircraftController {
       CL = clMax * (1 - TUNING.stallDrop * stallT);
     }
     CL = clamp(CL, -1.0, clMax);
+    this.stallIntensity = stallT;
+    // How close the wing is to letting go — this is what the warning horn
+    // should track, NOT raw airspeed. You can be slow and perfectly happy,
+    // and you can stall at speed by hauling the nose up.
+    const alphaCrit = (clMax - TUNING.CL0 - flapCL) / TUNING.CLalpha;
+    this.stallMargin = clamp(1 - alpha / Math.max(0.01, alphaCrit), 0, 1);
 
     const qK = this.K * s.speed * s.speed;   // ½ρV²S/m
 

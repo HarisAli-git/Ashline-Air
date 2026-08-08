@@ -4,6 +4,7 @@ import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
 import { GROUND_FIRE_CEILING } from '../world/Hazards';
+import { biomeFor } from '../world/Biomes';
 import { WeatherFX } from '../world/WeatherFX';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
@@ -47,6 +48,8 @@ export class FlightScene extends Phaser.Scene {
   private contractId!: string;
   private routeKm = 6;          // gameplay-scale route length to the destination
   private destinationName = 'destination';
+  private originBiome = biomeFor(undefined);
+  private destBiome = biomeFor(undefined);
   private cargo!: CargoHold;
   private lastCargoEmit = 0;
   private landed      = false;
@@ -160,6 +163,8 @@ export class FlightScene extends Phaser.Scene {
       }
     }
     this.destinationName = destinationName;
+    this.originBiome = biomeFor(contract?.originId);
+    this.destBiome = biomeFor(contract?.destinationId);
     EventBus.emit('flight:route-info', { routeKm: this.routeKm, destinationName });
 
     // ── Cargo hold: what's riding in the back ─────────────────────────────
@@ -172,6 +177,8 @@ export class FlightScene extends Phaser.Scene {
     // Obstacles and raider ground are deterministic per contract, so a route
     // you have flown before hands you the same threats.
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+    // The land itself changes between the two settlements
+    this.world.setBiomes(this.originBiome, this.destBiome);
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
     this.fx       = new WeatherFX(this, width, height);
 
@@ -250,6 +257,7 @@ export class FlightScene extends Phaser.Scene {
       routeTotalKm: this.routeKm, condition: this.weather.current.condition,
       minutesOfDay: this.baseTimestamp % 1440,
       visibility: this.weather.current.visibility,
+      progress: 0,
     });
     EventBus.emit('flight:state-update', this.state);
   }
@@ -496,6 +504,7 @@ export class FlightScene extends Phaser.Scene {
       planeScreenX: AIRCRAFT_X,
       planeScreenY: this.world.altitudeToScreenY(this.state.altitude),
       speedFrac: clamp(this.state.groundSpeed / 55, 0, 1),
+      progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
     });
     this.fx.update(sdt);
 
@@ -668,10 +677,12 @@ export class FlightScene extends Phaser.Scene {
       }
     }
 
-    // Stall horn tracks the wing, not the buffet timer
-    const vStall = SaveService.getActiveAircraft().def.stats.stallSpeed / 3.6;
-    const stallEff = vStall * (this.state.flapsDeployed ? 0.85 : 1);
-    this.stallWarning = alt > 3 && this.state.speed < stallEff * 1.08;
+    // Stall horn tracks the WING — how close the angle of attack is to the
+    // critical angle — not raw airspeed. The old speed test screamed STALL at
+    // an aeroplane that was flying perfectly well, and stayed silent through
+    // a real accelerated stall.
+    this.stallWarning = alt > 3 &&
+      (this.controller.stallIntensity > 0.02 || this.controller.stallMargin < 0.16);
 
     // Above ~95% of Vne the airframe is being torn up — the player was losing
     // integrity here with nothing on the panel to explain it.
