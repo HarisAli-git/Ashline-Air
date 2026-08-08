@@ -442,9 +442,9 @@ export class FlightScene extends Phaser.Scene {
       if (this.state.altitude > 0.5) {
         this.rollout = false;
         this.rolloutResult = null;
+        this.controller.braking = false;
       } else {
-        this.state.speed = Math.max(0, this.state.speed - 6 * sdt);
-        this.state.groundSpeed = this.state.speed;
+        this.controller.braking = true;
         if (this.state.speed < 3) {
           this.finishFlight(this.rolloutResult!);
           return;

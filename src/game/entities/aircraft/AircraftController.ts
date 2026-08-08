@@ -2,45 +2,61 @@ import type { AircraftDefinition, FlightState } from '../../../types';
 import { clamp } from '../../utils/math';
 import { specFor } from './render/AircraftVisualSpec';
 
-const GRAVITY = 9.81; // m/s²
+const GRAVITY = 9.81;          // m/s²
+const DEG = Math.PI / 180;
 
 /**
- * All feel-related constants in one place so balancing is a single-file job.
+ * A real 2-D point-mass aerodynamic model.
  *
- * Flight model philosophy (TU-46 style): the nose commands the flight path.
- * Pitch up and the velocity vector follows — climbing bleeds airspeed,
- * diving buys it back. No artificial climb-rate caps; energy is the limit.
+ * The aircraft is flown by FORCES, not by hand-written vertical-speed
+ * targets. Lift, drag, thrust and weight act on the velocity vector:
+ *
+ *     dV/dt  = T·cos α − D − g·sin γ
+ *     dγ/dt  = (L + T·sin α − g·cos γ) / V
+ *
+ * where γ is the flight-path angle and α = pitch − γ is the angle of attack.
+ * Lift comes from a real CL(α) curve that stalls, drag has a parasitic and an
+ * induced part, and weight is always pulling down.
+ *
+ * Everything that used to need a special case now falls out of the maths:
+ * cutting the engine makes you glide down, holding the nose up too slow makes
+ * you stall and drop, the aircraft leaves the runway at the exact moment lift
+ * exceeds weight, and flaring near the ground trades speed for a soft
+ * touchdown. No `authority` ramps, no `powerBalance` fudge, no vertical-speed
+ * lag filters.
  */
 export const TUNING = {
   throttleRate: 0.9,        // throttle change per second of key held
 
+  // ── Wing ──
+  CL0: 0.25,                // lift coefficient at zero angle of attack
+  CLalpha: 5.0,             // lift-curve slope, per radian
+  CLmax: 1.45,              // stall happens here
+  stallDrop: 0.55,          // fraction of lift lost once fully stalled
+  inducedK: 0.07,           // induced-drag factor (k·CL²)
+  CD0: 0.075,               // parasitic drag — also sets max-speed thrust
+  flapsCL: 0.45,            // extra lift from flaps
+  flapsCD: 0.028,           // and the drag that comes with it
+  gearCD: 0.014,            // retractable gear hanging out
+  groundEffect: 0.55,       // induced drag retained at zero height (float)
+
   // ── Pitch: a driven, damped, self-stabilising airframe ──
-  // The elevator applies a moment; the airframe's own stability applies an
-  // opposing one; damping settles the pair. Holding the stick therefore
-  // reaches an EQUILIBRIUM attitude (≈ controlPower / pitchStability ≈ 24°)
-  // instead of winding up forever, and letting go returns you to level.
-  controlPower: 72,         // elevator moment, deg/s² at cruise
-  pitchStability: 3.0,      // aerodynamic restoring moment toward trim
-  pitchDamping: 2.7,        // pitch-rate damping (ζ ≈ 0.78 — settles, no wallow)
-  maxPitchRate: 60,         // deg/s clamp
-  trimPitchDeg: 0,          // hands off ⇒ straight and level
-  phugoid: 0.9,             // speed↔pitch coupling; the long slow porpoise
-  thrustTimeConstant: 5.5,  // seconds to ~63% of vMax at full throttle
-  pathResponse: 5,          // 1/s — how fast the flight path follows the nose
-  energyExchange: 0.9,      // fraction of gravity felt along the flight path
-  powerClimbAuthority: 6,   // m/s of climb/sink from thrust-vs-drag imbalance
-  maxSink: -38,             // m/s hard sink limit (terminal-ish dive)
-  diveOverspeed: 1.15,      // dives may exceed vMax by this factor
-  stallBand: 0.25,          // stall develops over this fraction below vStall
-  stallNoseDownRate: 14,    // deg/s nose-drop at full stall
-  flapsStallRelief: 0.85,   // flaps lower effective stall speed
-  flapsDragFactor: 0.5,     // extra drag as a fraction of base kD
-  rollingFriction: 0.35,    // m/s² while on the ground
-  rotateSpeedFactor: 0.85,  // elevator has full authority at vStall × this
-  tempHeatRate: 0.055,      // 1/s convergence while heating
-  tempCoolRate: 0.11,       // 1/s convergence while cooling
-  overspeedDamage: 3,       // integrity/s above 95% vMax
-  gearDragDamage: 1.2,      // integrity/s with gear out well above stall speed
+  controlPower: 78,         // elevator moment, deg/s² at cruise
+  pitchStability: 3.4,      // restoring moment toward the trim ANGLE OF ATTACK
+  pitchDamping: 2.8,        // pitch-rate damping
+  maxPitchRate: 65,         // deg/s clamp
+
+  // ── Ground ──
+  rollingFriction: 0.45,    // m/s² rolling resistance
+  brakeFriction: 4.5,       // m/s² extra once rolling out after landing
+  rotateSpeedFactor: 0.7,   // elevator bites from this fraction of stall speed
+
+  // ── Systems ──
+  tempHeatRate: 0.055,
+  tempCoolRate: 0.11,
+  overspeedDamage: 3,       // integrity/s above Vne
+  gearDragDamage: 1.2,
+  vneFactor: 1.05,          // never-exceed speed as a multiple of vMax
 };
 
 const STEP = 1 / 120;       // fixed physics step (s)
@@ -59,24 +75,28 @@ export interface FlightInput {
 export class AircraftController {
   private readonly def: AircraftDefinition;
 
-  // Per-aircraft coefficients, derived once from data stats (all speeds m/s)
+  // Speeds in m/s
   private readonly vMax: number;
   private readonly vCruise: number;
   private readonly vStall: number;
-  private readonly tMax: number;   // full-throttle acceleration, m/s²
-  private readonly kD: number;     // drag coefficient (equilibrium at vMax)
-  private readonly gearLimit: number; // speed above which extended gear takes damage
-  private readonly gearFixed: boolean; // fixed gear is built for it — no drag damage
+
+  /**
+   * Lift/drag scale = ½ρS/m lumped into one constant, solved so that level
+   * flight at the data-sheet stall speed needs exactly CLmax.
+   */
+  private readonly K: number;
+  /** Full-throttle thrust acceleration, solved so level flight tops out at vMax. */
+  private readonly tMax: number;
+  private readonly gearFixed: boolean;
 
   private accumulator = 0;
 
   /** Set by FlightScene: called with stall intensity 0–1 while buffeting. */
   onBuffet: ((intensity: number) => void) | null = null;
-  /**
-   * Set by FlightScene: fires at the exact substep the wheels meet the ground,
-   * with the impact vertical speed and airspeed (before they get zeroed).
-   */
+  /** Fires at the substep the wheels meet the ground, with impact values. */
   onTouchdown: ((verticalSpeed: number, speed: number) => void) | null = null;
+  /** True while the pilot is braking on the rollout. */
+  braking = false;
 
   constructor(definition: AircraftDefinition) {
     this.def = definition;
@@ -84,9 +104,14 @@ export class AircraftController {
     this.vMax = s.maxSpeed / 3.6;
     this.vCruise = s.cruiseSpeed / 3.6;
     this.vStall = s.stallSpeed / 3.6;
-    this.tMax = this.vMax / TUNING.thrustTimeConstant;
-    this.kD = this.tMax / (this.vMax * this.vMax);
-    this.gearLimit = this.vStall * 1.6;
+
+    // Wing loading that makes the quoted stall speed true
+    this.K = GRAVITY / (this.vStall * this.vStall * TUNING.CLmax);
+    // Thrust that makes the quoted top speed true in level flight
+    const clAtVmax = GRAVITY / (this.K * this.vMax * this.vMax);
+    const cdAtVmax = TUNING.CD0 + TUNING.inducedK * clAtVmax * clAtVmax;
+    this.tMax = this.K * this.vMax * this.vMax * cdAtVmax;
+
     this.gearFixed = specFor(definition.id).gear.fixed;
   }
 
@@ -112,6 +137,11 @@ export class AircraftController {
     };
   }
 
+  /** Airspeed at which the wing will just carry the aircraft, for the HUD. */
+  get stallSpeed(): number {
+    return this.vStall;
+  }
+
   /**
    * Frame-rate-independent integration: the real frame delta feeds a
    * fixed-step accumulator, so the sim advances identically at 30, 60 or
@@ -127,7 +157,7 @@ export class AircraftController {
       this.accumulator -= STEP;
       steps++;
     }
-    if (steps === MAX_SUBSTEPS) this.accumulator = 0; // shed backlog after a huge stall
+    if (steps === MAX_SUBSTEPS) this.accumulator = 0; // shed backlog after a stall
 
     return next;
   }
@@ -136,132 +166,147 @@ export class AircraftController {
     const { stats } = this.def;
     const onGround = s.altitude <= 0;
 
-    const vStallEff = this.vStall * (s.flapsDeployed ? TUNING.flapsStallRelief : 1);
-
-    // ── Controls ──────────────────────────────────────────────────────────
+    // ── Throttle ──────────────────────────────────────────────────────────
     if (input.throttleUp)   s.throttle = clamp(s.throttle + TUNING.throttleRate * dt, 0, 1);
     if (input.throttleDown) s.throttle = clamp(s.throttle - TUNING.throttleRate * dt, 0, 1);
+    const effThrottle = input.engineOn && s.fuel > 0 ? s.throttle : 0;
+    const aT = effThrottle * this.tMax * (1 - s.engineTemp * 0.3);
 
-    // ── Pitch: a real rotating airframe, not a position slider ────────────
-    //
-    // The stick commands a pitch RATE, that rate lags behind the command
-    // (inertia), the airframe's own stability pulls the nose back toward trim
-    // when you let go, and damping settles it. Control power scales with
-    // dynamic pressure, so the elevator is mushy slow and crisp fast. Those
-    // four things together are the difference between flying an aeroplane and
-    // dragging a number up and down.
+    // ── Flight-path angle and angle of attack ─────────────────────────────
+    // On the wheels the aircraft can only travel along the runway.
+    const gamma = onGround ? 0 : Math.atan2(s.verticalSpeed, Math.max(2, s.speed));
+    const alpha = s.pitch * DEG - gamma;
 
-    // On the runway the elevator only bites once there's airflow over it —
-    // yanking the stick at parking speed does nothing (rotate ~stall speed).
-    const rotateAt = vStallEff * TUNING.rotateSpeedFactor;
-    const elevatorAuthority = onGround ? clamp(s.speed / Math.max(1, rotateAt), 0, 1) : 1;
+    // ── Wing: a real lift curve that stalls ───────────────────────────────
+    const flapCL = s.flapsDeployed ? TUNING.flapsCL : 0;
+    const clMax = TUNING.CLmax + flapCL;
+    const clLinear = TUNING.CL0 + flapCL + TUNING.CLalpha * alpha;
 
-    // Dynamic pressure ∝ v²: heavy, mushy stick when slow — crisp when fast
-    const qNorm = clamp((s.speed / this.vCruise) ** 2, 0.12, 1.7);
+    let stallT = 0;
+    let CL = clLinear;
+    if (clLinear > clMax) {
+      // Past the critical angle the wing gives up — this IS the stall
+      stallT = clamp((clLinear - clMax) / (clMax * 0.55), 0, 1);
+      CL = clMax * (1 - TUNING.stallDrop * stallT);
+    }
+    CL = clamp(CL, -1.0, clMax);
+
+    const qK = this.K * s.speed * s.speed;   // ½ρV²S/m
+
+    // Ground effect: induced drag falls away close to the runway, which is
+    // what makes a flared aeroplane float instead of thumping down.
+    const heightRatio = clamp(s.altitude / 12, 0, 1);
+    const induced = TUNING.inducedK * CL * CL *
+      (TUNING.groundEffect + (1 - TUNING.groundEffect) * heightRatio);
+
+    let CD = TUNING.CD0 + induced;
+    if (s.flapsDeployed) CD += TUNING.flapsCD;
+    if (s.gearDown && !this.gearFixed) CD += TUNING.gearCD;
+    CD += stallT * 0.09;                     // separated flow is draggy
+
+    const aL = qK * CL;                      // lift acceleration
+    const aD = qK * CD * s.modifiers.dragMult;
+
+    // ── Pitch: driven, damped, statically stable ──────────────────────────
+    // Stability restores toward the TRIM ANGLE OF ATTACK — the α that would
+    // hold level flight at this speed. That is real longitudinal stability:
+    // hands off, the aeroplane settles into level flight by itself, and it
+    // produces the phugoid for free.
+    const rotateAt = this.vStall * TUNING.rotateSpeedFactor;
+    const elevator = onGround ? clamp(s.speed / Math.max(1, rotateAt), 0, 1) : 1;
+    const qNorm = clamp((s.speed / this.vCruise) ** 2, 0.1, 1.7);
+
+    // Trim holds a SPEED, not an altitude. This is the classic relationship —
+    // pitch sets airspeed, power sets climb. Trimming for level flight at
+    // whatever speed you happen to have makes the aeroplane fight to keep its
+    // height with no engine, which is precisely the "it never comes down" bug.
+    // Flaps out means you are configured for the approach, so it trims slower.
+    const vTrim = s.flapsDeployed ? this.vStall * 1.35 : this.vCruise;
+    const clForLevel = clamp(GRAVITY / (this.K * vTrim * vTrim), 0, clMax);
+    const alphaTrim = clamp(
+      (clForLevel - TUNING.CL0 - flapCL) / TUNING.CLalpha,
+      -6 * DEG, (clMax - TUNING.CL0 - flapCL) / TUNING.CLalpha,
+    );
+    const pitchTrimDeg = onGround ? 0 : (gamma + alphaTrim) / DEG;
 
     const command = (input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0);
-
-    // Elevator moment vs the airframe's restoring moment — both always live,
-    // which is what gives a held stick a natural equilibrium attitude.
-    const controlMoment = command * TUNING.controlPower * qNorm * elevatorAuthority;
-    const stabilityMoment = (TUNING.trimPitchDeg - s.pitch) * TUNING.pitchStability * qNorm;
+    const controlMoment = command * TUNING.controlPower * qNorm * elevator;
+    const stabilityMoment = (pitchTrimDeg - s.pitch) * TUNING.pitchStability * qNorm;
 
     s.pitchRate += (controlMoment + stabilityMoment) * dt;
     s.pitchRate *= Math.exp(-dt * TUNING.pitchDamping);
 
-    if (!onGround) {
-      // Phugoid coupling: carrying extra speed floats the nose up, running
-      // slow lets it sag — the gentle long-period wallow real aircraft have.
-      s.pitchRate += ((s.speed - this.vCruise) / this.vCruise) * TUNING.phugoid * dt;
+    if (stallT > 0) {
+      // A stalled wing drops its nose — that is how you recover
+      s.pitchRate -= 26 * stallT * dt;
+      this.onBuffet?.(stallT);
     }
 
     s.pitchRate = clamp(s.pitchRate, -TUNING.maxPitchRate, TUNING.maxPitchRate);
     s.pitch += s.pitchRate * dt;
-    // Wheels on the ground can't rotate past a tail strike
     const lo = onGround ? -4 : -35;
-    const hi = onGround ? 17 : 35;
+    const hi = onGround ? 16 : 35;
     if (s.pitch < lo || s.pitch > hi) {
       s.pitch = clamp(s.pitch, lo, hi);
-      s.pitchRate *= 0.2;   // bleed off against the stop rather than pinning
+      s.pitchRate *= 0.2;
     }
 
-    const effThrottle = input.engineOn && s.fuel > 0 ? s.throttle : 0;
+    // ── Integrate the velocity vector ─────────────────────────────────────
+    const vne = this.vMax * TUNING.vneFactor;
 
-    // ── Stall factor (0 = clean, 1 = fully stalled) ───────────────────────
-    const stallT = !onGround
-      ? clamp((vStallEff - s.speed) / (TUNING.stallBand * vStallEff), 0, 1)
-      : 0;
+    if (onGround) {
+      // Rolling: thrust against drag, friction and (after landing) brakes
+      const friction = TUNING.rollingFriction + (this.braking ? TUNING.brakeFriction : 0);
+      s.speed = clamp(s.speed + (aT - aD - friction) * dt, 0, vne);
 
-    // ── Thrust vs drag along the flight path ──────────────────────────────
-    const thrust = effThrottle * this.tMax * (1 - s.engineTemp * 0.3);
-    let drag = this.kD * s.speed * s.speed * s.modifiers.dragMult;
-    if (s.flapsDeployed) drag += this.kD * TUNING.flapsDragFactor * s.speed * s.speed;
-    const rolling = onGround && s.speed > 0 ? TUNING.rollingFriction : 0;
+      // The aeroplane leaves the ground the instant the wing carries it —
+      // no special case, no scripted lift-off. Rotate, lift exceeds weight,
+      // and the whole aircraft rises.
+      if (aL > GRAVITY) {
+        s.verticalSpeed += (aL - GRAVITY) * dt;
+        s.altitude = Math.max(0, s.altitude + s.verticalSpeed * dt);
+      } else {
+        s.verticalSpeed = 0;
+      }
+    } else {
+      // Along the flight path
+      s.speed = clamp(
+        s.speed + (aT * Math.cos(alpha) - aD - GRAVITY * Math.sin(gamma)) * dt,
+        0, vne,
+      );
 
-    // ── Flight path follows the nose (the TU-46 feel) ─────────────────────
-    // Climb authority builds with airspeed above stall; a slow aircraft can
-    // point up all it wants — it won't go up.
-    const pitchRad = (s.pitch * Math.PI) / 180;
-    const authority = clamp((s.speed - vStallEff * 0.8) / (vStallEff * 0.5), 0, 1);
-    const gammaEff = pitchRad > 0
-      ? pitchRad * authority * (1 - stallT)
-      : pitchRad;
-    // Power balance drives altitude. Without this the aircraft holds height
-    // forever at level pitch no matter what the throttle is doing — cutting
-    // power did literally nothing until the wing finally stalled.
-    // Thrust > drag ⇒ climb, thrust < drag ⇒ sink, matched ⇒ level.
-    const powerBalance = clamp((thrust - drag) / Math.max(0.5, this.tMax), -1.2, 1.2);
-    const vsPower = onGround ? 0 : powerBalance * TUNING.powerClimbAuthority;
+      // Perpendicular to it — this is what curves the trajectory. If lift is
+      // less than the weight component, the path bends downward. Always.
+      const vSafe = Math.max(6, s.speed);
+      const gammaDot = (aL + aT * Math.sin(alpha) - GRAVITY * Math.cos(gamma)) / vSafe;
+      const newGamma = clamp(gamma + gammaDot * dt, -1.3, 1.3);
 
-    let vsTarget = clamp(s.speed * Math.sin(gammaEff) + vsPower, TUNING.maxSink, 1000);
-    // Ground effect: the air cushions the sink close to the runway, so a
-    // flare genuinely arrests the descent instead of slamming through it.
-    if (!onGround && s.altitude < 14 && vsTarget < 0) {
-      vsTarget *= 0.45 + 0.55 * (s.altitude / 14);
-    }
-    s.verticalSpeed += (vsTarget - s.verticalSpeed) * (1 - Math.exp(-dt * TUNING.pathResponse));
-
-    // Energy exchange: gravity acts along the actual flight path — climbing
-    // bleeds airspeed, diving converts height back into speed.
-    const gammaActual = Math.asin(clamp(s.verticalSpeed / Math.max(s.speed, 3), -1, 1));
-    const gravityAlongPath = -GRAVITY * Math.sin(gammaActual) * TUNING.energyExchange;
-
-    const vLimit = s.verticalSpeed < -4 ? this.vMax * TUNING.diveOverspeed : this.vMax;
-    s.speed = clamp(s.speed + (thrust - drag - rolling + gravityAlongPath) * dt, 0, vLimit);
-
-    // ── Stall behaviour: nose drops, buffet warns ─────────────────────────
-    if (stallT > 0) {
-      // The wing lets go and the nose FALLS — applied as a moment so the
-      // recovery has the same weight as every other input.
-      s.pitchRate -= TUNING.stallNoseDownRate * stallT * dt * 2.2;
-      this.onBuffet?.(stallT);
+      s.verticalSpeed = s.speed * Math.sin(newGamma);
+      const wasAirborne = s.altitude > 0;
+      s.altitude = clamp(s.altitude + s.verticalSpeed * dt, 0, stats.maxAltitude);
+      if (wasAirborne && s.altitude <= 0) {
+        this.onTouchdown?.(s.verticalSpeed, s.speed);
+        s.verticalSpeed = 0;
+      }
     }
 
-    const wasAirborne = s.altitude > 0;
-    s.altitude = clamp(s.altitude + s.verticalSpeed * dt, 0, stats.maxAltitude);
-    if (wasAirborne && s.altitude <= 0) {
-      this.onTouchdown?.(s.verticalSpeed, s.speed);
-    }
-    if (s.altitude <= 0 && s.verticalSpeed < 0) s.verticalSpeed = 0; // resting on the ground
-
-    // ── Ground speed / distance (wind acts on track, not airspeed) ────────
-    s.groundSpeed = Math.max(0, s.speed + windX);
+    // ── Ground track, fuel, temperature, stress ───────────────────────────
+    s.groundSpeed = Math.max(0, s.speed * Math.cos(gamma) + windX);
     s.distanceTravelled += (s.groundSpeed * dt) / 1000;
 
-    // ── Fuel & engine temperature ─────────────────────────────────────────
     const burnPerSecond = (stats.fuelBurnRate * effThrottle * s.modifiers.fuelBurnMult) / 60;
     s.fuel = clamp(s.fuel - burnPerSecond * dt, 0, stats.fuelCapacity);
 
     const tempTarget = effThrottle * 0.9;
     const tempRate = tempTarget > s.engineTemp ? TUNING.tempHeatRate : TUNING.tempCoolRate;
-    s.engineTemp += (tempTarget - s.engineTemp) * (1 - Math.exp(-dt * tempRate));
-    s.engineTemp = clamp(s.engineTemp, 0, 1);
+    s.engineTemp = clamp(
+      s.engineTemp + (tempTarget - s.engineTemp) * (1 - Math.exp(-dt * tempRate)), 0, 1,
+    );
 
-    // ── Structural stress ─────────────────────────────────────────────────
-    if (s.speed > this.vMax * 0.95) {
+    if (s.speed > this.vMax * 0.97) {
       s.integrity = clamp(s.integrity - TUNING.overspeedDamage * dt, 0, 100);
     }
-    if (!this.gearFixed && s.gearDown && !onGround && s.speed > this.gearLimit && s.altitude > 5) {
+    if (!this.gearFixed && s.gearDown && !onGround && s.speed > this.vStall * 1.8) {
       s.integrity = clamp(s.integrity - TUNING.gearDragDamage * dt, 0, 100);
     }
 

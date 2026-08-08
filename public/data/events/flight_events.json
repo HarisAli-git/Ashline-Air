@@ -194,7 +194,7 @@
           {
             "type": "delta",
             "target": "fuel",
-            "value": -20,
+            "value": -10,
             "description": "Climb burns extra fuel"
           },
           {
@@ -212,7 +212,7 @@
           {
             "type": "delta",
             "target": "fuel",
-            "value": -30,
+            "value": -15,
             "description": "Extra distance costs fuel"
           },
           {
@@ -244,7 +244,7 @@
           {
             "type": "delta",
             "target": "fuel",
-            "value": -25,
+            "value": -12,
             "description": "Diversion burns fuel"
           },
           {
@@ -312,7 +312,7 @@
           {
             "type": "delta",
             "target": "altitude",
-            "value": -800,
+            "value": -22,
             "description": "You drop to a lower layer"
           }
         ]
