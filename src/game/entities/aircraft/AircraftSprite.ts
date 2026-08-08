@@ -55,8 +55,6 @@ export class AircraftSprite {
   private readonly contactY: number;
   /** Parked nose-up attitude in degrees (0 for nose-gear aircraft). */
   private stanceDeg: number;
-  /** Ground speed (m/s) at which the tail flies itself off the runway. */
-  private readonly tailLiftSpeed: number;
 
   private readonly props: PropAssembly[] = [];
   private readonly legs: GearLeg[] = [];
@@ -103,9 +101,6 @@ export class AircraftSprite {
     const g = spec.gear;
     this.contactY = g.hingeY + g.strutLen + g.wheelR;
     this.stanceDeg = g.tailWheelX !== null ? (spec.groundStanceDeg ?? 0) : 0;
-    // The tail stays planted through the early roll and flies off well before
-    // rotation speed — the same spread a real taildragger has.
-    this.tailLiftSpeed = Math.max(7, (def.stats.stallSpeed / 3.6) * 0.62);
 
     // Particles first so their emitters render behind the aircraft
     this.particles = opts.particles === false ? null : new AircraftParticles(scene, spec);
@@ -454,7 +449,7 @@ export class AircraftSprite {
   }
 
   private updateLightCone(state: FlightState): void {
-    const want = state.gearDown && state.altitude < 250 && state.verticalSpeed < -0.3;
+    const want = state.gearDown && state.altitude < 90 && state.verticalSpeed < -0.3;
     if (!want) {
       if (this.coneOn) { this.lightCone.clear(); this.coneOn = false; }
       return;
@@ -470,19 +465,19 @@ export class AircraftSprite {
   private updateAttitude(state: FlightState): void {
     // Nose-up (positive pitch) = counter-clockwise = negative Phaser rotation.
     // Full 1:1 rotation — the aircraft points where you point it.
-    const onGround = state.altitude <= 0.5;
-    let thetaDeg: number; // nose-up, degrees
+    const pitchDeg = Phaser.Math.Clamp(state.pitch, -30, 30);
 
-    if (onGround) {
-      // Taildragger ground handling: the tail rests on its wheel until airflow
-      // over the elevator lifts it, and the attitude is simply whichever is
-      // higher — the parked stance or the pilot's rotation input. Pushing the
-      // nose below level is not possible (the prop would strike).
-      const tailDown = Phaser.Math.Clamp(1 - state.speed / this.tailLiftSpeed, 0, 1);
-      thetaDeg = Math.max(0, Math.max(state.pitch, this.stanceDeg * tailDown));
-    } else {
-      thetaDeg = Phaser.Math.Clamp(state.pitch, -30, 30);
-    }
+    // The aircraft holds its nose-high stance for the WHOLE ground roll — the
+    // tail never levels itself out as speed builds. Pulling back raises the
+    // nose beyond the stance, and the stance releases only as the wheels
+    // actually leave the ground, so rotation flows straight into the climb
+    // with no snap.
+    const groundBlend = Phaser.Math.Clamp(1 - state.altitude / 6, 0, 1);
+    const thetaDeg = Phaser.Math.Linear(
+      pitchDeg,
+      Math.max(this.stanceDeg, pitchDeg),
+      groundBlend,
+    );
 
     const theta = Phaser.Math.DegToRad(thetaDeg);
     let rot = -theta;
@@ -491,7 +486,6 @@ export class AircraftSprite {
     // ground so the mains stay planted at any attitude, easing to a datum
     // pivot once airborne.
     const planted = this.spec.gear.mainX * Math.sin(theta) - this.contactY * Math.cos(theta);
-    const groundBlend = Phaser.Math.Clamp(1 - state.altitude / 6, 0, 1);
     let yOff = Phaser.Math.Linear(-this.contactY, planted, groundBlend);
 
     if (state.altitude > 0.5) {
@@ -514,7 +508,7 @@ export class AircraftSprite {
   }
 
   private updateShadow(state: FlightState): void {
-    const t = Math.max(0, 1 - state.altitude / 300);
+    const t = Math.max(0, 1 - state.altitude / 110);
     this.shadowImg.setX(this.container.x);
     this.shadowImg.setAlpha(t * 0.5);
     const base = ((this.spec.length * this.spec.scale) / 96) * 1.15;

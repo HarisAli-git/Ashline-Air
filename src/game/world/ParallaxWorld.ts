@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import type { WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
+import { blendBiome, type BiomeId, type BiomeShape } from './Biomes';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -10,10 +11,16 @@ import { Hazards } from './Hazards';
  * past the linear band so high altitude actually reads as high.
  */
 
-export const ALT_BAND = 250;       // metres of altitude mapped linearly to screen
-export const PLANE_MIN_Y = 160;    // screen y the aircraft pins to above the band
+// Metres of altitude mapped linearly to the usable screen height. Sized so
+// the number on the gauge matches what you SEE: at 90 m the aircraft is near
+// the top of frame, at 10 m it is just off the deck. These are low-level
+// cargo runs, not airliner cruise.
+export const ALT_BAND = 70;
+/** World altitude (m) of the low cloud layer you climb through. */
+const CLOUD_LAYER_ALT_M = 150;
+export const PLANE_MIN_Y = 250;    // screen y the aircraft pins to above the band
 /** World px per metre flown — high so speed genuinely reads on screen. */
-export const WORLD_PX_PER_M = 6;
+export const WORLD_PX_PER_M = 9;
 
 interface Palette {
   skyTop: number; skyBot: number; glow: number;
@@ -105,6 +112,8 @@ export interface WorldFrame {
   visibility: number;   // 0–1 from weather, dims the sun/moon
   planeScreenX?: number; // for tracer fire aimed at the aircraft
   planeScreenY?: number;
+  speedFrac?: number;   // 0–1 airspeed, drives near-field blur and streaks
+  progress?: number;    // 0–1 along the route, blends origin country into destination
 }
 
 /** 0 = deep night, 1 = full day. Dawn 05:00–07:00, dusk 18:00–20:00. */
@@ -137,17 +146,22 @@ export class ParallaxWorld {
   private readonly scrubGfx: Phaser.GameObjects.Graphics;
   private readonly groundGfx: Phaser.GameObjects.Graphics;
   private readonly hazardGfx: Phaser.GameObjects.Graphics;
+  /** Near field, scrolls FASTER than the ground — the main speed cue. */
+  private readonly foreGfx: Phaser.GameObjects.Graphics;
+  private readonly vignetteGfx: Phaser.GameObjects.Graphics;
 
   /** Solid obstacles + raider-held ground along the route. */
   readonly hazards = new Hazards();
   private groundFireOn = false;
 
-  private fromPal: Palette = resolve('clear');
-  private toPal: Palette = resolve('clear');
-  private weatherPal: Palette = resolve('clear'); // weather-blended, daylight-agnostic
-  private pal: Palette = resolve('clear');        // final: weather + time of day
+  private pal: Palette = resolve('clear');   // final: biome + weather + daylight
+  private shape: BiomeShape = blendBiome('ashland', 'ashland', 0).shape;
+  private prevWeather: WeatherCondition = 'clear';
+  private curWeather: WeatherCondition = 'clear';
   private blendT = 1;
   private dl = 1; // current daylight factor
+  private biomeFrom: BiomeId = 'ashland';
+  private biomeTo: BiomeId = 'ashland';
 
   private t = 0;
   private readonly cloudOffsets = [0, 200, 450, 700, 900];
@@ -171,6 +185,11 @@ export class ParallaxWorld {
     // Hazards render in front of the terrain but behind the aircraft, which
     // is created after this class — so the plane passes in front of them.
     this.hazardGfx = scene.add.graphics();
+    // Near-field strip and vignette sit ABOVE the aircraft; they occupy the
+    // bottom edge only, so they frame the shot without hiding the plane.
+    this.foreGfx = scene.add.graphics().setDepth(6);
+    this.vignetteGfx = scene.add.graphics().setDepth(7);
+    this.drawVignette();
   }
 
   /** Metres of altitude per screen pixel — shared by hazards so what you
@@ -192,9 +211,15 @@ export class ParallaxWorld {
 
   /** Blend the palette toward a weather condition over ~4 s. */
   setWeather(condition: WeatherCondition): void {
-    this.fromPal = { ...this.weatherPal };
-    this.toPal = resolve(condition);
+    this.prevWeather = this.curWeather;
+    this.curWeather = condition;
     this.blendT = 0;
+  }
+
+  /** The country at each end of this route. */
+  setBiomes(from: BiomeId, to: BiomeId): void {
+    this.biomeFrom = from;
+    this.biomeTo = to;
   }
 
   /** Leave a persistent tire mark on the ground where the wheels touched. */
@@ -214,25 +239,31 @@ export class ParallaxWorld {
   update(dt: number, f: WorldFrame): void {
     this.t += dt;
 
-    // Weather palette blend, then day/night grading on top
-    if (this.blendT < 1) {
-      this.blendT = Math.min(1, this.blendT + dt / 4);
-      const p = {} as Palette;
-      for (const k of Object.keys(this.toPal) as Array<keyof Palette>) {
-        p[k] = lerpColor(this.fromPal[k], this.toPal[k], this.blendT);
-      }
-      this.weatherPal = p;
-    }
+    // Palette pipeline: regional biome → weather tint → time of day.
+    // The biome is the base, so crossing from basin into red rock changes the
+    // land itself while weather and daylight still read on top of it.
+    this.blendT = Math.min(1, this.blendT + dt / 4);
+    const biome = blendBiome(this.biomeFrom, this.biomeTo, f.progress ?? 0);
+    this.shape = biome.shape;
     this.dl = daylight(f.minutesOfDay);
+
+    const wPrev = WEATHER_PALETTES[this.prevWeather];
+    const wCur = WEATHER_PALETTES[this.curWeather];
     const graded = {} as Palette;
-    for (const k of Object.keys(this.weatherPal) as Array<keyof Palette>) {
-      graded[k] = applyDaylight(this.weatherPal[k], this.dl);
+    for (const k of Object.keys(biome.palette) as Array<keyof Palette>) {
+      const base = biome.palette[k];
+      const a = wPrev[k] ?? base;
+      const b = wCur[k] ?? base;
+      graded[k] = applyDaylight(lerpColor(a, b, this.blendT), this.dl);
     }
     this.pal = graded;
 
     // Above the linear band the world sinks away beneath the aircraft
-    const sink = Phaser.Math.Clamp((f.altitude - ALT_BAND) * 0.35, 0, 420);
-    const hMult = Phaser.Math.Linear(1, 0.55, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 2200, 0, 1));
+    // Above the band the aircraft holds its screen position and the WORLD
+    // drops away beneath it, at the same scale it was climbing at. Climb high
+    // enough and the ground genuinely leaves the bottom of the screen.
+    const sink = Math.max(0, (f.altitude - ALT_BAND) * this.pxPerM);
+    const hMult = Phaser.Math.Linear(1, 0.6, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 600, 0, 1));
 
     this.drawSky(f);
     this.drawFar(f.scrollX, sink * 0.30, hMult);
@@ -242,6 +273,8 @@ export class ParallaxWorld {
     this.drawHills(f.scrollX, sink * 0.8, f);
     this.drawScrub(f.scrollX, sink);
     this.drawGround(f.scrollX, sink, f);
+
+    this.drawNearField(f.scrollX, sink, f.speedFrac ?? 0);
 
     // ── Hazards: solid obstacles + raider fire, on the aircraft's own plane ─
     const gy = this.groundY + sink;
@@ -258,10 +291,81 @@ export class ParallaxWorld {
 
   destroy(): void {
     for (const g of [this.skyGfx, this.farGfx, this.mountainGfx, this.deckGfx,
-      this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundGfx, this.hazardGfx]) g.destroy();
+      this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundGfx, this.hazardGfx,
+      this.foreGfx, this.vignetteGfx]) g.destroy();
   }
 
   // ── Layers ─────────────────────────────────────────────────────────────────
+
+  /**
+   * The near field: ground detail at the very bottom of the screen scrolling
+   * ~1.9x the terrain rate. Objects whipping past close to the camera are what
+   * actually sell speed — distant parallax layers barely move by definition.
+   */
+  private drawNearField(scrollX: number, sink: number, speedFrac: number): void {
+    const g = this.foreGfx;
+    g.clear();
+    const bandTop = this.groundY + sink + 34;
+    if (bandTop > this.height) return;
+
+    const scroll = scrollX * 1.9;
+    const spacing = 52;
+    const first = Math.floor((scroll - 120) / spacing);
+    for (let i = first; i < first + Math.ceil(this.width / spacing) + 3; i++) {
+      const sx = i * spacing - scroll + propRand(i * 3.7) * 70;
+      if (sx < -70 || sx > this.width + 70) continue;
+      const depth = 0.35 + propRand(i + 12) * 0.65;      // how close to camera
+      const y = bandTop + depth * (this.height - bandTop) * 0.9;
+      const s = 0.9 + depth * 2.2;
+      const shade = lerpColor(this.pal.ground, 0x000000, 0.62 + depth * 0.3);
+      const kind = Math.floor(propRand(i + 41) * 4);
+
+      g.fillStyle(shade, 1);
+      if (kind === 0) {
+        g.fillTriangle(sx - 6 * s, y, sx - 1 * s, y - 5 * s, sx + 6 * s, y);
+      } else if (kind === 1) {
+        g.lineStyle(1.4 * s, shade, 0.95);
+        for (let b = -1; b <= 1; b++) {
+          g.lineBetween(sx + b * 2.5 * s, y, sx + b * 4.5 * s, y - (5 + propRand(i + b) * 5) * s);
+        }
+      } else if (kind === 2) {
+        g.fillRect(sx - 1.2 * s, y - 9 * s, 2.4 * s, 9 * s);
+      } else {
+        g.fillRect(sx - 4 * s, y - 1.6 * s, 8 * s, 1.8 * s);
+      }
+    }
+
+    // Motion streaks along the very bottom once genuinely quick
+    if (speedFrac > 0.35) {
+      const a = (speedFrac - 0.35) / 0.65;
+      for (let i = 0; i < 7; i++) {
+        const y = this.height - 6 - propRand(i + 71) * 46;
+        const phase = ((this.t * (900 + i * 120) + i * 337) % (this.width + 400)) - 200;
+        const len = 60 + a * 190;
+        g.lineStyle(1.6, lerpColor(this.pal.ground, 0xffffff, 0.35), 0.10 + a * 0.22);
+        g.lineBetween(this.width - phase, y, this.width - phase + len, y);
+      }
+    }
+  }
+
+  /** Soft cinematic vignette — drawn once, purely framing. */
+  private drawVignette(): void {
+    const g = this.vignetteGfx;
+    g.clear();
+    // Many thin bands rather than a few thick ones, so the falloff is smooth
+    const steps = 26;
+    for (let i = 0; i < steps; i++) {
+      const t = i / steps;
+      const a = 0.016 * (1 - t) * (1 - t);
+      g.fillStyle(0x000000, a);
+      const vBand = 54 * (1 - t);
+      const hBand = 88 * (1 - t);
+      g.fillRect(0, 0, this.width, vBand);
+      g.fillRect(0, this.height - vBand, this.width, vBand);
+      g.fillRect(0, 0, hBand, this.height);
+      g.fillRect(this.width - hBand, 0, hBand, this.height);
+    }
+  }
 
   private drawSky(f: WorldFrame): void {
     const g = this.skyGfx;
@@ -270,7 +374,7 @@ export class ParallaxWorld {
     g.clear();
 
     // Altitude darkens the sky toward near-space navy
-    const hiT = Phaser.Math.Clamp(alt / 3500, 0, 1);
+    const hiT = Phaser.Math.Clamp(alt / 1400, 0, 1);
     const top = lerpColor(this.pal.skyTop, 0x030710, hiT);
     const bot = lerpColor(this.pal.skyBot, 0x122436, hiT * 0.85);
 
@@ -346,10 +450,19 @@ export class ParallaxWorld {
     } = {},
   ): void {
     const step = 14;
+    const sh = this.shape;
     const heightAt = (sx: number): number => {
-      const r = ridge(sx + scrollX * factor, seed);
+      const wx = sx + scrollX * factor;
+      const r = ridge(wx, seed) + (sh.roughness - 1) * 0.16 * Math.sin(wx * 0.021 + seed);
       const sharp = Math.sign(r) * Math.pow(Math.abs(r), 0.85); // peakier crests
-      return Math.max(6, ampBase + sharp * ampVar);
+      let h = Math.max(6, ampBase + sharp * ampVar);
+      // Sandstone country: terrace the silhouette into flat-topped mesas
+      if (sh.plateau > 0.02) {
+        const stepH = Math.max(12, ampBase * 0.42);
+        const terraced = Math.round(h / stepH) * stepH;
+        h = h + (terraced - h) * sh.plateau;
+      }
+      return Math.max(6, h);
     };
 
     // Silhouette
@@ -374,7 +487,7 @@ export class ParallaxWorld {
 
     // Lit crest line
     if (opts.highlight !== undefined) {
-      g.lineStyle(1.4, opts.highlight, 0.45 * this.dl + 0.1);
+      g.lineStyle(1.2, opts.highlight, 0.16 * this.dl + 0.04);
       g.beginPath();
       g.moveTo(-20, baseY - heightAt(-20));
       for (let sx = -20; sx <= this.width + 20; sx += step) g.lineTo(sx, baseY - heightAt(sx));
@@ -400,8 +513,9 @@ export class ParallaxWorld {
     if (opts.trees !== undefined) {
       const spacing = 64;
       const first = Math.floor((scrollX * factor - 40) / spacing);
+      const density = Phaser.Math.Clamp(this.shape.trees, 0, 1);
       for (let i = first; i < first + Math.ceil(this.width / spacing) + 2; i++) {
-        if (propRand(i + 400) < 0.4) continue;
+        if (propRand(i + 400) > density) continue;
         const sx = i * spacing + propRand(i) * 40 - scrollX * factor;
         if (sx < -20 || sx > this.width + 20) continue;
         const ty = baseY - heightAt(sx);
@@ -553,8 +667,9 @@ export class ParallaxWorld {
     const baseY = this.groundY + sink;
 
     // Two overlapping far ranges for a deep horizon
-    this.drawRidgeLayer(g, scrollX, 0.022, baseY, 42 * hMult, 55 * hMult, 13.4, this.pal.far, { alpha: 0.6 });
-    this.drawRidgeLayer(g, scrollX, 0.038, baseY, 55 * hMult, 70 * hMult, 1.7, this.pal.far, { alpha: 0.85 });
+    const a = this.shape.ridgeAmp;
+    this.drawRidgeLayer(g, scrollX, 0.022, baseY, 42 * hMult * a, 55 * hMult * a, 13.4, this.pal.far, { alpha: 0.6 });
+    this.drawRidgeLayer(g, scrollX, 0.038, baseY, 55 * hMult * a, 70 * hMult * a, 1.7, this.pal.far, { alpha: 0.85 });
 
     // Atmospheric distance haze over the far range
     for (let i = 0; i < 3; i++) {
@@ -568,12 +683,13 @@ export class ParallaxWorld {
     g.clear();
     const baseY = this.groundY + sink;
 
+    const amp = this.shape.ridgeAmp;
     this.drawRidgeLayer(
-      g, scrollX, 0.08, baseY, 85 * hMult, 115 * hMult, 4.2, this.pal.mountain, {
+      g, scrollX, 0.08, baseY, 85 * hMult * amp, 115 * hMult * amp, 4.2, this.pal.mountain, {
         shade: this.pal.mountainDark,
         highlight: lerpColor(this.pal.mountain, 0xffffff, 0.35),
         snow: this.pal.snow,
-        snowMin: 150 * hMult,
+        snowMin: (this.shape.caps > 0.4 ? 150 : 1e9) * hMult * amp,
       },
     );
 
@@ -588,7 +704,7 @@ export class ParallaxWorld {
   private drawCloudDeck(alt: number, scrollX: number): void {
     const g = this.deckGfx;
     g.clear();
-    const a = Phaser.Math.Clamp((alt - 450) / 500, 0, 1) * 0.5;
+    const a = Phaser.Math.Clamp((alt - 170) / 220, 0, 1) * 0.5;
     if (a <= 0.01) return;
 
     const y = this.groundY - 30;
@@ -608,13 +724,17 @@ export class ParallaxWorld {
   private drawClouds(scrollX: number, alt: number): void {
     const g = this.cloudGfx;
     g.clear();
-    if (alt < 50) return;
+    if (alt < 18) return;
 
-    const alpha = Math.min(alt / 200, 0.85) * 0.16;
+    const alpha = Math.min(alt / 75, 0.85) * 0.16;
+    // Screen height of the cloud layer, anchored to a real world altitude:
+    // below it they sit overhead, above it they fall away beneath you.
+    const groundScreenY = this.groundY + Math.max(0, (alt - ALT_BAND) * this.pxPerM);
     const body = lerpColor(0x1e2632, 0xffffff, this.dl);           // night clouds go dark
     const shade = lerpColor(0x141a24, 0x9aa8b4, this.dl);
 
-    const baseY = this.groundY * 0.35;
+    const baseY = groundScreenY - CLOUD_LAYER_ALT_M * this.pxPerM;
+    if (baseY > this.height + 120) return;
     for (let i = 0; i < this.cloudOffsets.length; i++) {
       const span = this.width + 300;
       const ox = ((this.cloudOffsets[i] - scrollX * 0.05) % span + span) % span - 150;
@@ -638,7 +758,7 @@ export class ParallaxWorld {
     const baseY = this.groundY + sink;
 
     this.drawRidgeLayer(
-      g, scrollX, 0.22, baseY, 26, 46, 8.9, this.pal.hill, {
+      g, scrollX, 0.22, baseY, 26 * this.shape.hillAmp, 46 * this.shape.hillAmp, 8.9, this.pal.hill, {
         shade: lerpColor(this.pal.hill, 0x000000, 0.35),
         highlight: this.pal.hillLight,
         trees: lerpColor(this.pal.hill, 0x000000, 0.5),
@@ -738,6 +858,18 @@ export class ParallaxWorld {
     g.lineStyle(2, this.pal.groundLine, 1);
     g.lineBetween(0, gy, this.width, gy);
 
+    // Layered strata so the near ground reads as dirt, not a flat fill
+    for (let i = 0; i < 4; i++) {
+      const y0 = gy + 16 + i * 22;
+      if (y0 > this.height) break;
+      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.12 + i * 0.13), 1);
+      g.fillRect(0, y0, this.width, 22);
+    }
+    // Wheel ruts running the length of the strip
+    g.lineStyle(2, lerpColor(this.pal.ground, 0x000000, 0.45), 0.5);
+    g.lineBetween(0, gy + 30, this.width, gy + 30);
+    g.lineBetween(0, gy + 52, this.width, gy + 52);
+
     // Texture lines + scrolling dirt speckle so the ground itself shows motion
     g.lineStyle(1, lerpColor(this.pal.ground, 0xffffff, 0.08), 0.3);
     for (let i = 1; i <= 3; i++) g.lineBetween(0, gy + i * 22, this.width, gy + i * 22);
@@ -767,8 +899,8 @@ export class ParallaxWorld {
     {
       const PXM2 = WORLD_PX_PER_M;
       const dPx = Math.max(2000 * PXM2, f.routeTotalKm * 1000 * PXM2);
-      const zoneA: [number, number] = [-150 * PXM2 - 900, 450 * PXM2 + 900];
-      const zoneB: [number, number] = [dPx - 300 * PXM2 - 900, dPx + 300 * PXM2 + 900];
+      const zoneA: [number, number] = [-50 * PXM2 - 900, 130 * PXM2 + 900];
+      const zoneB: [number, number] = [dPx - 90 * PXM2 - 900, dPx + 90 * PXM2 + 900];
       const cellW = 760;
       const first = Math.floor((scrollX - 100) / cellW);
       for (let c = first; c <= first + Math.ceil(this.width / cellW) + 1; c++) {
@@ -788,8 +920,9 @@ export class ParallaxWorld {
     // settlements beyond.
     const PXM = WORLD_PX_PER_M;
     const destPx = Math.max(2000 * PXM, f.routeTotalKm * 1000 * PXM);
-    const oriFrom = -150 * PXM, oriTo = 450 * PXM;
-    const dstFrom = destPx - 300 * PXM, dstTo = destPx + 300 * PXM;
+    // Short bush strips — a runway should read as a strip, not a motorway
+    const oriFrom = -50 * PXM, oriTo = 130 * PXM;
+    const dstFrom = destPx - 90 * PXM, dstTo = destPx + 90 * PXM;
     this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f);
     this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f);
     // Origin airfield sits just behind the spawn point (aircraft spawns at
@@ -805,8 +938,8 @@ export class ParallaxWorld {
     const first = Math.floor((scrollX - 60) / spacing);
     for (let i = first; i < first + Math.ceil(this.width / spacing) + 1; i++) {
       const wx = i * spacing + propRand(i + 13) * 80;
-      if (wx > oriFrom - 500 && wx < oriTo + 500) continue;
-      if (wx > dstFrom - 500 && wx < dstTo + 500) continue;
+      if (wx > oriFrom - 400 && wx < oriTo + 400) continue;
+      if (wx > dstFrom - 400 && wx < dstTo + 400) continue;
       const sx = wx - scrollX;
       if (sx < -40 || sx > this.width + 40) continue;
       g.lineStyle(1.5, 0x000000, 0.18);

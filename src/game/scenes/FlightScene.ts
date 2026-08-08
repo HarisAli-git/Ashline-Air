@@ -4,6 +4,7 @@ import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
 import { GROUND_FIRE_CEILING } from '../world/Hazards';
+import { biomeFor } from '../world/Biomes';
 import { WeatherFX } from '../world/WeatherFX';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
@@ -47,6 +48,8 @@ export class FlightScene extends Phaser.Scene {
   private contractId!: string;
   private routeKm = 6;          // gameplay-scale route length to the destination
   private destinationName = 'destination';
+  private originBiome = biomeFor(undefined);
+  private destBiome = biomeFor(undefined);
   private cargo!: CargoHold;
   private lastCargoEmit = 0;
   private landed      = false;
@@ -155,11 +158,13 @@ export class FlightScene extends Phaser.Scene {
         const loreKm = pixelsToKm(
           distance(origin.position.x, origin.position.y, dest.position.x, dest.position.y), 0.5,
         );
-        this.routeKm = clamp(2.5 + loreKm / 60, 2.5, 10);
+        this.routeKm = clamp(1.8 + loreKm / 110, 1.8, 5);
         destinationName = dest.name;
       }
     }
     this.destinationName = destinationName;
+    this.originBiome = biomeFor(contract?.originId);
+    this.destBiome = biomeFor(contract?.destinationId);
     EventBus.emit('flight:route-info', { routeKm: this.routeKm, destinationName });
 
     // ── Cargo hold: what's riding in the back ─────────────────────────────
@@ -172,6 +177,8 @@ export class FlightScene extends Phaser.Scene {
     // Obstacles and raider ground are deterministic per contract, so a route
     // you have flown before hands you the same threats.
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+    // The land itself changes between the two settlements
+    this.world.setBiomes(this.originBiome, this.destBiome);
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
     this.fx       = new WeatherFX(this, width, height);
 
@@ -250,6 +257,7 @@ export class FlightScene extends Phaser.Scene {
       routeTotalKm: this.routeKm, condition: this.weather.current.condition,
       minutesOfDay: this.baseTimestamp % 1440,
       visibility: this.weather.current.visibility,
+      progress: 0,
     });
     EventBus.emit('flight:state-update', this.state);
   }
@@ -334,12 +342,12 @@ export class FlightScene extends Phaser.Scene {
         this.timeScale = 1;
         this.warpText.setVisible(false);
         EventBus.emit('ui:show-notification', { message: 'Time warp off.', type: 'info' });
-      } else if (this.state.altitude > 60 && !this.rollout) {
+      } else if (this.state.altitude > 30 && !this.rollout) {
         this.timeScale = 4;
         this.warpText.setText('»» TIME ×4').setVisible(true);
         EventBus.emit('ui:show-notification', { message: '»» Time warp ×4 — press T again for ×8. Auto-disengages when something needs you.', type: 'info' });
       } else {
-        EventBus.emit('ui:show-notification', { message: 'Time warp needs stable flight above 60 m.', type: 'warning' });
+        EventBus.emit('ui:show-notification', { message: 'Time warp needs stable flight above 30 m.', type: 'warning' });
       }
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.ESC)) {
@@ -362,9 +370,11 @@ export class FlightScene extends Phaser.Scene {
     // ── Turbulence: gusts nudge the aircraft, dt-scaled so a storm is rough
     //    but flyable (previously this was per-frame and slammed you down) ────
     const turbulence = this.weather.current.turbulenceIntensity;
-    if (turbulence > 0 && this.state.altitude > 25) {
+    if (turbulence > 0 && this.state.altitude > 12) {
       this.state.verticalSpeed += (Math.random() - 0.5) * turbulence * 7 * sdt;
-      this.state.pitch = clamp(this.state.pitch + (Math.random() - 0.5) * turbulence * 9 * sdt, -30, 30);
+      // Gusts shove the airframe and its own stability rides it out — far more
+      // alive than teleporting the pitch angle.
+      this.state.pitchRate += (Math.random() - 0.5) * turbulence * 46 * sdt;
       this.gustTimer -= sdt;
       if (turbulence > 0.3 && this.gustTimer <= 0) {
         this.gustTimer = 0.8 + Math.random() * 1.4;
@@ -378,7 +388,7 @@ export class FlightScene extends Phaser.Scene {
       if (this.state.engineTemp >= 0.85)      this.disengageWarp('engine overheating');
       else if (this.state.fuel < 15)          this.disengageWarp('fuel critical');
       else if (remaining <= 1.8)              this.disengageWarp('destination ahead');
-      else if (this.state.altitude < 60)      this.disengageWarp('low altitude');
+      else if (this.state.altitude < 30)      this.disengageWarp('low altitude');
       else if (this.state.integrity < 30)     this.disengageWarp('airframe critical');
     }
 
@@ -440,9 +450,9 @@ export class FlightScene extends Phaser.Scene {
       if (this.state.altitude > 0.5) {
         this.rollout = false;
         this.rolloutResult = null;
+        this.controller.braking = false;
       } else {
-        this.state.speed = Math.max(0, this.state.speed - 6 * sdt);
-        this.state.groundSpeed = this.state.speed;
+        this.controller.braking = true;
         if (this.state.speed < 3) {
           this.finishFlight(this.rolloutResult!);
           return;
@@ -472,7 +482,7 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // Flight events — only once airborne, at most one check every 3 seconds
-    if (this.hasBeenAirborne && this.state.elapsedSeconds - this.lastEventCheckAt >= 3) {
+    if (this.hasBeenAirborne && this.state.elapsedSeconds - this.lastEventCheckAt >= 9) {
       this.lastEventCheckAt = this.state.elapsedSeconds;
       FlightEventService.checkEvents(this.state);
     }
@@ -493,6 +503,8 @@ export class FlightScene extends Phaser.Scene {
       visibility: this.weather.current.visibility,
       planeScreenX: AIRCRAFT_X,
       planeScreenY: this.world.altitudeToScreenY(this.state.altitude),
+      speedFrac: clamp(this.state.groundSpeed / 55, 0, 1),
+      progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
     });
     this.fx.update(sdt);
 
@@ -536,8 +548,8 @@ export class FlightScene extends Phaser.Scene {
   private isOnRunway(worldX: number): boolean {
     const PXM = WORLD_PX_PER_M;
     const destPx = Math.max(2000 * PXM, this.routeKm * 1000 * PXM);
-    const onOrigin = worldX > -150 * PXM && worldX < 450 * PXM;
-    const onDest   = worldX > destPx - 300 * PXM && worldX < destPx + 300 * PXM;
+    const onOrigin = worldX > -50 * PXM && worldX < 130 * PXM;
+    const onDest   = worldX > destPx - 90 * PXM && worldX < destPx + 90 * PXM;
     return onOrigin || onDest;
   }
 
@@ -589,7 +601,7 @@ export class FlightScene extends Phaser.Scene {
     // Klaxon for a tall obstacle we are not currently above. The range is set
     // so the call always lands with enough room to out-climb the obstacle.
     const ahead = hz.ahead(worldX, 2600);
-    if (ahead && alt < ahead.hazard.heightM + 25 &&
+    if (ahead && alt < ahead.hazard.heightM + 12 &&
         this.state.elapsedSeconds - this.hazardAlertAt > 2.5) {
       this.hazardAlertAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
@@ -608,7 +620,7 @@ export class FlightScene extends Phaser.Scene {
       if (inHostile) {
         SoundEngine.warn();
         EventBus.emit('ui:show-notification', {
-          message: '⚠ TAKING FIRE FROM THE GROUND — CLIMB ABOVE 130 m',
+          message: '⚠ TAKING FIRE FROM THE GROUND — CLIMB ABOVE 50 m',
           type: 'danger',
         });
         this.disengageWarp('under fire');
@@ -665,10 +677,12 @@ export class FlightScene extends Phaser.Scene {
       }
     }
 
-    // Stall horn tracks the wing, not the buffet timer
-    const vStall = SaveService.getActiveAircraft().def.stats.stallSpeed / 3.6;
-    const stallEff = vStall * (this.state.flapsDeployed ? 0.85 : 1);
-    this.stallWarning = alt > 3 && this.state.speed < stallEff * 1.08;
+    // Stall horn tracks the WING — how close the angle of attack is to the
+    // critical angle — not raw airspeed. The old speed test screamed STALL at
+    // an aeroplane that was flying perfectly well, and stayed silent through
+    // a real accelerated stall.
+    this.stallWarning = alt > 3 &&
+      (this.controller.stallIntensity > 0.02 || this.controller.stallMargin < 0.16);
 
     // Above ~95% of Vne the airframe is being torn up — the player was losing
     // integrity here with nothing on the panel to explain it.
@@ -685,14 +699,14 @@ export class FlightScene extends Phaser.Scene {
       underFire: this.underFire,
       stall: this.stallWarning,
       overspeed,
-      obstacleAheadM: ahead && alt < ahead.hazard.heightM + 40 ? ahead.hazard.heightM : null,
+      obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
     });
   }
 
   // ── Approach indicator ─────────────────────────────────────────────────────
 
   private updateApproachIndicator(): void {
-    if (!this.hasBeenAirborne || this.state.altitude > 250) {
+    if (!this.hasBeenAirborne || this.state.altitude > 90) {
       this.approachText.setAlpha(0);
       return;
     }
