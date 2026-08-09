@@ -67,6 +67,7 @@ export class FlightScene extends Phaser.Scene {
 
   // ── Animation state ───────────────────────────────────────────────────────
   private scrollX       = 0;     // cumulative world scroll (world px)
+  private smoothDt      = 1 / 60; // low-passed frame delta, kills scroll judder
   private shakeDuration = 0;
   private gustTimer     = 0;
   private notifiedApproach = false;
@@ -78,6 +79,9 @@ export class FlightScene extends Phaser.Scene {
   private underFire      = false;
   private hazardAlertAt  = -99;   // last obstacle klaxon
   private overspeedWarnAt = -99;
+  private trafficAlertAt = -99;   // last traffic advisory
+  private trafficAdvisory: number | null = null; // their height minus ours, m
+  private trafficAvoid: 1 | -1 | null = null;    // +1 climb, -1 descend
   private engineFailed   = false;
   private failureCheckAt = 0;
   private restartHoldFor = 0;     // seconds of cranking left
@@ -97,6 +101,7 @@ export class FlightScene extends Phaser.Scene {
     this.landed              = false;
     this.hasBeenAirborne     = false;
     this.scrollX             = 0;
+    this.smoothDt            = 1 / 60;
     this.shakeDuration       = 0;
     this.gearToggleCooldown  = 0;
     this.flapsToggleCooldown = 0;
@@ -115,6 +120,9 @@ export class FlightScene extends Phaser.Scene {
     this.underFire           = false;
     this.hazardAlertAt       = -99;
     this.overspeedWarnAt     = -99;
+    this.trafficAlertAt      = -99;
+    this.trafficAdvisory     = null;
+    this.trafficAvoid        = null;
     this.engineFailed        = false;
     this.failureCheckAt      = 0;
     this.restartHoldFor      = 0;
@@ -213,11 +221,13 @@ export class FlightScene extends Phaser.Scene {
       ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
     };
 
-    // DEV: number keys force weather conditions for testing
+    // DEV: number keys force weather conditions, 0 pulls the next traffic
+    // encounter forward so conflicts can be exercised without waiting them out
     if (import.meta.env.DEV) {
       this.input.keyboard!.on('keydown', (ev: KeyboardEvent) => {
         const condition = DEV_WEATHER_KEYS[ev.key];
         if (condition) this.weather.forceCondition(condition);
+        if (ev.key === '0') this.world.traffic.provoke();
       });
     }
 
@@ -267,7 +277,16 @@ export class FlightScene extends Phaser.Scene {
   update(time: number, delta: number): void {
     if (this.landed || this.eventModalOpen) return;
 
-    const dt = delta / 1000;
+    // Browsers hand out jittery frame deltas — ±2 ms is normal even on a
+    // locked 60 Hz display, and a tab hiccup gives one 40 ms frame followed by
+    // a 4 ms one. The physics runs on a fixed-step accumulator so it doesn't
+    // care, but the world scroll is a straight dt multiply: unsmoothed, that
+    // jitter becomes ±1–2 px of scroll variance every single frame, which is
+    // exactly the judder you see in the terrain. A light low-pass keeps the
+    // long-run total honest while handing the renderer an even cadence.
+    const rawDt = Math.min(delta / 1000, 0.05);
+    this.smoothDt += (rawDt - this.smoothDt) * 0.2;
+    const dt = this.smoothDt;
     const { height } = this.cameras.main;
     const groundY = height - GROUND_Y_OFFSET;
 
@@ -491,6 +510,10 @@ export class FlightScene extends Phaser.Scene {
     const worldX = this.scrollX + AIRCRAFT_X;
     this.updateHazards(worldX, sdt);
 
+    // ── Other traffic: advisories, then the midair if you ignored them ────
+    this.updateTraffic(worldX, sdt);
+    if (this.landed) return;
+
     // ── World & weather visuals ────────────────────────────────────────────
     this.scrollX += this.state.groundSpeed * sdt * WORLD_PX_PER_M;
     this.world.update(sdt, {
@@ -503,6 +526,7 @@ export class FlightScene extends Phaser.Scene {
       visibility: this.weather.current.visibility,
       planeScreenX: AIRCRAFT_X,
       planeScreenY: this.world.altitudeToScreenY(this.state.altitude),
+      planeWorldX: worldX,
       speedFrac: clamp(this.state.groundSpeed / 55, 0, 1),
       progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
     });
@@ -616,7 +640,6 @@ export class FlightScene extends Phaser.Scene {
     const inHostile = hz.isHostile(worldX) && alt < GROUND_FIRE_CEILING && alt > 2;
     if (inHostile !== this.underFire) {
       this.underFire = inHostile;
-      this.world.setGroundFire(inHostile);
       if (inHostile) {
         SoundEngine.warn();
         EventBus.emit('ui:show-notification', {
@@ -633,7 +656,11 @@ export class FlightScene extends Phaser.Scene {
         SoundEngine.gunfire();
         // Lower and slower = easier target
         const exposure = 1 - alt / GROUND_FIRE_CEILING;
-        if (Math.random() < 0.35 + exposure * 0.4) {
+        const hit = Math.random() < 0.35 + exposure * 0.4;
+        // The rounds leave the guns you can see aiming at you — the burst is
+        // resolved here, but every tracer is drawn from a real muzzle.
+        this.world.raiderBurst(worldX, this.world.altitudeToScreenY(alt), alt, hit);
+        if (hit) {
           SoundEngine.bulletHit();
           this.state.integrity = clamp(this.state.integrity - (2 + exposure * 5), 0, 100);
           this.cameras.main.shake(120, 0.004);
@@ -700,13 +727,111 @@ export class FlightScene extends Phaser.Scene {
       stall: this.stallWarning,
       overspeed,
       obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
+      trafficDeltaM: this.trafficAdvisory,
+      trafficAvoid: this.trafficAvoid,
     });
+  }
+
+  // ── Other traffic ─────────────────────────────────────────────────────────
+
+  /**
+   * Sparse traffic sharing the airspace. Most encounters are set up to
+   * conflict, so cruise is no longer "hold altitude and wait" — you get an
+   * advisory with a direction to go, and if you sit there you meet them.
+   */
+  private updateTraffic(worldX: number, sdt: number): void {
+    const speedPx = this.state.groundSpeed * WORLD_PX_PER_M;
+    const traffic = this.world.traffic;
+    traffic.update(sdt, {
+      planeWorldX: worldX,
+      planeAlt: this.state.altitude,
+      planeSpeedPx: speedPx,
+      airborne: this.hasBeenAirborne && !this.rollout,
+      routeEndPx: this.routeKm * 1000 * WORLD_PX_PER_M,
+    });
+
+    // ── Advisory: relative height and which way to go, like the real box ──
+    const ra = traffic.advisory(worldX, this.state.altitude, speedPx);
+    this.trafficAdvisory = ra ? Math.round(ra.dAltM) : null;
+    this.trafficAvoid = ra ? ra.avoid : null;
+    if (ra && this.state.elapsedSeconds - this.trafficAlertAt > 5) {
+      this.trafficAlertAt = this.state.elapsedSeconds;
+      SoundEngine.alarm();
+      const where = ra.dAltM >= 0 ? 'ABOVE' : 'BELOW';
+      EventBus.emit('ui:show-notification', {
+        message: `✈ TRAFFIC — ${Math.abs(Math.round(ra.dAltM))} m ${where} — ${ra.avoid > 0 ? 'CLIMB' : 'DESCEND'}`,
+        type: 'warning',
+      });
+      this.disengageWarp('traffic conflict');
+    }
+
+    // ── Midair ────────────────────────────────────────────────────────────
+    const other = traffic.collision(worldX, this.state.altitude);
+    if (!other || !this.hasBeenAirborne) return;
+    traffic.doom(other);
+    this.midair();
+  }
+
+  /** Two aircraft, one piece of sky. Neither of you is landing on a runway. */
+  private midair(): void {
+    SoundEngine.impact();
+    SoundEngine.crash();
+    this.cameras.main.shake(900, 0.02);
+    this.cameras.main.flash(220, 255, 220, 160);
+    this.disengageWarp('midair collision');
+
+    // Debris off the wing where they clipped you
+    const wing = this.aircraft.wingPoint();
+    const debris = this.add.particles(wing.x, wing.y, 'px_streak', {
+      lifespan: { min: 500, max: 1400 },
+      speed: { min: 90, max: 420 },
+      angle: { min: 0, max: 360 },
+      rotate: { min: 0, max: 360 },
+      scale: { start: 0.9, end: 0.2 },
+      alpha: { start: 1, end: 0 },
+      tint: [0xd8c8a0, 0x8a6a4a, 0x3a3128, 0xff9a40],
+      gravityY: 260,
+      emitting: false,
+    }).setDepth(7);
+    debris.explode(34);
+    this.time.delayedCall(1600, () => debris.destroy());
+
+    // You do not walk away from this one intact: the airframe is wrecked and
+    // the engine goes with it. What is left is a glide to somewhere flat.
+    this.state.integrity = clamp(this.state.integrity - 62, 0, 100);
+    this.state.speed *= 0.62;
+    this.state.pitchRate -= 55;
+    this.cargo.applyDamage(45);
+    this.engineFailed = true;
+    this.engineRunning = false;
+    this.aircraft.stopEngine();
+    this.aircraft.setFuelLeak(true);
+
+    EventBus.emit('ui:show-notification', {
+      message: '✖ MIDAIR COLLISION — engine out, airframe critical — put it down NOW',
+      type: 'danger',
+    });
+
+    if (this.state.integrity <= 0) {
+      this.finishFlight({
+        verticalSpeed: Math.abs(this.state.verticalSpeed),
+        horizontalSpeed: this.state.speed,
+        gearDown: this.state.gearDown,
+        quality: 'crash',
+        integrityDamage: 100,
+        cargoDamagePercent: 100,
+      });
+    }
   }
 
   // ── Approach indicator ─────────────────────────────────────────────────────
 
   private updateApproachIndicator(): void {
-    if (!this.hasBeenAirborne || this.state.altitude > 90) {
+    // Only on an actual approach. Any descent below 90 m used to light up
+    // "GOOD APPROACH" — including a routine level-off three kilometres out,
+    // which is guidance about a runway that is nowhere near you.
+    const remainingKm = this.routeKm - this.state.distanceTravelled;
+    if (!this.hasBeenAirborne || this.state.altitude > 90 || remainingKm > 1.2) {
       this.approachText.setAlpha(0);
       return;
     }

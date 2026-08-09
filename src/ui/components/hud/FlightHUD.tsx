@@ -74,11 +74,20 @@ export function FlightHUD(): React.ReactElement | null {
       </div>
 
       {/* Annunciator panel — the things that will kill you, in priority order */}
-      {status && (status.engineFailed || status.stall || status.overspeed || status.underFire || status.obstacleAheadM !== null) && (
+      {status && (status.engineFailed || status.stall || status.overspeed || status.underFire
+        || status.obstacleAheadM !== null || status.trafficDeltaM !== null) && (
         <div style={styles.annunciators}>
           {status.engineFailed && <Caution label="ENGINE OUT — HOLD E" tone="#ff4444" />}
           {status.stall && <Caution label="STALL" tone="#ff4444" />}
           {status.overspeed && <Caution label="OVERSPEED — EASE OFF" tone="#ff4444" />}
+          {/* Traffic reads like the real box: how far off they are vertically,
+              and the single word that resolves it. */}
+          {status.trafficDeltaM !== null && (
+            <Caution
+              label={`✈ TRAFFIC ${Math.abs(Math.round(status.trafficDeltaM))} m ${status.trafficDeltaM >= 0 ? '▲' : '▼'} — ${status.trafficAvoid === 1 ? 'CLIMB' : 'DESCEND'}`}
+              tone="#ff4444"
+            />
+          )}
           {status.underFire && <Caution label="TAKING FIRE — CLIMB" tone="#ff8844" />}
           {status.obstacleAheadM !== null && (
             <Caution label={`OBSTACLE ${Math.round(status.obstacleAheadM)} m`} tone="#ffd080" />

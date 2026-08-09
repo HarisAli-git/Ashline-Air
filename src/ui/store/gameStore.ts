@@ -39,6 +39,8 @@ export interface FlightStatus {
   stall: boolean;
   overspeed: boolean;
   obstacleAheadM: number | null;
+  trafficDeltaM: number | null;
+  trafficAvoid: 1 | -1 | null;
 }
 
 export function useFlightStatus(): FlightStatus | null {
