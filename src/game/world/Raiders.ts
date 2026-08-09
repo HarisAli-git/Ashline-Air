@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { drawUndead, drawCorpse, undeadKindFor, type CrowdStyle } from './Crowds';
+import { drawFighter, drawMuzzleFlash, RAIDER_PALETTE, type FighterPose } from './Figures';
 
 /**
  * Rebel-held ground.
@@ -27,7 +28,87 @@ interface Emplacement {
   aim: number;          // barrel angle, radians (screen space, up = negative)
   flash: number;        // seconds of muzzle flash remaining
   recoil: number;       // 0–1, decays
+  cool: number;         // seconds until this weapon can fire again
 }
+
+/**
+ * What each weapon can actually do to you.
+ *
+ * The whole point of the spread is that "how high do I need to be?" has a
+ * different answer over different ground. Small arms are a nuisance you clear
+ * by not being on the deck; a heavy gun truck pushes you to a proper cruise
+ * height; an AA battery reaches most of the way to the ceiling and makes you
+ * choose between a long fuel-burning climb and taking real damage. Everything
+ * you can see below you tells you which of those you are dealing with.
+ */
+export interface WeaponProfile {
+  /** Nothing above this altitude (m) can be touched by this weapon. */
+  ceilingM: number;
+  /** Horizontal reach, world px. */
+  rangePx: number;
+  rounds: number;
+  /** Hit chance on the deck, falling to zero at the ceiling. */
+  accuracy: number;
+  /** Integrity damage per round that connects. */
+  damage: number;
+  /** Seconds between bursts. */
+  cadence: number;
+  /** Airbursting shells instead of tracer — the gun may be off-screen. */
+  flak: boolean;
+  /** Shown on the annunciator. */
+  label: string;
+}
+
+export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
+  // Rifles and a belt-fed over sandbags. Only dangerous down low.
+  nest:      { ceilingM: 75,  rangePx: 1900, rounds: 3, accuracy: 0.40, damage: 1.2, cadence: 0.55, flak: false, label: 'SMALL ARMS' },
+  // A marksman with height and time — fewer rounds, but they count.
+  tower:     { ceilingM: 110, rangePx: 2500, rounds: 1, accuracy: 0.50, damage: 2.2, cadence: 1.25, flak: false, label: 'MARKSMAN' },
+  // Pintle-mounted heavy MG. Reaches a normal cruise height.
+  technical: { ceilingM: 165, rangePx: 2800, rounds: 4, accuracy: 0.34, damage: 1.8, cadence: 0.75, flak: false, label: 'HEAVY MG' },
+  // Wheeled twin autocannon with fused shells. This is the one you climb for.
+  aa:        { ceilingM: 340, rangePx: 4400, rounds: 3, accuracy: 0.30, damage: 3.5, cadence: 1.15, flak: true,  label: 'AA BATTERY' },
+  camp:      null,
+};
+
+/**
+ * How many weapons may engage at once.
+ *
+ * Without this the threat scales with how many emplacements happen to be
+ * inside the widest range in the zone, and an AA battery's 4400 px reach means
+ * that is most of them — measured at 65 integrity lost in a single low pass,
+ * which is not a cost, it is a death sentence. Capping it to the nearest few
+ * also happens to be the honest reading: not every gun in four kilometres of
+ * broken country has a line on you.
+ */
+const MAX_SIMULTANEOUS = 3;
+
+/** Weapons further out than this do not set the "climb above" bar. */
+const COMMITTED_RANGE_PX = 2600;
+
+/** Highest ceiling of anything that shoots — the "you are safe" altitude. */
+export const MAX_ENGAGEMENT_M = Math.max(
+  ...Object.values(WEAPONS).filter((w): w is WeaponProfile => w !== null).map(w => w.ceilingM),
+);
+
+/** What is currently able to reach the aircraft. */
+export interface RaiderFireReport {
+  /** True while at least one weapon has the aircraft inside its envelope. */
+  engaged: boolean;
+  /** The most dangerous thing shooting at you right now. */
+  label: string | null;
+  /** Climb above this and everything within horizontal range loses you. */
+  clearAltitudeM: number;
+  /** Bursts that went off this frame — for the sound engine. */
+  shots: number;
+  /** Integrity damage taken this frame. */
+  damage: number;
+  /** True if any round connected, so the camera can be kicked. */
+  hit: boolean;
+}
+
+/** An AA shell that went off near the aircraft. */
+interface Flak { wx: number; y: number; age: number; big: boolean; }
 
 interface Tracer {
   wx: number;           // world px
@@ -88,7 +169,7 @@ export class Raiders {
         else kind = 'tower';
         this.list.push({
           x: a + span * ((i + 0.5) / n) + (rnd(id + 3) - 0.5) * (span / n) * 0.5,
-          kind, seed: id, aim: -1.2, flash: 0, recoil: 0,
+          kind, seed: id, aim: -1.2, flash: 0, recoil: 0, cool: rnd(id + 7) * 0.8,
         });
       }
     }
@@ -104,7 +185,6 @@ export class Raiders {
    */
   update(
     dt: number,
-    scrollX: number,
     baseY: number,
     target: { worldX: number; screenY: number } | null,
   ): void {
@@ -149,70 +229,210 @@ export class Raiders {
   }
 
   /**
-   * A burst goes off. The nearest weapons that can bear open up together;
-   * `hit` decides whether one of the rounds is solved onto the aircraft.
+   * Everything that can currently reach the aircraft opens up on it, each
+   * weapon on its own cadence and inside its own envelope.
+   *
+   * This is where "how high do I have to be?" gets answered: a weapon only
+   * engages if the aircraft is inside BOTH its horizontal range and its
+   * altitude ceiling, and its accuracy falls off across that ceiling — so the
+   * last few metres of a climb genuinely buy you something.
    */
-  burst(baseY: number, target: { worldX: number; screenY: number }, hit: boolean): void {
-    // Whoever is closest and actually has a weapon does the shooting
-    const firing = this.list
-      .filter(e => e.kind !== 'camp' && Math.abs(e.x - target.worldX) < 2200)
-      .sort((a, b) => Math.abs(a.x - target.worldX) - Math.abs(b.x - target.worldX))
-      .slice(0, 3);
-    if (firing.length === 0) return;
+  engage(
+    dt: number,
+    baseY: number,
+    target: { worldX: number; screenY: number; altM: number },
+  ): RaiderFireReport {
+    let engaged = false;
+    let worst: WeaponProfile | null = null;
+    let clearAlt = 0;
+    let shots = 0;
+    let damage = 0;
+    let hit = false;
 
-    let solved = false;
-    for (const e of firing) {
-      const p = pivotOf(e.kind);
-      const mx = e.x + p.x + Math.cos(e.aim) * p.len;
-      const my = baseY + p.y + Math.sin(e.aim) * p.len;
-      e.flash = 0.07;
-      e.recoil = 1;
+    // Only the nearest few weapons that can actually bear get to shoot; the
+    // rest of the zone keeps tracking but holds fire.
+    const inPlay: Array<{ e: Emplacement; w: WeaponProfile; d: number }> = [];
+    for (const e of this.list) {
+      const w = WEAPONS[e.kind];
+      if (!w) continue;
+      const d = Math.abs(e.x - target.worldX);
+      if (d > w.rangePx) continue;
 
-      const rounds = e.kind === 'aa' ? 3 : e.kind === 'technical' ? 2 : 2;
-      for (let k = 0; k < rounds; k++) {
-        // One round per burst is allowed to be the one that connects
-        const solve = hit && !solved && k === 0;
-        if (solve) solved = true;
-        const dxw = target.worldX - mx;
-        const dys = target.screenY - my;
-        const len = Math.max(1, Math.hypot(dxw, dys));
-        // Misses are thrown wide; the near ones are what make it feel close
-        const spread = solve ? 0 : (Math.random() - 0.5) * 0.16;
-        const ca = Math.cos(spread), sa = Math.sin(spread);
-        const ux = (dxw * ca - dys * sa) / len;
-        const uy = (dxw * sa + dys * ca) / len;
-        const tof = len / TRACER_SPEED;
-        this.tracers.push({
-          wx: mx, y: my,
-          vx: ux * TRACER_SPEED, vy: uy * TRACER_SPEED,
-          life: solve ? tof : tof * (1.5 + Math.random() * 0.7),
-          hot: solve ? tof : tof * 2,
-          hit: solve,
+      // Weapons close enough to matter set the bar for how high is high
+      // enough, whether or not they can touch you at your present height.
+      if (d <= COMMITTED_RANGE_PX) clearAlt = Math.max(clearAlt, w.ceilingM);
+      if (target.altM > w.ceilingM || target.altM < 2) continue;
+
+      // Anything actually shooting at us counts too, however far out it is —
+      // otherwise the panel can read "CLIMB 0 m" while a battery at 3 km is
+      // putting shells through the wing.
+      clearAlt = Math.max(clearAlt, w.ceilingM);
+      engaged = true;
+      if (!worst || w.ceilingM > worst.ceilingM) worst = w;
+      inPlay.push({ e, w, d });
+    }
+    inPlay.sort((a, b) => a.d - b.d);
+
+    for (const { e, w } of inPlay.slice(0, MAX_SIMULTANEOUS)) {
+      e.cool -= dt;
+      if (e.cool > 0) continue;
+      e.cool = w.cadence * (0.75 + Math.random() * 0.5);
+
+      // Exposure: on the deck they can hardly miss, at the ceiling they can
+      // hardly connect. Height is the whole defence, and the falloff is steep
+      // on purpose — a partial climb that does not clear the ceiling still has
+      // to be worth making, or the only choice on offer is "all or nothing".
+      const exposure = 1 - target.altM / w.ceilingM;
+      const connects = Math.random() < w.accuracy * (0.12 + 0.88 * exposure);
+      shots++;
+      if (connects) { damage += w.damage; hit = true; }
+
+      this.fire(e, w, baseY, target, connects);
+    }
+
+    return { engaged, label: worst?.label ?? null, clearAltitudeM: clearAlt, shots, damage, hit };
+  }
+
+  /** One weapon lets go a burst at the aircraft. */
+  private fire(
+    e: Emplacement,
+    w: WeaponProfile,
+    baseY: number,
+    target: { worldX: number; screenY: number },
+    connects: boolean,
+  ): void {
+    const p = pivotOf(e.kind);
+    const mx = e.x + p.x + Math.cos(e.aim) * p.len;
+    const my = baseY + p.y + Math.sin(e.aim) * p.len;
+    e.flash = 0.07;
+    e.recoil = 1;
+
+    for (let k = 0; k < w.rounds; k++) {
+      const solve = connects && k === 0;
+      const dxw = target.worldX - mx;
+      const dys = target.screenY - my;
+      const len = Math.max(1, Math.hypot(dxw, dys));
+      // Misses are thrown wide; the near ones are what make it feel close
+      const spread = solve ? 0 : (Math.random() - 0.5) * 0.16;
+      const ca = Math.cos(spread), sa = Math.sin(spread);
+      const ux = (dxw * ca - dys * sa) / len;
+      const uy = (dxw * sa + dys * ca) / len;
+      const tof = len / TRACER_SPEED;
+
+      if (w.flak) {
+        // Fused shells burst at the target's height rather than flying past.
+        // At an AA ceiling the gun itself is usually below the bottom of the
+        // frame, so the burst IS the thing you see — and it has to read on its
+        // own, at any altitude.
+        const scatter = solve ? 0 : (Math.random() - 0.5) * 2;
+        this.pendingFlak.push({
+          wx: target.worldX + scatter * 90,
+          y: target.screenY + (Math.random() - 0.5) * 70,
+          in: tof, big: k === 0,
         });
-        if (solve) {
-          // Schedule the impact sparks for where the round arrives
-          this.pendingImpact = { x: target.worldX, y: target.screenY, in: tof };
-        }
       }
-      if (this.tracers.length > MAX_TRACERS) {
-        this.tracers.splice(0, this.tracers.length - MAX_TRACERS);
-      }
+
+      this.tracers.push({
+        wx: mx, y: my,
+        vx: ux * TRACER_SPEED, vy: uy * TRACER_SPEED,
+        life: solve ? tof : tof * (1.5 + Math.random() * 0.7),
+        hot: solve ? tof : tof * 2,
+        hit: solve,
+      });
+      if (solve) this.pendingImpact = { x: target.worldX, y: target.screenY, in: tof };
+    }
+    if (this.tracers.length > MAX_TRACERS) {
+      this.tracers.splice(0, this.tracers.length - MAX_TRACERS);
     }
   }
 
-  private pendingImpact: { x: number; y: number; in: number } | null = null;
+  /**
+   * The worst weapon in the next hostile stretch, so the aircraft can be told
+   * to start climbing while there is still room to do it.
+   */
+  threatAhead(worldX: number, rangePx: number): { label: string; ceilingM: number; distancePx: number } | null {
+    let best: { label: string; ceilingM: number; distancePx: number } | null = null;
+    for (const e of this.list) {
+      const w = WEAPONS[e.kind];
+      if (!w) continue;
+      const d = e.x - worldX;
+      if (d <= 0 || d > rangePx) continue;
+      if (!best || w.ceilingM > best.ceilingM) {
+        best = { label: w.label, ceilingM: w.ceilingM, distancePx: d };
+      }
+    }
+    return best;
+  }
 
-  /** Called from update via draw time — spawns sparks when a round lands. */
+  private pendingImpact: { x: number; y: number; in: number } | null = null;
+  private pendingFlak: Array<{ wx: number; y: number; in: number; big: boolean }> = [];
+  private flak: Flak[] = [];
+
+  /** Called at draw time — lands rounds and detonates shells whose fuse ran out. */
   private tickImpact(dt: number): void {
-    if (!this.pendingImpact) return;
-    this.pendingImpact.in -= dt;
-    if (this.pendingImpact.in > 0) return;
-    const { x, y } = this.pendingImpact;
-    this.pendingImpact = null;
-    for (let i = 0; i < 9; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const sp = 40 + Math.random() * 150;
-      this.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 40, life: 0.18 + Math.random() * 0.22 });
+    if (this.pendingImpact) {
+      this.pendingImpact.in -= dt;
+      if (this.pendingImpact.in <= 0) {
+        const { x, y } = this.pendingImpact;
+        this.pendingImpact = null;
+        for (let i = 0; i < 9; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 40 + Math.random() * 150;
+          this.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 40, life: 0.18 + Math.random() * 0.22 });
+        }
+      }
+    }
+
+    for (let i = this.pendingFlak.length - 1; i >= 0; i--) {
+      const f = this.pendingFlak[i];
+      f.in -= dt;
+      if (f.in > 0) continue;
+      this.pendingFlak.splice(i, 1);
+      this.flak.push({ wx: f.wx, y: f.y, age: 0, big: f.big });
+      if (this.flak.length > 22) this.flak.shift();
+    }
+    for (let i = this.flak.length - 1; i >= 0; i--) {
+      this.flak[i].age += dt;
+      if (this.flak[i].age > 2.4) this.flak.splice(i, 1);
+    }
+  }
+
+  /**
+   * Flak bursts. Drawn with the tracers because at an AA ceiling the gun that
+   * fired them is well below the bottom of the frame — the black puffs
+   * opening around you are the only thing telling you what is happening.
+   */
+  private drawFlak(g: Phaser.GameObjects.Graphics, scrollX: number, width: number): void {
+    for (const f of this.flak) {
+      const sx = f.wx - scrollX;
+      if (sx < -120 || sx > width + 120) continue;
+      const a = f.age;
+      const s = f.big ? 1 : 0.68;
+
+      // The detonation itself: a hard, brief flash
+      if (a < 0.14) {
+        const k = 1 - a / 0.14;
+        g.fillStyle(0xfff0c0, 0.95 * k);
+        g.fillCircle(sx, f.y, (7 + a * 60) * s);
+        g.fillStyle(0xff9a30, 0.55 * k);
+        g.fillCircle(sx, f.y, (14 + a * 110) * s);
+        // Splinters thrown out of the burst
+        g.lineStyle(1.4, 0xffd070, 0.8 * k);
+        for (let i = 0; i < 6; i++) {
+          const ang = (i / 6) * Math.PI * 2 + f.wx;
+          const r0 = 6 * s, r1 = (16 + a * 150) * s;
+          g.lineBetween(sx + Math.cos(ang) * r0, f.y + Math.sin(ang) * r0,
+                        sx + Math.cos(ang) * r1, f.y + Math.sin(ang) * r1);
+        }
+      }
+
+      // The puff it leaves, drifting back and thinning out
+      const fade = Phaser.Math.Clamp(1 - a / 2.4, 0, 1);
+      const grow = (10 + a * 26) * s;
+      g.fillStyle(0x191614, 0.42 * fade);
+      g.fillEllipse(sx - a * 26, f.y, grow * 2.1, grow * 1.7);
+      g.fillStyle(0x2e2a26, 0.3 * fade);
+      g.fillEllipse(sx - a * 26 + grow * 0.3, f.y - grow * 0.25, grow * 1.2, grow * 0.9);
     }
   }
 
@@ -244,8 +464,9 @@ export class Raiders {
     }
   }
 
-  /** Rounds in the air and the sparks where they land. Drawn above the world. */
+  /** Rounds in the air, flak bursts and impact sparks. Drawn above the world. */
   drawTracers(g: Phaser.GameObjects.Graphics, scrollX: number, width: number): void {
+    this.drawFlak(g, scrollX, width);
     for (const tr of this.tracers) {
       const sx = tr.wx - scrollX;
       if (sx < -200 || sx > width + 200) continue;
@@ -269,126 +490,24 @@ export class Raiders {
   // ── Individual positions ──────────────────────────────────────────────────
 
   /**
-   * An armed militiaman. Deliberately built to read as *alive* at a glance —
-   * upright spine, squared shoulders, helmet, weapon held in two hands — so
-   * there is never a question about which figures on the ground are which.
+   * An armed militiaman. The renderer is shared with the settlement garrison
+   * (Figures.ts) — only the palette differs, which is exactly right: from the
+   * air both read as armed people, and whose ground it is decides everything.
    */
   private rebel(
     g: Phaser.GameObjects.Graphics,
     x: number, groundY: number, t: number, seed: number,
     scale: number, face: 1 | -1,
-    pose: 'aimUp' | 'aimSide' | 'stand' | 'crouch' | 'work',
+    pose: FighterPose,
     aim: number,
     dl: number,
   ): void {
-    const s = scale;
-    const cloth = 0x241c12;
-    const skin = 0x171009;
-    const r = rnd(seed);
-    const idle = Math.sin(t * 1.6 + seed) * 0.6 * s;
-
-    const crouch = pose === 'crouch' || pose === 'work';
-    const legLen = (crouch ? 5.4 : 9.2) * s;
-    const torso = 8.4 * s;
-    const hipY = groundY - legLen;
-    const lean = pose === 'aimUp' ? -0.16 : pose === 'work' ? 0.34 : 0.06;
-    const shX = x + face * lean * torso;
-    const shY = hipY - torso + idle * 0.3;
-
-    // Legs — braced apart, not walking
-    g.lineStyle(1.9 * s, cloth, 1);
-    g.beginPath();
-    g.moveTo(x, hipY);
-    g.lineTo(x - face * 1.6 * s, hipY + legLen * 0.55);
-    g.lineTo(x - face * 3.4 * s, groundY);
-    g.strokePath();
-    g.beginPath();
-    g.moveTo(x, hipY);
-    g.lineTo(x + face * 2.0 * s, hipY + legLen * 0.55);
-    g.lineTo(x + face * 3.2 * s, groundY);
-    g.strokePath();
-
-    // Torso: webbing and a plate carrier make a blockier shape than the dead
-    g.fillStyle(cloth, 1);
-    g.beginPath();
-    g.moveTo(x - 2.4 * s, hipY + 0.6 * s);
-    g.lineTo(x + 2.4 * s, hipY + 0.6 * s);
-    g.lineTo(shX + 3.0 * s, shY);
-    g.lineTo(shX - 3.0 * s, shY);
-    g.closePath();
-    g.fillPath();
-    // Chest rig
-    g.fillStyle(0x3a2a16, 1);
-    g.fillRect(shX - 2.4 * s, shY + 2.2 * s, 4.8 * s, 2.6 * s);
-
-    // Head with a helmet or a wrapped face
-    const hdY = shY - 3.2 * s;
-    g.fillStyle(skin, 1);
-    g.fillCircle(shX + face * 0.6 * s, hdY, 2.3 * s);
-    g.fillStyle(r > 0.5 ? 0x2e2416 : 0x3a2010, 1);
-    if (r > 0.5) {
-      // Helmet
-      g.fillEllipse(shX + face * 0.6 * s, hdY - 1.1 * s, 5.6 * s, 3.4 * s);
-      g.fillRect(shX + face * 0.6 * s - 2.8 * s, hdY - 0.8 * s, 5.6 * s, 1.1 * s);
-    } else {
-      // Hood + face wrap
-      g.fillEllipse(shX + face * 0.2 * s, hdY - 0.6 * s, 6.2 * s, 5.0 * s);
-      g.fillStyle(0x6a1c14, 1);
-      g.fillRect(shX + face * 0.2 * s - 2.2 * s, hdY + 0.5 * s, 4.4 * s, 1.2 * s);
-    }
-
-    // Arms + weapon
-    const a = pose === 'aimUp' ? aim : pose === 'aimSide' ? (face > 0 ? 0 : Math.PI) : 0.5;
-    if (pose === 'work') {
-      // Hauling an ammo can
-      g.lineStyle(1.6 * s, cloth, 1);
-      g.beginPath();
-      g.moveTo(shX, shY + 1 * s);
-      g.lineTo(shX + face * 2.6 * s, shY + 4 * s);
-      g.lineTo(shX + face * 3.4 * s, shY + 7 * s);
-      g.strokePath();
-      g.fillStyle(0x2f3a24, 1);
-      g.fillRect(shX + face * 2.2 * s, shY + 7 * s, 4.6 * s, 3.4 * s);
-    } else {
-      const gunLen = 9 * s;
-      const mx = shX + face * 2.2 * s, my = shY + 1.6 * s;
-      const ex = mx + Math.cos(a) * gunLen;
-      const ey = my + Math.sin(a) * gunLen;
-      // Both hands on the weapon
-      g.lineStyle(1.6 * s, cloth, 1);
-      g.beginPath();
-      g.moveTo(shX, shY + 1.4 * s);
-      g.lineTo(shX + face * 1.4 * s, shY + 3.4 * s);
-      g.lineTo(mx + Math.cos(a) * 3 * s, my + Math.sin(a) * 3 * s);
-      g.strokePath();
-      // Rifle
-      g.lineStyle(1.5 * s, 0x1a1610, 1);
-      g.lineBetween(mx - Math.cos(a) * 3 * s, my - Math.sin(a) * 3 * s, ex, ey);
-      g.fillStyle(0x1a1610, 1);
-      g.fillRect(mx - 1.2 * s, my - 0.6 * s, 2.4 * s, 2.6 * s); // magazine
-    }
-
-    // Night: a headlamp or a cigarette ember — signs of life
-    if (dl < 0.5 && r > 0.7) {
-      g.fillStyle(0xffb060, 0.7 * (1 - dl));
-      g.fillCircle(shX + face * 2.4 * s, hdY, 0.9 * s);
-    }
+    drawFighter(g, x, groundY, t, seed, scale, face, pose, aim, dl, RAIDER_PALETTE);
   }
 
-  /** Muzzle flash: a hot star along the bore plus the light it throws. */
+  /** Muzzle flash — shared with the garrison so every gun flashes alike. */
   private flash(g: Phaser.GameObjects.Graphics, x: number, y: number, a: number, k: number, size: number): void {
-    if (k <= 0) return;
-    const ca = Math.cos(a), sa = Math.sin(a);
-    g.fillStyle(0xffcf70, 0.22 * k);
-    g.fillCircle(x, y, size * 2.6);
-    g.fillStyle(0xffe9a8, 0.95 * k);
-    g.fillTriangle(
-      x - sa * size * 0.55, y + ca * size * 0.55,
-      x + sa * size * 0.55, y - ca * size * 0.55,
-      x + ca * size * 2.3, y + sa * size * 2.3,
-    );
-    g.fillStyle(0xffffff, 0.9 * k);
-    g.fillCircle(x, y, size * 0.55);
+    drawMuzzleFlash(g, x, y, a, k, size);
   }
 
   /** Sandbag machine-gun nest with a two-man crew. */

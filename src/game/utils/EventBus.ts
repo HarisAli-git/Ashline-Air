@@ -33,6 +33,8 @@ export interface GameEvents {
   'flight:status': {
     engineFailed: boolean;
     underFire: boolean;
+    /** What is shooting, and the altitude that puts you out of its reach. */
+    groundThreat: { label: string; clearM: number } | null;
     stall: boolean;
     overspeed: boolean;
     obstacleAheadM: number | null;
@@ -53,6 +55,8 @@ export interface GameEvents {
   'contract:board-refreshed': void;
 
   // Player
+  'player:location-changed': { settlementId: string };
+  'player:settlement-unlocked': { settlementId: string; name: string };
   'player:money-changed': { amount: number; delta: number };
   'player:reputation-changed': { factionId: string; delta: number; total: number };
   'player:aircraft-damaged': { delta: number; newIntegrity: number };

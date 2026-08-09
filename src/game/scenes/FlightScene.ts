@@ -3,7 +3,6 @@ import { AircraftController, type FlightInput } from '../entities/aircraft/Aircr
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
-import { GROUND_FIRE_CEILING } from '../world/Hazards';
 import { biomeFor } from '../world/Biomes';
 import { WeatherFX } from '../world/WeatherFX';
 import { FlightEventService } from '../../services/FlightEventService';
@@ -75,11 +74,14 @@ export class FlightScene extends Phaser.Scene {
 
   // ── Threat / systems state ────────────────────────────────────────────────
   private stallWarning   = false;
-  private fireTimer      = 0;     // raider burst cadence
   private underFire      = false;
   private hazardAlertAt  = -99;   // last obstacle klaxon
   private overspeedWarnAt = -99;
   private trafficAlertAt = -99;   // last traffic advisory
+  private threatAlertAt  = -99;   // last "hostile ground ahead" call
+  /** What is shooting at us and the altitude that clears it. */
+  private groundThreat: { label: string; clearM: number } | null = null;
+  private threatHold = 0;         // keeps the caution readable between bursts
   private trafficAdvisory: number | null = null; // their height minus ours, m
   private trafficAvoid: 1 | -1 | null = null;    // +1 climb, -1 descend
   private engineFailed   = false;
@@ -116,11 +118,13 @@ export class FlightScene extends Phaser.Scene {
     this.notifiedArrival     = false;
     this.timeScale           = 1;
     this.stallWarning        = false;
-    this.fireTimer           = 0;
     this.underFire           = false;
     this.hazardAlertAt       = -99;
     this.overspeedWarnAt     = -99;
     this.trafficAlertAt      = -99;
+    this.threatAlertAt       = -99;
+    this.groundThreat        = null;
+    this.threatHold          = 0;
     this.trafficAdvisory     = null;
     this.trafficAvoid        = null;
     this.engineFailed        = false;
@@ -187,6 +191,10 @@ export class FlightScene extends Phaser.Scene {
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
     // The land itself changes between the two settlements
     this.world.setBiomes(this.originBiome, this.destBiome);
+    // The garrison at both fields flies the destination faction's colours
+    const destSettlement = window.gameData.settlements.find(s => s.id === contract?.destinationId);
+    const faction = window.gameData.factions.find(f => f.id === destSettlement?.factionId);
+    if (faction) this.world.setFactionColor(parseInt(faction.color.replace('#', ''), 16));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
     this.fx       = new WeatherFX(this, width, height);
 
@@ -636,37 +644,54 @@ export class FlightScene extends Phaser.Scene {
       this.disengageWarp('obstacle ahead');
     }
 
-    // ── Raider ground fire ────────────────────────────────────────────────
-    const inHostile = hz.isHostile(worldX) && alt < GROUND_FIRE_CEILING && alt > 2;
-    if (inHostile !== this.underFire) {
-      this.underFire = inHostile;
-      if (inHostile) {
+    // ── Warlord ground fire ───────────────────────────────────────────────
+    // Every weapon on the ground has its own reach. Small arms are a nuisance
+    // you clear by not being on the deck; an AA battery reaches 340 m and
+    // turns "how high do I cruise?" into a decision with a fuel bill attached.
+    const fire = this.world.raiderFire(sdt, worldX, this.world.altitudeToScreenY(alt), alt);
+    // Hold the caution up briefly after the last round. Weapons drift in and
+    // out of range as you cross a zone, and a light that strobes on and off
+    // every frame is one the player cannot read.
+    if (fire.engaged && fire.label) {
+      this.groundThreat = { label: fire.label, clearM: fire.clearAltitudeM };
+      this.threatHold = 2.2;
+    } else if (this.threatHold > 0) {
+      this.threatHold -= sdt;
+      if (this.threatHold <= 0) this.groundThreat = null;
+    }
+
+    const nowUnderFire = this.groundThreat !== null;
+    if (nowUnderFire !== this.underFire) {
+      this.underFire = nowUnderFire;
+      if (fire.engaged) {
         SoundEngine.warn();
         EventBus.emit('ui:show-notification', {
-          message: '⚠ TAKING FIRE FROM THE GROUND — CLIMB ABOVE 50 m',
+          message: `⚠ ${fire.label} ENGAGING — CLIMB ABOVE ${Math.round(fire.clearAltitudeM)} m`,
           type: 'danger',
         });
-        this.disengageWarp('under fire');
+        this.disengageWarp('taking ground fire');
       }
     }
-    if (inHostile) {
-      this.fireTimer -= sdt;
-      if (this.fireTimer <= 0) {
-        this.fireTimer = 0.55 + Math.random() * 0.5;
-        SoundEngine.gunfire();
-        // Lower and slower = easier target
-        const exposure = 1 - alt / GROUND_FIRE_CEILING;
-        const hit = Math.random() < 0.35 + exposure * 0.4;
-        // The rounds leave the guns you can see aiming at you — the burst is
-        // resolved here, but every tracer is drawn from a real muzzle.
-        this.world.raiderBurst(worldX, this.world.altitudeToScreenY(alt), alt, hit);
-        if (hit) {
-          SoundEngine.bulletHit();
-          this.state.integrity = clamp(this.state.integrity - (2 + exposure * 5), 0, 100);
-          this.cameras.main.shake(120, 0.004);
-          if (Math.random() < 0.2) this.cargo.applyDamage(4);
-        }
-      }
+    if (fire.shots > 0) SoundEngine.gunfire();
+    if (fire.hit) {
+      SoundEngine.bulletHit();
+      this.state.integrity = clamp(this.state.integrity - fire.damage, 0, 100);
+      this.cameras.main.shake(120, 0.004 + Math.min(0.006, fire.damage * 0.0012));
+      if (Math.random() < 0.2) this.cargo.applyDamage(4);
+    }
+
+    // Advance call on the next stretch, so there is room to climb over it.
+    // Only worth saying if their guns actually out-reach our current height.
+    const threat = this.world.threatAhead(worldX, 5200);
+    if (threat && alt < threat.ceilingM &&
+        this.state.elapsedSeconds - this.threatAlertAt > 8) {
+      this.threatAlertAt = this.state.elapsedSeconds;
+      SoundEngine.alarm();
+      EventBus.emit('ui:show-notification', {
+        message: `▲ ${threat.label} AHEAD — CLEAR ALTITUDE ${Math.round(threat.ceilingM)} m`,
+        type: 'warning',
+      });
+      this.disengageWarp('hostile ground ahead');
     }
 
     // ── Engine reliability: tired engines quit, and you can restart them ──
@@ -724,6 +749,7 @@ export class FlightScene extends Phaser.Scene {
     EventBus.emit('flight:status', {
       engineFailed: this.engineFailed,
       underFire: this.underFire,
+      groundThreat: this.groundThreat,
       stall: this.stallWarning,
       overspeed,
       obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,

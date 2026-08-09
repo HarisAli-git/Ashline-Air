@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
+import { ProgressionService } from '../../services/ProgressionService';
 import { EventBus } from '../utils/EventBus';
 import { fadeIn, fadeToScene } from '../utils/transitions';
 import { ensureSharedTextures } from '../entities/aircraft/render/AircraftPainter';
@@ -62,12 +63,19 @@ export class MapScene extends Phaser.Scene {
     const settlements: SettlementDefinition[] = window.gameData.settlements;
     const unlocked = save.player.unlockedSettlementIds;
 
-    // Animated dashed routes
+    // Animated dashed routes. The legs you can actually fly right now — the
+    // ones leaving your current field — are drawn live; the rest are faint,
+    // so the chart reads as "here is where you can go from here".
     this.routeGfx.clear();
     const offset = (this.t * 14) % 16;
+    const hereId = save.player.currentLocationId;
     const pairs = this.routePairs(settlements, unlocked);
     for (const [a, b] of pairs) {
-      this.dashedLine(this.routeGfx, a.position.x, a.position.y, b.position.x, b.position.y, 7, 9, offset);
+      const flyable = a.id === hereId || b.id === hereId;
+      this.dashedLine(
+        this.routeGfx, a.position.x, a.position.y, b.position.x, b.position.y,
+        7, 9, offset, flyable,
+      );
     }
 
     // Drifting dust motes
@@ -183,10 +191,11 @@ export class MapScene extends Phaser.Scene {
     g: Phaser.GameObjects.Graphics,
     x1: number, y1: number, x2: number, y2: number,
     dash: number, gap: number, offset: number,
+    active = false,
   ): void {
     const len = Phaser.Math.Distance.Between(x1, y1, x2, y2);
     const nx = (x2 - x1) / len, ny = (y2 - y1) / len;
-    g.lineStyle(1.5, 0x8a6a3a, 0.55);
+    g.lineStyle(active ? 2 : 1.2, active ? 0xffd080 : 0x8a6a3a, active ? 0.8 : 0.3);
     for (let d = -offset; d < len; d += dash + gap) {
       const a = Math.max(0, d), b = Math.min(len, d + dash);
       if (b <= a) continue;
@@ -217,6 +226,33 @@ export class MapScene extends Phaser.Scene {
 
     const faction = window.gameData.factions.find(f => f.id === settlement.factionId);
     const colorHex = faction ? parseInt(faction.color.replace('#', ''), 16) : 0x888888;
+    const isHere = ProgressionService.canDepartFrom(settlement.id);
+
+    // ── "You are here": the aircraft's actual position on the chart ────────
+    if (isHere) {
+      const halo = this.add.graphics();
+      halo.lineStyle(2, 0xffd080, 0.9);
+      halo.strokeCircle(0, 0, 26);
+      halo.lineStyle(1, 0xffd080, 0.35);
+      halo.strokeCircle(0, 0, 33);
+      // Bracket ticks, like a targeting reticle
+      halo.lineStyle(2, 0xffd080, 0.9);
+      for (const [dx, dy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as Array<[number, number]>) {
+        halo.lineBetween(dx * 26, dy * 26, dx * 34, dy * 26);
+        halo.lineBetween(dx * 26, dy * 26, dx * 26, dy * 34);
+      }
+      container.add(halo);
+      this.tweens.add({
+        targets: halo, alpha: 0.45, duration: 1400, yoyo: true, repeat: -1, ease: 'Sine.easeInOut',
+      });
+
+      const youAreHere = this.add.text(0, -42, '✈  YOU ARE HERE', {
+        fontSize: '11px', color: '#ffd080', fontFamily: 'monospace',
+        fontStyle: 'bold', letterSpacing: 1,
+        backgroundColor: '#0a0804', padding: { x: 6, y: 3 },
+      }).setOrigin(0.5);
+      container.add(youAreHere);
+    }
 
     // Pulse ring (unlocked only)
     if (unlocked) {
@@ -252,7 +288,8 @@ export class MapScene extends Phaser.Scene {
     };
     drawDot(false);
 
-    const label = this.add.text(0, 22, settlement.name, {
+    // The position reticle reaches ±34, so the name has to clear it
+    const label = this.add.text(0, isHere ? 38 : 22, settlement.name, {
       fontSize: '12px',
       color: unlocked ? '#e8d5b7' : '#4a4030',
       fontFamily: 'monospace',
@@ -272,6 +309,18 @@ export class MapScene extends Phaser.Scene {
     container.on('pointerover', () => { drawDot(true); this.showTooltip(settlement); });
     container.on('pointerout', () => { drawDot(false); this.hideTooltip(); });
     container.on('pointerdown', () => {
+      // Contracts leave from where the aircraft actually is. Clicking a
+      // settlement you are not standing at used to silently teleport you
+      // there and fly its board, which made the whole chart meaningless.
+      if (!ProgressionService.canDepartFrom(settlement.id)) {
+        SoundEngine.warn();
+        const here = ProgressionService.currentLocation();
+        EventBus.emit('ui:show-notification', {
+          message: `Your aircraft is at ${here?.name ?? 'another field'} — fly a contract to ${settlement.name} to move it.`,
+          type: 'warning',
+        });
+        return;
+      }
       SoundEngine.click();
       EventBus.emit('scene:open-preflight', { settlementId: settlement.id });
       fadeToScene(this, 'PreFlightScene', { settlementId: settlement.id });
@@ -330,6 +379,16 @@ export class MapScene extends Phaser.Scene {
       fontSize: '11px', color: '#ffd080', fontFamily: 'monospace',
     }).setOrigin(0.5);
 
+    // Standing orders: where you are, and what the next destination wants
+    const here = ProgressionService.currentLocation(save);
+    this.add.text(20, 52, `POSITION:  ${(here?.name ?? 'UNKNOWN').toUpperCase()}`, {
+      fontSize: '12px', color: '#ffd080', fontFamily: 'monospace', letterSpacing: 1,
+    }).setOrigin(0, 0.5);
+    const hint = ProgressionService.nextUnlockHint(save);
+    this.add.text(20, 70, hint ? `LOCKED:  ${hint}` : 'All destinations open.', {
+      fontSize: '11px', color: '#6a5a3a', fontFamily: 'monospace',
+    }).setOrigin(0, 0.5);
+
     // Scale bar
     const sg = this.add.graphics();
     const sx = 20, sy = height - 28;
@@ -379,6 +438,9 @@ export class MapScene extends Phaser.Scene {
       `Population: ${settlement.population.toLocaleString()}`,
       `Security: ${settlement.securityLevel}/10`,
       `Contracts: ${contracts}`,
+      ProgressionService.canDepartFrom(settlement.id)
+        ? '▸ YOUR AIRCRAFT IS HERE'
+        : '· fly a contract here to move',
     ];
 
     const { width, height } = this.cameras.main;

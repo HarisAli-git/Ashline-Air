@@ -36,6 +36,7 @@ export function useRouteInfo(): { routeKm: number; destinationName: string } | n
 export interface FlightStatus {
   engineFailed: boolean;
   underFire: boolean;
+  groundThreat: { label: string; clearM: number } | null;
   stall: boolean;
   overspeed: boolean;
   obstacleAheadM: number | null;

@@ -5,7 +5,8 @@ import { EventBus } from '../utils/EventBus';
 import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import { ContractService } from '../../services/ContractService';
-import type { LandingResult, Contract, FlightState, CargoSlot } from '../../types';
+import { ProgressionService } from '../../services/ProgressionService';
+import type { LandingResult, Contract, FlightState, CargoSlot, SettlementDefinition } from '../../types';
 import { clamp } from '../utils/math';
 
 interface PostFlightData {
@@ -125,6 +126,22 @@ export class PostFlightScene extends Phaser.Scene {
     save.player.stats.totalFlights++;
     save.player.stats.totalDistanceKm += finalState.distanceTravelled;
     if (result.quality === 'perfect') save.player.stats.perfectLandings++;
+
+    // ── Where the aircraft now is ───────────────────────────────────────────
+    // Arriving somewhere has to actually move you, or the map is a level
+    // select. You end up at the destination if you got there in one piece;
+    // anything else and you are still standing where you took off from.
+    let unlocked: SettlementDefinition[] = [];
+    let arrivedAt: string | null = null;
+    const madeIt = reachedDestination && result.quality !== 'crash';
+    if (contract && madeIt) {
+      arrivedAt = contract.destinationId;
+      unlocked = ProgressionService.arriveAt(contract.destinationId, save);
+    } else {
+      // Diverted, crashed or ferried — re-check unlocks anyway, since
+      // reputation may have moved on an earlier leg.
+      unlocked = ProgressionService.evaluateUnlocks(save);
+    }
     SaveService.save(save.player, save.world);
 
     // ── World clock: flight time + turnaround (1 flight second = 1 minute) ─
@@ -202,6 +219,51 @@ export class PostFlightScene extends Phaser.Scene {
       this.add.text(cx, payY, 'Take off again and fly the full route to deliver.', {
         fontSize: '14px', color: '#8a7a5a', fontFamily: 'monospace',
       }).setOrigin(0.5);
+    }
+
+    // ── Where you are now, and what that opened ─────────────────────────────
+    // "You landed" is not a result. Say the place, so the map that comes next
+    // is showing you something you already know.
+    // Collected first, then laid out bottom-up from just above the button, so
+    // a long unlock blurb can never end up printed through "RETURN TO MAP".
+    interface InfoLine { text: string; size: number; color: string; bold?: boolean; star?: boolean; }
+    const info: InfoLine[] = [];
+
+    const here = ProgressionService.currentLocation(save);
+    if (here) {
+      info.push({
+        text: `${arrivedAt ? '✈  ARRIVED AT' : '⌂  STILL AT'}  ${here.name.toUpperCase()}`,
+        size: 15, color: arrivedAt ? '#88ccff' : '#8a7a5a',
+      });
+    }
+    for (const s of unlocked) {
+      info.push({
+        text: `★  NEW DESTINATION UNLOCKED — ${s.name.toUpperCase()}`,
+        size: 16, color: '#ffd080', bold: true, star: true,
+      });
+      const blurb = ProgressionService.blurbFor(s.id);
+      if (blurb) info.push({ text: blurb, size: 12, color: '#c8b888' });
+      SoundEngine.chime();
+    }
+    if (unlocked.length === 0) {
+      const hint = ProgressionService.nextUnlockHint(save);
+      if (hint) info.push({ text: `Next destination:  ${hint}`, size: 12, color: '#6a5a3a' });
+    }
+
+    const lineH = 24;
+    const blockBottom = height - 84;
+    let infoY = Math.max(payY + 96, blockBottom - info.length * lineH);
+    for (const line of info) {
+      const t = this.add.text(cx, infoY, line.text, {
+        fontSize: `${line.size}px`, color: line.color, fontFamily: 'monospace',
+        fontStyle: line.bold ? 'bold' : 'normal',
+      }).setOrigin(0.5);
+      if (line.star) {
+        t.setAlpha(0);
+        this.tweens.add({ targets: t, alpha: 1, duration: 500, delay: 700 });
+        this.tweens.add({ targets: t, scale: 1.04, duration: 900, yoyo: true, repeat: 2, delay: 700 });
+      }
+      infoY += lineH;
     }
 
     if (outcome === 'delivered') SoundEngine.success();

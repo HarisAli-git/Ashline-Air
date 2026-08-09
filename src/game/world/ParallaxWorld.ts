@@ -1,9 +1,12 @@
 import Phaser from 'phaser';
 import type { WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
-import { Raiders } from './Raiders';
+import { Raiders, MAX_ENGAGEMENT_M, type RaiderFireReport } from './Raiders';
 import { AirTraffic } from './AirTraffic';
-import { drawUndead, drawHorde, undeadKindFor, type CrowdStyle } from './Crowds';
+import { drawUndead, drawCorpse, drawHorde, undeadKindFor, type CrowdStyle } from './Crowds';
+import {
+  drawFighter, drawMuzzleFlash, drawWireFence, drawBarrier, garrisonPalette,
+} from './Figures';
 import { blendBiome, type BiomeId, type BiomeShape } from './Biomes';
 
 /**
@@ -177,6 +180,8 @@ export class ParallaxWorld {
   private dl = 1; // current daylight factor
   private biomeFrom: BiomeId = 'ashland';
   private biomeTo: BiomeId = 'ashland';
+  /** Colours flown by the garrison holding the airfields on this route. */
+  private factionColor = 0x4a90d9;
 
   private t = 0;
   private readonly cloudOffsets = [0, 200, 450, 700, 900];
@@ -252,6 +257,11 @@ export class ParallaxWorld {
     this.biomeTo = to;
   }
 
+  /** Whose flag flies over the airfields on this route. */
+  setFactionColor(color: number): void {
+    this.factionColor = color;
+  }
+
   /** Leave a persistent tire mark on the ground where the wheels touched. */
   addSkidMark(worldPx: number): void {
     this.skids.push(worldPx);
@@ -311,9 +321,10 @@ export class ParallaxWorld {
 
     // Guns only bother tracking something they could plausibly reach; above
     // that they sit at rest rather than pointing uselessly at the stratosphere.
-    const inReach = f.planeWorldX !== undefined && f.planeScreenY !== undefined && f.altitude < 150;
+    const inReach = f.planeWorldX !== undefined && f.planeScreenY !== undefined
+      && f.altitude < MAX_ENGAGEMENT_M + 60;
     this.raiders.update(
-      dt, f.scrollX, gy,
+      dt, gy,
       inReach ? { worldX: f.planeWorldX!, screenY: f.planeScreenY! } : null,
     );
 
@@ -332,10 +343,22 @@ export class ParallaxWorld {
     this.traffic.draw(this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
   }
 
-  /** Raiders open up — called when the scene decides a burst goes off. */
-  raiderBurst(planeWorldX: number, planeScreenY: number, altitude: number, hit: boolean): void {
+  /**
+   * Let every weapon within reach take its shot, and report what happened.
+   * The ground datum is recomputed here from the aircraft's own altitude so
+   * the muzzles the rounds leave from are exactly where they are drawn, even
+   * once the ground itself has sunk off the bottom of the frame.
+   */
+  raiderFire(
+    dt: number, planeWorldX: number, planeScreenY: number, altitude: number,
+  ): RaiderFireReport {
     const gy = this.groundY + Math.max(0, (altitude - ALT_BAND) * this.pxPerM);
-    this.raiders.burst(gy, { worldX: planeWorldX, screenY: planeScreenY }, hit);
+    return this.raiders.engage(dt, gy, { worldX: planeWorldX, screenY: planeScreenY, altM: altitude });
+  }
+
+  /** Worst weapon in the stretch ahead, so the climb can start in time. */
+  threatAhead(worldX: number, rangePx: number): { label: string; ceilingM: number; distancePx: number } | null {
+    return this.raiders.threatAhead(worldX, rangePx);
   }
 
   destroy(): void {
@@ -1006,8 +1029,10 @@ export class ParallaxWorld {
     // Origin airfield sits just behind the spawn point (aircraft spawns at
     // screen/world ~300) so the field is on screen from the first frame; the
     // destination's is at its strip entrance, overflown on approach.
-    this.drawAirfield(g, 10, scrollX, gy);
-    this.drawAirfield(g, dstFrom + 60, scrollX, gy);
+    // The fortifications face open country: outbound from the origin field,
+    // back down the route from the destination's.
+    this.drawAirfield(g, 10, scrollX, gy, 1);
+    this.drawAirfield(g, dstFrom + 60, scrollX, gy, -1);
     this.drawSettlement(g, oriFrom - 60, scrollX, gy, -1);
     this.drawSettlement(g, dstTo + 60, scrollX, gy, 1);
 
@@ -1025,21 +1050,91 @@ export class ParallaxWorld {
     }
   }
 
-  /** Airfield buildings along the strip: hangar, control tower, fuel drums.
-   *  Drawn behind the aircraft so the field reads as a real place. */
+  /**
+   * A working airfield in a world that has none of the conditions for one.
+   *
+   * Hangar, control tower and fuel are the easy part; the rest is why the
+   * strip still exists — wire, blast barriers, a sandbagged gate with a
+   * vehicle checkpoint, watchtowers with lights and guns, and a garrison that
+   * is visibly on shift. The dead are always at the wire, and the garrison is
+   * always dealing with it, because that is the standing condition here.
+   *
+   * `dir` points from the airfield toward open country: the fortifications
+   * face that way, and so do the guards.
+   */
   private drawAirfield(
     g: Phaser.GameObjects.Graphics,
     startPx: number,
     scrollX: number,
     gy: number,
+    dir: 1 | -1 = 1,
   ): void {
     const sx = startPx - scrollX;
-    if (sx < -600 || sx > this.width + 600) return;
+    if (sx < -700 || sx > this.width + 700) return;
 
     const dark = 0x15100a;
     const mid = 0x241b10;
+    const garrison = garrisonPalette(this.factionColor);
+    const night = 1 - this.dl;
 
-    // Hangar: arched roof over a box, door cracked open
+    // ── Perimeter: barriers, then wire running out toward open country ────
+    const perimX = sx + dir * 300;
+    drawBarrier(g, perimX - 22, gy, 44, 24, 3);
+    drawBarrier(g, perimX + dir * 30 - 16, gy, 32, 19, 9);
+    drawWireFence(g, Math.min(perimX + dir * 56, perimX + dir * 250),
+      Math.max(perimX + dir * 56, perimX + dir * 250), gy, 30, 17);
+
+    // Gate: two posts, a lifted boom, and a checkpoint hut
+    const gateX = sx + dir * 250;
+    g.fillStyle(0x1c1810, 1);
+    g.fillRect(gateX - 3, gy - 40, 6, 40);
+    g.fillRect(gateX + dir * 54 - 3, gy - 40, 6, 40);
+    g.lineStyle(3, 0x8a7430, 0.95);                       // raised boom
+    g.lineBetween(gateX + 2, gy - 34, gateX + dir * 40, gy - 52);
+    g.fillStyle(dark, 1);
+    g.fillRect(gateX + dir * 62, gy - 26, 24, 26);
+    g.fillStyle(0x86a0aa, 0.4);
+    g.fillRect(gateX + dir * 66, gy - 22, 15, 9);
+    if (night > 0.3) {                                     // gate floodlight
+      g.fillStyle(0xffe0a0, 0.10 * night);
+      g.fillTriangle(gateX, gy - 44, gateX + dir * 130, gy, gateX - dir * 40, gy);
+      g.fillStyle(0xfff0c0, 0.9);
+      g.fillCircle(gateX, gy - 44, 2);
+    }
+
+    // ── Watchtowers: one over the gate, one at the far end of the strip ───
+    for (const [twX, twSeed] of [[sx + dir * 210, 5], [sx - dir * 40, 11]] as Array<[number, number]>) {
+      const h = 46;
+      g.lineStyle(2.6, 0x241b11, 1);
+      g.lineBetween(twX - 13, gy, twX - 5, gy - h);
+      g.lineBetween(twX + 13, gy, twX + 5, gy - h);
+      g.lineStyle(1.4, 0x241b11, 0.9);
+      for (let i = 1; i < 4; i++) {
+        const y0 = gy - (h * i) / 4, y1 = gy - (h * (i - 1)) / 4;
+        const w0 = 13 - (8 * i) / 4, w1 = 13 - (8 * (i - 1)) / 4;
+        g.lineBetween(twX - w0, y0, twX + w1, y1);
+        g.lineBetween(twX - w0, y0, twX + w0, y0);
+      }
+      g.fillStyle(0x1c1610, 1);
+      g.fillRect(twX - 15, gy - h - 16, 30, 16);           // cab
+      g.fillRect(twX - 17, gy - h - 4, 34, 4);             // platform
+      g.fillStyle(0x86a0aa, 0.35);
+      g.fillRect(twX - 12, gy - h - 13, 24, 7);
+      // Sentry on the platform, weapon over the rail
+      drawFighter(g, twX + dir * 4, gy - h - 4, this.t, twSeed, 0.62, dir, 'stand', 0, this.dl, garrison);
+      // Searchlight sweeping the approach at night
+      if (night > 0.35) {
+        const sweep = Math.sin(this.t * 0.45 + twSeed);
+        g.fillStyle(0xffefc8, 0.09 * night);
+        g.fillTriangle(twX, gy - h - 8,
+          twX + dir * 230, gy - 70 + sweep * 60,
+          twX + dir * 230, gy + 10 + sweep * 60);
+        g.fillStyle(0xfff4d8, 0.9);
+        g.fillCircle(twX, gy - h - 8, 2.2);
+      }
+    }
+
+    // ── Hangar: arched roof over a box, door cracked open ─────────────────
     const hx = sx + 20;
     g.fillStyle(mid, 1);
     g.fillRect(hx, gy - 34, 92, 34);
@@ -1049,8 +1144,20 @@ export class ParallaxWorld {
     g.fillRect(hx + 30, gy - 24, 32, 24); // open door gap
     g.lineStyle(1, 0x4a3a22, 0.7);
     for (let i = 0; i < 4; i++) g.lineBetween(hx + 8 + i * 22, gy - 32, hx + 8 + i * 22, gy - 2);
+    // Faction colours flying over the hangar
+    g.lineStyle(1.8, 0x2a2218, 1);
+    g.lineBetween(hx + 84, gy - 40, hx + 84, gy - 76);
+    const wave = Math.sin(this.t * 2.4) * 3;
+    g.fillStyle(this.factionColor, 0.92);
+    g.beginPath();
+    g.moveTo(hx + 84, gy - 76);
+    g.lineTo(hx + 112, gy - 72 + wave);
+    g.lineTo(hx + 112, gy - 58 + wave);
+    g.lineTo(hx + 84, gy - 54);
+    g.closePath();
+    g.fillPath();
 
-    // Control tower: legs, cab, blinking light
+    // ── Control tower: legs, cab, blinking light ──────────────────────────
     const tx = sx + 160;
     g.lineStyle(2.5, dark, 1);
     g.lineBetween(tx - 8, gy, tx - 4, gy - 34);
@@ -1064,13 +1171,39 @@ export class ParallaxWorld {
       g.fillCircle(tx, gy - 53, 1.8);
     }
 
-    // Fuel drums + stack of crates
+    // ── Fuel drums, crates, and the ground crew working them ──────────────
     const dx = sx + 220;
     g.fillStyle(0x3a2c18, 1);
     for (let i = 0; i < 3; i++) g.fillRect(dx + i * 9, gy - 10, 7, 10);
     g.fillStyle(mid, 1);
     g.fillRect(dx + 34, gy - 8, 10, 8);
     g.fillRect(dx + 38, gy - 15, 10, 8);
+    drawFighter(g, dx + 58, gy, this.t, 23, 0.72, -1, 'work', 0, this.dl, garrison);
+
+    // ── The garrison on shift: two sentries walking the strip ─────────────
+    for (let i = 0; i < 2; i++) {
+      const beat = Math.sin(this.t * 0.32 + i * 2.1) * 44;
+      drawFighter(g, sx + 120 + i * 110 + beat, gy, this.t, 31 + i * 7, 0.76,
+        beat > 0 ? 1 : -1, 'patrol', 0, this.dl, garrison);
+    }
+
+    // ── And the standing problem: the dead at the wire, being dealt with ──
+    const wireX = perimX + dir * 250;
+    drawHorde(g, wireX + dir * 30, gy, dir * 120, 9, this.t,
+      Math.round(startPx) + 57, this.crowdStyle, -dir as 1 | -1, 0.9);
+    for (let i = 0; i < 2; i++) {
+      drawCorpse(g, wireX + dir * (14 + i * 26), gy, i * 13 + 3, 0.8, this.crowdStyle);
+    }
+    // A guard on the barrier putting rounds into them
+    const shooterX = perimX + dir * 8;
+    const firing = Math.sin(this.t * 4.2) > 0.6;
+    drawFighter(g, shooterX, gy - 24, this.t, 47, 0.7, dir, 'aimSide', 0, this.dl, garrison);
+    if (firing) {
+      const a = dir > 0 ? 0.12 : Math.PI - 0.12;
+      drawMuzzleFlash(g, shooterX + dir * 9, gy - 30, a, 1, 2.6);
+      g.lineStyle(1.2, 0xffe07a, 0.7);
+      g.lineBetween(shooterX + dir * 10, gy - 30, shooterX + dir * 70, gy - 18);
+    }
   }
 
   /** Fortified settlement silhouette beyond a runway: buildings, water tower,

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import Phaser from 'phaser';
 import { BootScene }       from './game/scenes/BootScene';
 import { MenuScene }       from './game/scenes/MenuScene';
+import { IntroScene }      from './game/scenes/IntroScene';
 import { MapScene }        from './game/scenes/MapScene';
 import { PreFlightScene }  from './game/scenes/PreFlightScene';
 import { FlightScene }     from './game/scenes/FlightScene';
@@ -44,7 +45,7 @@ export default function App(): React.ReactElement {
       height: 600,
       parent: containerRef.current,
       backgroundColor: '#1a1208',
-      scene: [BootScene, MenuScene, MapScene, PreFlightScene, FlightScene, PostFlightScene],
+      scene: [BootScene, MenuScene, IntroScene, MapScene, PreFlightScene, FlightScene, PostFlightScene],
       physics: { default: 'arcade', arcade: { gravity: { x: 0, y: 0 }, debug: false } },
     });
 

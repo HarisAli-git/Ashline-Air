@@ -2,8 +2,8 @@ import type { SaveData, PlayerState, WorldState, OwnedAircraft, AircraftDefiniti
 import { EventBus } from '../game/utils/EventBus';
 
 const SAVE_KEY = 'ashline_air_save';
-// v2: contract types/expiry rework, cargo condition, world clock in use
-const SAVE_VERSION = 2;
+// v3: the player now has a position on the map, and settlements unlock
+const SAVE_VERSION = 3;
 
 function makeDefaultSave(): SaveData {
   return {
@@ -31,6 +31,7 @@ function makeDefaultSave(): SaveData {
         { factionId: 'raiders',         points: 0 },
       ],
       unlockedSettlementIds: ['ashford_basin', 'redrock_camp'],
+      currentLocationId: 'ashford_basin',
       stats: {
         totalFlights: 0,
         totalDistanceKm: 0,
@@ -123,6 +124,12 @@ class SaveServiceClass {
         ...defaults.player,
         ...data.player,
         stats: { ...defaults.player.stats, ...data.player?.stats },
+        // Saves from before v3 have no position — put the aircraft at the
+        // first settlement they had unlocked rather than nowhere.
+        currentLocationId:
+          data.player?.currentLocationId
+          ?? data.player?.unlockedSettlementIds?.[0]
+          ?? defaults.player.currentLocationId,
         activeContractId: null, // old contract shapes are discarded below
       },
       world: {

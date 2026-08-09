@@ -88,7 +88,16 @@ export function FlightHUD(): React.ReactElement | null {
               tone="#ff4444"
             />
           )}
-          {status.underFire && <Caution label="TAKING FIRE — CLIMB" tone="#ff8844" />}
+          {/* Name the weapon and the height that beats it — "CLIMB" alone
+              doesn't tell you whether that means 80 m or 340 m. */}
+          {status.underFire && (
+            <Caution
+              label={status.groundThreat
+                ? `${status.groundThreat.label} — CLIMB ${Math.round(status.groundThreat.clearM)} m`
+                : 'TAKING FIRE — CLIMB'}
+              tone={status.groundThreat && status.groundThreat.clearM > 200 ? '#ff4444' : '#ff8844'}
+            />
+          )}
           {status.obstacleAheadM !== null && (
             <Caution label={`OBSTACLE ${Math.round(status.obstacleAheadM)} m`} tone="#ffd080" />
           )}

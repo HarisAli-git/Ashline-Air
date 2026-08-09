@@ -23,8 +23,11 @@ export interface Hazard {
   seed: number;
 }
 
-/** Below this altitude (m) raiders in a hostile stretch open fire. */
-export const GROUND_FIRE_CEILING = 50;
+/*
+ * Engagement altitudes now live per-weapon in Raiders.ts (WEAPONS): a rifle
+ * over sandbags and a wheeled autocannon do not share a ceiling, and the
+ * whole point of the hostile zones is that you have to read which is which.
+ */
 
 function hash(i: number): number {
   const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;

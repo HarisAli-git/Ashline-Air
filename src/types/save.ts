@@ -19,6 +19,12 @@ export interface PlayerState {
   failedContractIds: string[];
   reputation: FactionReputation[];
   unlockedSettlementIds: string[];
+  /**
+   * Where the aircraft physically is right now. Contracts depart from here and
+   * nowhere else — without it the map is a menu of teleports rather than a
+   * position you have to fly yourself out of.
+   */
+  currentLocationId: string;
   stats: PlayerStats;
 }
 

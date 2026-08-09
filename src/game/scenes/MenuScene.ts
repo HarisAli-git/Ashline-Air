@@ -106,7 +106,9 @@ export class MenuScene extends Phaser.Scene {
       save.world.settlements = EconomyService.initialise(window.gameData.settlements);
       ContractService.maintainBoard(save);
       SaveService.save(save.player, save.world);
-      fadeToScene(this, 'MapScene');
+      // The backstory runs before the first flight — it is the setup for the
+      // walls, the gun trucks and why anyone pays a pilot at all.
+      fadeToScene(this, 'IntroScene', { next: 'MapScene' });
     });
 
     if (SaveService.hasSave()) {
@@ -120,6 +122,11 @@ export class MenuScene extends Phaser.Scene {
         fontFamily: 'monospace',
       }).setOrigin(0.5);
     }
+
+    // Replayable, so the setup is never lost behind a one-time cutscene
+    this.makeButton(cx, height * 0.695, 'THE STORY SO FAR', () => {
+      fadeToScene(this, 'IntroScene', { next: 'MenuScene' });
+    });
 
     // ── Bottom status bar ───────────────────────────────────────────────────
     const barGfx = this.add.graphics();
