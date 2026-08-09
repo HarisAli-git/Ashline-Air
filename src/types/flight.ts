@@ -3,6 +3,13 @@ export interface FlightState {
   throttle: number;       // 0–1
   pitch: number;          // degrees, positive = nose up
   pitchRate: number;      // deg/s — the nose has momentum, it is not a slider
+  /**
+   * Flight-path angle in RADIANS — the direction the aircraft is actually
+   * travelling. This must be integrated as state: deriving it from vertical
+   * speed and airspeed each frame makes a diving aircraft's path go
+   * artificially shallow as it accelerates, which caps every descent.
+   */
+  flightPathAngle: number;
   speed: number;          // airspeed, m/s
   groundSpeed: number;    // m/s over ground (airspeed + wind component)
   altitude: number;       // metres

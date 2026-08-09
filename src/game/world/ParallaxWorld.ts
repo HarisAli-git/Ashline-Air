@@ -1,6 +1,9 @@
 import Phaser from 'phaser';
 import type { WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
+import { Raiders } from './Raiders';
+import { AirTraffic } from './AirTraffic';
+import { drawUndead, drawHorde, undeadKindFor, type CrowdStyle } from './Crowds';
 import { blendBiome, type BiomeId, type BiomeShape } from './Biomes';
 
 /**
@@ -16,8 +19,12 @@ import { blendBiome, type BiomeId, type BiomeShape } from './Biomes';
 // the top of frame, at 10 m it is just off the deck. These are low-level
 // cargo runs, not airliner cruise.
 export const ALT_BAND = 70;
-/** World altitude (m) of the low cloud layer you climb through. */
-const CLOUD_LAYER_ALT_M = 150;
+/**
+ * World altitudes (m) of the stacked cloud decks. Spaced so at least one is
+ * always crossing the frame — they are the vertical motion reference once the
+ * ground has dropped out of sight.
+ */
+const CLOUD_LAYER_ALTS = [110, 190, 280, 385, 505, 650];
 export const PLANE_MIN_Y = 250;    // screen y the aircraft pins to above the band
 /** World px per metre flown — high so speed genuinely reads on screen. */
 export const WORLD_PX_PER_M = 9;
@@ -112,6 +119,7 @@ export interface WorldFrame {
   visibility: number;   // 0–1 from weather, dims the sun/moon
   planeScreenX?: number; // for tracer fire aimed at the aircraft
   planeScreenY?: number;
+  planeWorldX?: number;  // world px, so the guns can lay on a real position
   speedFrac?: number;   // 0–1 airspeed, drives near-field blur and streaks
   progress?: number;    // 0–1 along the route, blends origin country into destination
 }
@@ -146,13 +154,20 @@ export class ParallaxWorld {
   private readonly scrubGfx: Phaser.GameObjects.Graphics;
   private readonly groundGfx: Phaser.GameObjects.Graphics;
   private readonly hazardGfx: Phaser.GameObjects.Graphics;
+  /** Other aircraft — above the player's plane so a conflict reads clearly. */
+  private readonly trafficGfx: Phaser.GameObjects.Graphics;
+  /** Rounds in flight, drawn over everything they pass. */
+  private readonly tracerGfx: Phaser.GameObjects.Graphics;
   /** Near field, scrolls FASTER than the ground — the main speed cue. */
   private readonly foreGfx: Phaser.GameObjects.Graphics;
   private readonly vignetteGfx: Phaser.GameObjects.Graphics;
 
   /** Solid obstacles + raider-held ground along the route. */
   readonly hazards = new Hazards();
-  private groundFireOn = false;
+  /** The militia holding that ground, and everything they are shooting at. */
+  readonly raiders = new Raiders();
+  /** Other traffic sharing the airspace. */
+  readonly traffic = new AirTraffic();
 
   private pal: Palette = resolve('clear');   // final: biome + weather + daylight
   private shape: BiomeShape = blendBiome('ashland', 'ashland', 0).shape;
@@ -166,6 +181,9 @@ export class ParallaxWorld {
   private t = 0;
   private readonly cloudOffsets = [0, 200, 450, 700, 900];
   private readonly skids: number[] = []; // world-px of touchdown tire marks
+  /** Scratch buffers for ridge sampling — reused so no per-frame allocation. */
+  private readonly rsX: number[] = [];
+  private readonly rsH: number[] = [];
 
   constructor(scene: Phaser.Scene, width: number, height: number, groundY: number) {
     this.scene = scene;
@@ -185,6 +203,11 @@ export class ParallaxWorld {
     // Hazards render in front of the terrain but behind the aircraft, which
     // is created after this class — so the plane passes in front of them.
     this.hazardGfx = scene.add.graphics();
+    // Traffic and tracers sit ABOVE the player's aircraft (which the scene
+    // creates after this class, at depth 0). A conflicting aeroplane that
+    // passes behind your own tail is a conflict you never see coming.
+    this.trafficGfx = scene.add.graphics().setDepth(5);
+    this.tracerGfx = scene.add.graphics().setDepth(5.5);
     // Near-field strip and vignette sit ABOVE the aircraft; they occupy the
     // bottom edge only, so they frame the shot without hiding the plane.
     this.foreGfx = scene.add.graphics().setDepth(6);
@@ -198,15 +221,22 @@ export class ParallaxWorld {
     return (this.groundY - PLANE_MIN_Y) / ALT_BAND;
   }
 
-  /** Lay out the route's obstacles and hostile stretches. */
+  /** Lay out the route's obstacles, hostile stretches and the militia in them. */
   setRoute(routeKm: number, seed: number): void {
     const destPx = Math.max(2000 * WORLD_PX_PER_M, routeKm * 1000 * WORLD_PX_PER_M);
     this.hazards.generate(450 * WORLD_PX_PER_M, destPx - 300 * WORLD_PX_PER_M, seed);
+    this.raiders.layout(this.hazards.zones, seed);
+    this.traffic.reset(seed);
   }
 
-  /** FlightScene tells us when raiders are actively shooting. */
-  setGroundFire(on: boolean): void {
-    this.groundFireOn = on;
+  /** Crowd colouring, tied to the current palette so figures sit in the scene. */
+  private get crowdStyle(): CrowdStyle {
+    return {
+      body: lerpColor(this.pal.scrub, 0x000000, 0.55),
+      rag: lerpColor(this.pal.scrub, 0x000000, 0.28),
+      rim: this.pal.hillLight,
+      daylight: this.dl,
+    };
   }
 
   /** Blend the palette toward a weather condition over ~4 s. */
@@ -276,17 +306,36 @@ export class ParallaxWorld {
 
     this.drawNearField(f.scrollX, sink, f.speedFrac ?? 0);
 
-    // ── Hazards: solid obstacles + raider fire, on the aircraft's own plane ─
+    // ── Hazards, the militia holding the ground, and other traffic ─────────
     const gy = this.groundY + sink;
+
+    // Guns only bother tracking something they could plausibly reach; above
+    // that they sit at rest rather than pointing uselessly at the stratosphere.
+    const inReach = f.planeWorldX !== undefined && f.planeScreenY !== undefined && f.altitude < 150;
+    this.raiders.update(
+      dt, f.scrollX, gy,
+      inReach ? { worldX: f.planeWorldX!, screenY: f.planeScreenY! } : null,
+    );
+
     this.hazardGfx.clear();
     if (gy < this.height + 40) {
       this.hazards.draw(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
-      if (this.groundFireOn && f.planeScreenX !== undefined && f.planeScreenY !== undefined) {
-        this.hazards.drawTracers(
-          this.hazardGfx, f.scrollX, gy, f.planeScreenX, f.planeScreenY, this.t, this.width,
-        );
-      }
+      this.raiders.draw(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl, this.crowdStyle, dt);
     }
+
+    this.tracerGfx.clear();
+    this.raiders.drawTracers(this.tracerGfx, f.scrollX, this.width);
+
+    // Other aircraft ride the SAME altitude mapping as the player's, so a
+    // conflict on screen is a conflict in the collision test.
+    this.trafficGfx.clear();
+    this.traffic.draw(this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
+  }
+
+  /** Raiders open up — called when the scene decides a burst goes off. */
+  raiderBurst(planeWorldX: number, planeScreenY: number, altitude: number, hit: boolean): void {
+    const gy = this.groundY + Math.max(0, (altitude - ALT_BAND) * this.pxPerM);
+    this.raiders.burst(gy, { worldX: planeWorldX, screenY: planeScreenY }, hit);
   }
 
   destroy(): void {
@@ -434,6 +483,15 @@ export class ParallaxWorld {
   /**
    * Fills a continuous ridgeline silhouette sampled from world-space noise,
    * with optional shading mass, crest highlight, snow line and conifers.
+   *
+   * The vertices are anchored to a WORLD grid, never to screen positions.
+   * That distinction is the whole difference between terrain that glides and
+   * terrain that crawls: sampling a fixed set of screen x's re-evaluates the
+   * noise at a new world point every frame, so the polyline never translates —
+   * it MORPHS in place. Peaks pump up and down as they pass between samples
+   * and mesa terraces jump a full step at a time (measured: up to 29 px of
+   * vertical pop in one frame). Anchored to world space the same polyline
+   * simply slides left, with zero per-frame shape change.
    */
   private drawRidgeLayer(
     g: Phaser.GameObjects.Graphics,
@@ -449,10 +507,9 @@ export class ParallaxWorld {
       snow?: number; snowMin?: number; trees?: number;
     } = {},
   ): void {
-    const step = 14;
+    const step = 12;
     const sh = this.shape;
-    const heightAt = (sx: number): number => {
-      const wx = sx + scrollX * factor;
+    const heightAt = (wx: number): number => {
       const r = ridge(wx, seed) + (sh.roughness - 1) * 0.16 * Math.sin(wx * 0.021 + seed);
       const sharp = Math.sign(r) * Math.pow(Math.abs(r), 0.85); // peakier crests
       let h = Math.max(6, ampBase + sharp * ampVar);
@@ -465,12 +522,34 @@ export class ParallaxWorld {
       return Math.max(6, h);
     };
 
+    // One sampling pass, reused by every stroke below — the noise is four
+    // sines per point and the layer used to evaluate it five times over.
+    const off = scrollX * factor;
+    const i0 = Math.floor((off - 40) / step);
+    const i1 = Math.ceil((off + this.width + 40) / step);
+    const xs = this.rsX, hs = this.rsH;
+    xs.length = 0; hs.length = 0;
+    for (let i = i0; i <= i1; i++) {
+      xs.push(i * step - off);
+      hs.push(heightAt(i * step));
+    }
+    const n = xs.length;
+    if (n < 2) return;
+
+    /** Ridge height at an arbitrary screen x, read off the drawn polyline so
+     *  props planted on the surface sit exactly on it. */
+    const surfaceAt = (sx: number): number => {
+      const k = Phaser.Math.Clamp((sx - xs[0]) / step, 0, n - 1.0001);
+      const a = Math.floor(k);
+      return hs[a] + (hs[a + 1] - hs[a]) * (k - a);
+    };
+
     // Silhouette
     g.fillStyle(color, opts.alpha ?? 1);
     g.beginPath();
-    g.moveTo(-20, baseY + 60);
-    for (let sx = -20; sx <= this.width + 20; sx += step) g.lineTo(sx, baseY - heightAt(sx));
-    g.lineTo(this.width + 20, baseY + 60);
+    g.moveTo(xs[0], baseY + 60);
+    for (let i = 0; i < n; i++) g.lineTo(xs[i], baseY - hs[i]);
+    g.lineTo(xs[n - 1], baseY + 60);
     g.closePath();
     g.fillPath();
 
@@ -478,9 +557,9 @@ export class ParallaxWorld {
     if (opts.shade !== undefined) {
       g.fillStyle(opts.shade, 0.55);
       g.beginPath();
-      g.moveTo(-20, baseY + 60);
-      for (let sx = -20; sx <= this.width + 20; sx += step) g.lineTo(sx, baseY - heightAt(sx) * 0.55);
-      g.lineTo(this.width + 20, baseY + 60);
+      g.moveTo(xs[0], baseY + 60);
+      for (let i = 0; i < n; i++) g.lineTo(xs[i], baseY - hs[i] * 0.55);
+      g.lineTo(xs[n - 1], baseY + 60);
       g.closePath();
       g.fillPath();
     }
@@ -489,8 +568,8 @@ export class ParallaxWorld {
     if (opts.highlight !== undefined) {
       g.lineStyle(1.2, opts.highlight, 0.16 * this.dl + 0.04);
       g.beginPath();
-      g.moveTo(-20, baseY - heightAt(-20));
-      for (let sx = -20; sx <= this.width + 20; sx += step) g.lineTo(sx, baseY - heightAt(sx));
+      g.moveTo(xs[0], baseY - hs[0]);
+      for (let i = 1; i < n; i++) g.lineTo(xs[i], baseY - hs[i]);
       g.strokePath();
     }
 
@@ -498,11 +577,10 @@ export class ParallaxWorld {
     if (opts.snow !== undefined && opts.snowMin !== undefined) {
       g.lineStyle(2.6, opts.snow, 0.8);
       let open = false;
-      for (let sx = -20; sx <= this.width + 20; sx += step) {
-        const h = heightAt(sx);
-        if (h > opts.snowMin) {
-          if (!open) { g.beginPath(); g.moveTo(sx, baseY - h); open = true; }
-          else g.lineTo(sx, baseY - h);
+      for (let i = 0; i < n; i++) {
+        if (hs[i] > opts.snowMin) {
+          if (!open) { g.beginPath(); g.moveTo(xs[i], baseY - hs[i]); open = true; }
+          else g.lineTo(xs[i], baseY - hs[i]);
         } else if (open) { g.strokePath(); open = false; }
       }
       if (open) g.strokePath();
@@ -512,13 +590,13 @@ export class ParallaxWorld {
     // of it burned: a mix of live conifers and dead snags
     if (opts.trees !== undefined) {
       const spacing = 64;
-      const first = Math.floor((scrollX * factor - 40) / spacing);
+      const first = Math.floor((off - 40) / spacing);
       const density = Phaser.Math.Clamp(this.shape.trees, 0, 1);
       for (let i = first; i < first + Math.ceil(this.width / spacing) + 2; i++) {
         if (propRand(i + 400) > density) continue;
-        const sx = i * spacing + propRand(i) * 40 - scrollX * factor;
+        const sx = i * spacing + propRand(i) * 40 - off;
         if (sx < -20 || sx > this.width + 20) continue;
-        const ty = baseY - heightAt(sx);
+        const ty = baseY - surfaceAt(sx);
         const s = 0.7 + propRand(i + 77) * 0.8;
         if (propRand(i + 555) < 0.35) {
           // Burnt snag
@@ -536,10 +614,11 @@ export class ParallaxWorld {
   }
 
   /**
-   * A shambling figure — the reason every settlement has walls. Lurches
-   * forward with a dragging gait; `face` = which way it's stumbling.
+   * One of the dead, on the ground line. The anatomy, gait and archetype all
+   * live in Crowds — this just picks a variant from the position's own seed so
+   * a given patch of ground is populated the same way every flight.
    */
-  private drawShambler(
+  private drawWalker(
     g: Phaser.GameObjects.Graphics,
     x: number,
     groundLine: number,
@@ -547,28 +626,7 @@ export class ParallaxWorld {
     scale = 1,
     face: 1 | -1 = 1,
   ): void {
-    const s = scale;
-    const ph = i * 1.7;
-    const lean = (0.14 + Math.sin(this.t * 0.9 + ph) * 0.05) * face;
-    const step = Math.sin(this.t * 2.4 + ph);
-    const col = 0x110d07;
-
-    const hipX = x, hipY = groundLine - 8 * s;
-    g.lineStyle(1.8 * s, col, 0.95);
-    g.lineBetween(hipX, hipY, hipX + step * 3 * s, groundLine);
-    g.lineBetween(hipX, hipY, hipX - step * 2.4 * s, groundLine);
-
-    const shX = hipX + lean * 11 * s, shY = hipY - 7 * s;
-    g.lineStyle(2.4 * s, col, 0.95);
-    g.lineBetween(hipX, hipY, shX, shY);
-    g.fillStyle(col, 0.95);
-    g.fillCircle(shX + 1.5 * s * face, shY - 2.5 * s, 2.2 * s);
-
-    // Arms out, reaching
-    const armDrop = Math.sin(this.t * 1.8 + ph) * 1.6;
-    g.lineStyle(1.5 * s, col, 0.95);
-    g.lineBetween(shX, shY, shX + 6 * s * face, shY + 3 * s + armDrop);
-    g.lineBetween(shX, shY, shX + 5 * s * face, shY + 5.5 * s - armDrop);
+    drawUndead(g, x, groundLine, this.t, i, scale, face, undeadKindFor(i), this.crowdStyle);
   }
 
   /** Dead city blocks to overfly: broken towers with jagged tops, a leaning
@@ -721,34 +779,48 @@ export class ParallaxWorld {
     }
   }
 
+  /**
+   * Cloud strata stacked up through the sky at fixed world altitudes.
+   *
+   * Above ALT_BAND the aircraft holds a fixed screen position and the ground
+   * has long since dropped away, so without these there is NOTHING on screen
+   * that moves when you climb or descend — a 50 m glide changed only the
+   * number on the gauge. These layers slide vertically past you at every
+   * altitude, so gaining and losing height is always legible.
+   */
   private drawClouds(scrollX: number, alt: number): void {
     const g = this.cloudGfx;
     g.clear();
-    if (alt < 18) return;
 
-    const alpha = Math.min(alt / 75, 0.85) * 0.16;
-    // Screen height of the cloud layer, anchored to a real world altitude:
-    // below it they sit overhead, above it they fall away beneath you.
     const groundScreenY = this.groundY + Math.max(0, (alt - ALT_BAND) * this.pxPerM);
     const body = lerpColor(0x1e2632, 0xffffff, this.dl);           // night clouds go dark
     const shade = lerpColor(0x141a24, 0x9aa8b4, this.dl);
+    const hi = lerpColor(body, 0xffffff, 0.4);
 
-    const baseY = groundScreenY - CLOUD_LAYER_ALT_M * this.pxPerM;
-    if (baseY > this.height + 120) return;
-    for (let i = 0; i < this.cloudOffsets.length; i++) {
-      const span = this.width + 300;
-      const ox = ((this.cloudOffsets[i] - scrollX * 0.05) % span + span) % span - 150;
-      const oy = baseY + (i % 3) * 40;
-      const w = 80 + (i % 3) * 40;
-      // Shaded underside first, then the sunlit body
-      g.fillStyle(shade, alpha * 0.8);
-      g.fillEllipse(ox + 4, oy + 7, w * 0.95, 20);
-      g.fillStyle(body, alpha);
-      g.fillEllipse(ox, oy, w, 28);
-      g.fillEllipse(ox + 30, oy - 12, w * 0.7, 22);
-      g.fillEllipse(ox - 20, oy - 8, w * 0.5, 18);
-      g.fillStyle(lerpColor(body, 0xffffff, 0.4), alpha * 0.5);
-      g.fillEllipse(ox + 8, oy - 14, w * 0.4, 10);
+    for (let layer = 0; layer < CLOUD_LAYER_ALTS.length; layer++) {
+      const layerAlt = CLOUD_LAYER_ALTS[layer];
+      const baseY = groundScreenY - layerAlt * this.pxPerM;
+      if (baseY < -160 || baseY > this.height + 160) continue;
+
+      // Higher decks drift more slowly and thin out
+      const drift = 0.05 / (1 + layer * 0.5);
+      const alpha = 0.17 * (1 - layer * 0.11);
+      const seedOff = layer * 137;
+
+      for (let i = 0; i < this.cloudOffsets.length; i++) {
+        const span = this.width + 300;
+        const ox = ((this.cloudOffsets[i] + seedOff - scrollX * drift) % span + span) % span - 150;
+        const oy = baseY + ((i + layer) % 3) * 34;
+        const w = (80 + ((i + layer) % 3) * 40) * (1 - layer * 0.06);
+        g.fillStyle(shade, alpha * 0.8);
+        g.fillEllipse(ox + 4, oy + 7, w * 0.95, 20);
+        g.fillStyle(body, alpha);
+        g.fillEllipse(ox, oy, w, 28);
+        g.fillEllipse(ox + 30, oy - 12, w * 0.7, 22);
+        g.fillEllipse(ox - 20, oy - 8, w * 0.5, 18);
+        g.fillStyle(hi, alpha * 0.5);
+        g.fillEllipse(ox + 8, oy - 14, w * 0.4, 10);
+      }
     }
   }
 
@@ -830,7 +902,7 @@ export class ParallaxWorld {
           const face: 1 | -1 = propRand(i + 44) > 0.5 ? 1 : -1;
           for (let z = 0; z < n; z++) {
             const wander = Math.sin(this.t * 0.35 + i + z * 2.1) * 7;
-            this.drawShambler(g, sx + z * 12 * s + wander, baseY, i * 3 + z, 0.85 * s, face);
+            this.drawWalker(g, sx + z * 12 * s + wander, baseY, i * 3 + z, 0.85 * s, face);
           }
           break;
         }
@@ -909,9 +981,15 @@ export class ParallaxWorld {
         if (wx > zoneA[0] && wx < zoneA[1]) continue;
         if (wx > zoneB[0] && wx < zoneB[1]) continue;
         const sx = wx - scrollX;
-        if (sx < -30 || sx > this.width + 30) continue;
+        if (sx < -60 || sx > this.width + 60) continue;
         const face: 1 | -1 = propRand(c + 91) > 0.5 ? 1 : -1;
-        this.drawShambler(g, sx + Math.sin(this.t * 0.3 + c) * 9, gy + 1, c, 1.2, face);
+        // Usually one drifting alone; now and then a knot of them together,
+        // which is how they actually move once they have caught a scent.
+        const n = propRand(c + 205) > 0.62 ? 2 + Math.floor(propRand(c + 61) * 3) : 1;
+        for (let z = 0; z < n; z++) {
+          const wander = Math.sin(this.t * 0.3 + c + z * 1.9) * 9;
+          this.drawWalker(g, sx + z * 15 + wander, gy + 1, c * 5 + z, 1.15, face);
+        }
       }
     }
 
@@ -1016,22 +1094,76 @@ export class ParallaxWorld {
     g.fillRect(sx0 + dir * 60, gy - 20, dir * 6, 20); // gate post
     g.fillRect(sx0 + dir * 110, gy - 20, dir * 6, 20);
 
-    // Buildings
+    // ── Back row: smaller, hazier, sets the depth ──
+    for (let i = 0; i < 7; i++) {
+      const bx = sx0 + dir * (26 + i * 62) - dir * 18;
+      const bw = 34 + (i % 3) * 10;
+      const bh = 22 + propRand(i + 61) * 26;
+      g.fillStyle(lerpColor(dark, this.pal.skyBot, 0.28), 1);
+      g.fillRect(Math.min(bx, bx + dir * bw), gy - bh, bw, bh);
+    }
+
+    // ── Front row ──
     const heights = [34, 58, 26, 70, 42, 30];
     for (let i = 0; i < heights.length; i++) {
       const bx = sx0 + dir * (40 + i * 72);
       const bw = 46 + (i % 3) * 12;
       const bh = heights[i];
+      const left = Math.min(bx, bx + dir * bw);
       g.fillStyle(dark, 1);
-      g.fillRect(Math.min(bx, bx + dir * bw), gy - bh, bw, bh);
-      // Lit windows
-      g.fillStyle(0xd08a30, 0.8);
-      for (let wy = gy - bh + 8; wy < gy - 8; wy += 14) {
-        for (let wxo = 8; wxo < bw - 6; wxo += 14) {
+      g.fillRect(left, gy - bh, bw, bh);
+
+      // Roofline varies: pitched, flat with parapet, or a shed slope
+      const roof = Math.floor(propRand(i + 7) * 3);
+      if (roof === 0) {
+        g.fillTriangle(left - 3, gy - bh, left + bw / 2, gy - bh - 13, left + bw + 3, gy - bh);
+      } else if (roof === 1) {
+        g.fillRect(left - 2, gy - bh - 4, bw + 4, 4);
+      } else {
+        g.fillTriangle(left - 2, gy - bh, left + bw + 2, gy - bh - 10, left + bw + 2, gy - bh);
+      }
+
+      // Chimney with smoke drifting off it
+      if (propRand(i + 19) > 0.45) {
+        const chx = left + bw * 0.7;
+        g.fillStyle(dark, 1);
+        g.fillRect(chx, gy - bh - 14, 5, 14);
+        for (let s2 = 0; s2 < 4; s2++) {
+          const sway = Math.sin(this.t * 0.8 + s2 + i) * (2 + s2 * 2);
+          g.fillStyle(0x1c1812, 0.16 * (1 - s2 / 5));
+          g.fillEllipse(chx + 2 + sway - s2 * 2, gy - bh - 20 - s2 * 9, 9 + s2 * 4, 6 + s2 * 2);
+        }
+      }
+
+      // Lit windows + the warm spill they throw on the ground
+      let anyLit = false;
+      g.fillStyle(0xe0a040, 0.85);
+      for (let wy = gy - bh + 10; wy < gy - 8; wy += 14) {
+        for (let wxo = 7; wxo < bw - 6; wxo += 13) {
           if (propRand(i * 31 + wy + wxo) < 0.45) {
-            g.fillRect(Math.min(bx, bx + dir * bw) + wxo, wy, 4, 5);
+            g.fillRect(left + wxo, wy, 4.5, 5.5);
+            anyLit = true;
           }
         }
+      }
+      if (anyLit) {
+        const spill = 0.10 + (1 - this.dl) * 0.14;
+        g.fillStyle(0xe0a040, spill);
+        g.fillEllipse(left + bw / 2, gy + 1, bw * 1.5, 13);
+      }
+    }
+
+    // Watchtowers on the wall, with a light sweeping the approach at night
+    for (const wx of [sx0 + dir * 14, sx0 + dir * 430]) {
+      g.fillStyle(dark, 1);
+      g.fillRect(wx - 5, gy - 40, 10, 40);
+      g.fillRect(wx - 9, gy - 48, 18, 9);
+      if (this.dl < 0.6) {
+        const sweep = Math.sin(this.t * 0.5 + wx * 0.01);
+        g.fillStyle(0xffe8b0, 0.10 * (1 - this.dl));
+        g.fillTriangle(wx, gy - 44, wx - dir * 150, gy - 90 + sweep * 55, wx - dir * 150, gy - 30 + sweep * 55);
+        g.fillStyle(0xffe8b0, 0.85);
+        g.fillCircle(wx, gy - 44, 2);
       }
     }
 
@@ -1056,13 +1188,14 @@ export class ParallaxWorld {
       g.fillCircle(ax, gy - 90, 6);
     }
 
-    // Why the walls exist: a knot of the dead pressing at the perimeter
-    const hordeN = 4 + Math.floor(propRand(Math.round(anchorPx)) * 3);
-    for (let z = 0; z < hordeN; z++) {
-      const hx = sx0 - dir * (16 + z * 11 + propRand(z + 5) * 8);
-      const push = Math.abs(Math.sin(this.t * 1.1 + z)) * 3;
-      this.drawShambler(g, hx + dir * push, gy + 1, z * 7 + 3, 0.95 + propRand(z) * 0.25, dir);
-    }
+    // Why the walls exist: a press of the dead three deep at the perimeter,
+    // laid out in depth rows so it reads as a crowd with volume behind it.
+    // `spread` is a magnitude; the horde lays itself out along `-dir`, i.e.
+    // outside the wall, facing in toward the settlement.
+    drawHorde(
+      g, sx0 - dir * 16, gy + 1, -dir * 150, 15, this.t,
+      Math.round(anchorPx) * 7 + 3, this.crowdStyle, dir, 1.05,
+    );
 
     // Quarantine sign on the approach
     const qx = sx0 - dir * 150;

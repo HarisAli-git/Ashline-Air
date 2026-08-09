@@ -36,6 +36,10 @@ export interface GameEvents {
     stall: boolean;
     overspeed: boolean;
     obstacleAheadM: number | null;
+    /** Conflicting traffic's height minus ours, metres. Null when clear. */
+    trafficDeltaM: number | null;
+    /** Which way to go to miss it: +1 climb, -1 descend. */
+    trafficAvoid: 1 | -1 | null;
   };
 
   // Economy

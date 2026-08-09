@@ -34,7 +34,7 @@ export const TUNING = {
   CLmax: 1.45,              // stall happens here
   stallDrop: 0.62,          // fraction of lift lost once fully stalled
   inducedK: 0.07,           // induced-drag factor (k·CL²)
-  CD0: 0.075,               // parasitic drag — also sets max-speed thrust
+  CD0: 0.105,               // parasitic drag — also sets max-speed thrust
   flapsCL: 0.45,            // extra lift from flaps
   flapsCD: 0.028,           // and the drag that comes with it
   gearCD: 0.014,            // retractable gear hanging out
@@ -125,6 +125,7 @@ export class AircraftController {
       throttle: 0,
       pitch: 0,
       pitchRate: 0,
+      flightPathAngle: 0,
       speed: 0,
       groundSpeed: 0,
       altitude: 0,
@@ -174,11 +175,15 @@ export class AircraftController {
     if (input.throttleUp)   s.throttle = clamp(s.throttle + TUNING.throttleRate * dt, 0, 1);
     if (input.throttleDown) s.throttle = clamp(s.throttle - TUNING.throttleRate * dt, 0, 1);
     const effThrottle = input.engineOn && s.fuel > 0 ? s.throttle : 0;
-    const aT = effThrottle * this.tMax * (1 - s.engineTemp * 0.3);
+    const aT = effThrottle * this.tMax * (1 - s.engineTemp * 0.3)
+      * (1 - clamp(1 - s.integrity / 100, 0, 1) * 0.45);
 
     // ── Flight-path angle and angle of attack ─────────────────────────────
-    // On the wheels the aircraft can only travel along the runway.
-    const gamma = onGround ? 0 : Math.atan2(s.verticalSpeed, Math.max(2, s.speed));
+    // γ is integrated state, NOT re-derived from vertical speed: recomputing
+    // atan2(vs, v) every frame quietly flattens the path as speed builds,
+    // which caps dives and descents no matter how hard you push.
+    if (onGround) s.flightPathAngle = 0;   // the wheels hold you on the runway
+    const gamma = s.flightPathAngle;
     const alpha = s.pitch * DEG - gamma;
 
     // ── Wing: a real lift curve that stalls ───────────────────────────────
@@ -201,6 +206,12 @@ export class AircraftController {
     const alphaCrit = (clMax - TUNING.CL0 - flapCL) / TUNING.CLalpha;
     this.stallMargin = clamp(1 - alpha / Math.max(0.01, alphaCrit), 0, 1);
 
+    // Battle damage is not cosmetic: torn skin drags, a holed wing lifts
+    // worse, and a knocked-about engine gives less power.
+    const dmg = clamp(1 - s.integrity / 100, 0, 1);
+    const dmgDrag = 1 + dmg * 1.3;
+    const dmgLift = 1 - dmg * 0.35;
+
     const qK = this.K * s.speed * s.speed;   // ½ρV²S/m
 
     // Ground effect: induced drag falls away close to the runway, which is
@@ -214,8 +225,8 @@ export class AircraftController {
     if (s.gearDown && !this.gearFixed) CD += TUNING.gearCD;
     CD += stallT * 0.09;                     // separated flow is draggy
 
-    const aL = qK * CL;                      // lift acceleration
-    const aD = qK * CD * s.modifiers.dragMult;
+    const aL = qK * CL * dmgLift;            // lift acceleration
+    const aD = qK * CD * s.modifiers.dragMult * dmgDrag;
 
     // ── Pitch: driven, damped, statically stable ──────────────────────────
     // Stability restores toward the TRIM ANGLE OF ATTACK — the α that would
@@ -275,6 +286,8 @@ export class AircraftController {
       if (aL > GRAVITY) {
         s.verticalSpeed += (aL - GRAVITY) * dt;
         s.altitude = Math.max(0, s.altitude + s.verticalSpeed * dt);
+        // Hand a matching flight path to the airborne integrator
+        s.flightPathAngle = Math.atan2(s.verticalSpeed, Math.max(2, s.speed));
       } else {
         s.verticalSpeed = 0;
       }
@@ -289,7 +302,8 @@ export class AircraftController {
       // less than the weight component, the path bends downward. Always.
       const vSafe = Math.max(6, s.speed);
       const gammaDot = (aL + aT * Math.sin(alpha) - GRAVITY * Math.cos(gamma)) / vSafe;
-      const newGamma = clamp(gamma + gammaDot * dt, -1.3, 1.3);
+      const newGamma = clamp(gamma + gammaDot * dt, -1.35, 1.35);
+      s.flightPathAngle = newGamma;
 
       s.verticalSpeed = s.speed * Math.sin(newGamma);
       const wasAirborne = s.altitude > 0;

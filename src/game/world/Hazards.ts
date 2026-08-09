@@ -98,6 +98,9 @@ export class Hazards {
     return this.hostile.some(([a, b]) => worldX >= a && worldX <= b);
   }
 
+  /** The raider-held stretches, so their occupants can be placed inside them. */
+  get zones(): ReadonlyArray<[number, number]> { return this.hostile; }
+
   /** Distance to the start of the next hostile stretch, or null. */
   hostileAhead(worldX: number, rangePx: number): number | null {
     let best: number | null = null;
@@ -214,34 +217,4 @@ export class Hazards {
     }
   }
 
-  /** Tracer fire rising from a hostile stretch toward the aircraft. */
-  drawTracers(
-    g: Phaser.GameObjects.Graphics,
-    scrollX: number,
-    baseY: number,
-    planeX: number,
-    planeY: number,
-    t: number,
-    width: number,
-  ): void {
-    const originWorld = scrollX + planeX - 140;
-    for (let i = 0; i < 3; i++) {
-      const ox = originWorld + i * 90 - scrollX;
-      if (ox < -40 || ox > width + 40) continue;
-      // Muzzle flash on the ground
-      const flash = Math.sin(t * 22 + i * 2) > 0.55;
-      if (flash) {
-        g.fillStyle(0xffc040, 0.8);
-        g.fillCircle(ox, baseY - 6, 3);
-      }
-      // Tracer streaks climbing toward the aircraft
-      const phase = (t * 1.7 + i * 0.37) % 1;
-      const tx = Phaser.Math.Linear(ox, planeX, phase);
-      const ty = Phaser.Math.Linear(baseY - 6, planeY, phase);
-      const nx = Phaser.Math.Linear(ox, planeX, Math.max(0, phase - 0.07));
-      const ny = Phaser.Math.Linear(baseY - 6, planeY, Math.max(0, phase - 0.07));
-      g.lineStyle(2, 0xffd060, 0.85 * (1 - phase * 0.5));
-      g.lineBetween(nx, ny, tx, ty);
-    }
-  }
 }
