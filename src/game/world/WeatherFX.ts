@@ -41,6 +41,7 @@ export class WeatherFX {
   private readonly flash: Phaser.GameObjects.Rectangle;
   private readonly fogGfx: Phaser.GameObjects.Graphics;
   private readonly rain: Phaser.GameObjects.Particles.ParticleEmitter;
+  private readonly rainNear: Phaser.GameObjects.Particles.ParticleEmitter;
   private readonly dust: Phaser.GameObjects.Particles.ParticleEmitter;
   private readonly snow: Phaser.GameObjects.Particles.ParticleEmitter;
 
@@ -51,6 +52,9 @@ export class WeatherFX {
   private t = 0;
   private nextLightningIn = 4;
   private flashLeft = 0;
+  private boltGfx!: Phaser.GameObjects.Graphics;
+  private bolt: Array<[number, number]> = [];
+  private boltBranches: Array<Array<[number, number]>> = [];
 
   constructor(scene: Phaser.Scene, width: number, height: number) {
     this.scene = scene;
@@ -98,7 +102,24 @@ export class WeatherFX {
       emitting: false,
     }).setDepth(FX_DEPTH);
 
+    // Near sheet — bigger, faster, brighter: gives the rain real depth
+    this.rainNear = scene.add.particles(0, 0, 'px_streak', {
+      x: { min: -120, max: width + 120 },
+      y: -16,
+      lifespan: 900,
+      speedY: { min: 780, max: 950 },
+      speedX: { min: -110, max: -60 },
+      rotate: 76,
+      scaleX: 1.7,
+      scaleY: 0.8,
+      alpha: { start: 0.5, end: 0.2 },
+      tint: 0xc2d6e8,
+      frequency: 11,
+      emitting: false,
+    }).setDepth(FX_DEPTH + 0.4);
+
     this.fogGfx = scene.add.graphics().setDepth(FX_DEPTH);
+    this.boltGfx = scene.add.graphics().setDepth(FX_DEPTH + 0.55);
 
     this.overlay = scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0)
       .setDepth(FX_DEPTH + 0.5);
@@ -111,7 +132,8 @@ export class WeatherFX {
     this.current = FX[condition];
     this.blend = 0;
 
-    if (this.current.rain) this.rain.start(); else this.rain.stop();
+    if (this.current.rain) { this.rain.start(); this.rainNear.start(); }
+    else { this.rain.stop(); this.rainNear.stop(); }
     if (this.current.dust) this.dust.start(); else this.dust.stop();
     if (this.current.snow) this.snow.start(); else this.snow.stop();
   }
@@ -151,22 +173,70 @@ export class WeatherFX {
     if (this.current.lightning) {
       this.nextLightningIn -= dt;
       if (this.nextLightningIn <= 0) {
-        this.flashLeft = 0.1;
+        this.flashLeft = 0.16;
         this.nextLightningIn = 4 + Math.random() * 9;
         this.scene.cameras.main.shake(120, 0.003);
         SoundEngine.thunder();
+        this.strike();
       }
     }
     if (this.flashLeft > 0) {
       this.flashLeft -= dt;
-      this.flash.setFillStyle(0xffffff, Math.max(0, this.flashLeft / 0.1) * 0.3);
+      const k = Math.max(0, this.flashLeft / 0.16);
+      this.flash.setFillStyle(0xffffff, k * 0.26);
+      // Draw the bolt itself while the flash lasts
+      this.boltGfx.clear();
+      const a = Math.min(1, k * 1.6);
+      this.boltGfx.lineStyle(4.5, 0xffffff, a * 0.25);
+      this.strokePath(this.bolt);
+      this.boltGfx.lineStyle(1.8, 0xf2f6ff, a);
+      this.strokePath(this.bolt);
+      this.boltGfx.lineStyle(1, 0xdfe8ff, a * 0.7);
+      for (const b of this.boltBranches) this.strokePath(b);
     } else if (this.flash.fillAlpha > 0) {
       this.flash.setFillStyle(0xffffff, 0);
+      this.boltGfx.clear();
     }
   }
 
+  /** Build a jagged bolt with a couple of branches. */
+  private strike(): void {
+    const x0 = 80 + Math.random() * (this.width - 160);
+    const yEnd = this.height * (0.55 + Math.random() * 0.3);
+    this.bolt = [[x0, -10]];
+    let x = x0, y = -10;
+    while (y < yEnd) {
+      y += 18 + Math.random() * 26;
+      x += (Math.random() - 0.5) * 46;
+      this.bolt.push([x, y]);
+    }
+    this.boltBranches = [];
+    for (let b = 0; b < 2; b++) {
+      const i = 1 + Math.floor(Math.random() * Math.max(1, this.bolt.length - 2));
+      let [bx, by] = this.bolt[i];
+      const branch: Array<[number, number]> = [[bx, by]];
+      const dir = Math.random() < 0.5 ? -1 : 1;
+      for (let s = 0; s < 3; s++) {
+        bx += dir * (10 + Math.random() * 24);
+        by += 12 + Math.random() * 20;
+        branch.push([bx, by]);
+      }
+      this.boltBranches.push(branch);
+    }
+  }
+
+  private strokePath(pts: Array<[number, number]>): void {
+    if (pts.length < 2) return;
+    this.boltGfx.beginPath();
+    this.boltGfx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) this.boltGfx.lineTo(pts[i][0], pts[i][1]);
+    this.boltGfx.strokePath();
+  }
+
   destroy(): void {
+    this.boltGfx.destroy();
     this.rain.destroy();
+    this.rainNear.destroy();
     this.dust.destroy();
     this.snow.destroy();
     this.fogGfx.destroy();

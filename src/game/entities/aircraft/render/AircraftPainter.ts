@@ -455,12 +455,14 @@ export function ensureAircraftTextures(
     // Cooling gills
     for (let i = 0; i < 3; i++) p.line(-cl * 0.1 + i * 4, -ch * 0.3, -cl * 0.1 + i * 4, ch * 0.3, 0.8, 0x000000, 0.25);
     // Intake lip + spinner cone
-    p.circle(cl / 2 - 1, 0, ch * 0.32, 0x16140f, 1);              // intake shadow
-    p.strokeEllipse(cl / 2 - 1, 0, ch * 0.66, ch * 0.66, 1, mixHex(pal.metal, 0xffffff, 0.4), 0.7);
-    // Spinner cone, lit from above
-    p.tri(cl / 2, -4.0, cl / 2 + 9, 0, cl / 2, 4.0, mixHex(pal.accent, 0x000000, 0.25), 1);
-    p.tri(cl / 2, -4.0, cl / 2 + 9, 0, cl / 2, -0.4, mixHex(pal.accent, 0xffffff, 0.45), 1);
-    p.line(cl / 2 + 1, -2.4, cl / 2 + 6.5, -0.6, 1, 0xffffff, 0.5);
+    // Cowl mouth: a slim ring, not a big black disc (that read as a blob
+    // sitting behind the propeller)
+    p.strokeEllipse(cl / 2 - 1, 0, ch * 0.52, ch * 0.62, 1.6, 0x191610, 0.9);
+    p.ellipse(cl / 2 - 1, 0, ch * 0.34, ch * 0.44, 0x14120d, 0.75);
+    // Spinner: a narrow nose cone, lit from above
+    p.tri(cl / 2 - 1, -3.0, cl / 2 + 7, 0, cl / 2 - 1, 3.0, mixHex(pal.accent, 0x000000, 0.3), 1);
+    p.tri(cl / 2 - 1, -3.0, cl / 2 + 7, 0, cl / 2 - 1, -0.3, mixHex(pal.accent, 0xffffff, 0.5), 1);
+    p.line(cl / 2, -1.8, cl / 2 + 5, -0.5, 0.9, 0xffffff, 0.55);
     // Exhaust stack with a heat-stained mouth
     p.rrect(-cl * 0.30, ch * 0.40, 6.5, 3, 1.2, 0x2a231a, 1);
     p.rrect(-cl * 0.34, ch * 0.42, 2.6, 2.4, 1, 0x0d0b08, 1);
@@ -499,11 +501,24 @@ export function ensureAircraftTextures(
     p.line(2.8, gr.strutLen * 0.62, -1.5, gr.strutLen * 0.8, 1.2, pal.metal, 0.9);
   });
   bake(scene, k('wheel'), gr.wheelR * 2 + 4, gr.wheelR * 2 + 4, gr.wheelR + 2, gr.wheelR + 2, p => {
-    p.circle(0, 0, gr.wheelR, 0x1d1b18, 1);
-    p.strokeEllipse(0, 0, gr.wheelR * 2 - 1.6, gr.wheelR * 2 - 1.6, 0.8, 0x33302b, 1);
-    p.circle(0, 0, gr.wheelR * 0.45, pal.metal, 1);
-    p.circle(0, 0, gr.wheelR * 0.16, 0x14120e, 1);
-    p.line(0, -gr.wheelR * 0.4, 0, -gr.wheelR + 1, 1.2, 0x0c0b09, 0.9); // spin marker
+    const R = gr.wheelR;
+    p.circle(0, 0, R, 0x1d1b18, 1);                                  // tyre
+    // Tread blocks around the circumference — these are what actually read as
+    // rotation once the wheel is turning
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      const c = Math.cos(a), s = Math.sin(a);
+      p.line(c * R * 0.82, s * R * 0.82, c * (R - 0.4), s * (R - 0.4), 1.5, 0x35312b, 0.95);
+    }
+    p.strokeEllipse(0, 0, R * 2 - 1.4, R * 2 - 1.4, 0.8, 0x3c382f, 1);
+    // Hub with spokes
+    p.circle(0, 0, R * 0.52, mixHex(pal.metal, 0x000000, 0.25), 1);
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2;
+      p.line(0, 0, Math.cos(a) * R * 0.48, Math.sin(a) * R * 0.48, 1.3, mixHex(pal.metal, 0xffffff, 0.35), 0.95);
+    }
+    p.circle(0, 0, R * 0.2, 0x14120e, 1);                            // axle
+    p.circle(-R * 0.14, -R * 0.14, R * 0.08, 0xffffff, 0.35);        // hub glint
   });
   bake(scene, k('gearDoor'), 20, 6, 1, 1, p => {
     p.rrect(0, 0, 18, 4, 1.5, pal.hullShade, 1);

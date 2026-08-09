@@ -16,8 +16,12 @@ import { blendBiome, type BiomeId, type BiomeShape } from './Biomes';
 // the top of frame, at 10 m it is just off the deck. These are low-level
 // cargo runs, not airliner cruise.
 export const ALT_BAND = 70;
-/** World altitude (m) of the low cloud layer you climb through. */
-const CLOUD_LAYER_ALT_M = 150;
+/**
+ * World altitudes (m) of the stacked cloud decks. Spaced so at least one is
+ * always crossing the frame — they are the vertical motion reference once the
+ * ground has dropped out of sight.
+ */
+const CLOUD_LAYER_ALTS = [110, 190, 280, 385, 505, 650];
 export const PLANE_MIN_Y = 250;    // screen y the aircraft pins to above the band
 /** World px per metre flown — high so speed genuinely reads on screen. */
 export const WORLD_PX_PER_M = 9;
@@ -721,34 +725,48 @@ export class ParallaxWorld {
     }
   }
 
+  /**
+   * Cloud strata stacked up through the sky at fixed world altitudes.
+   *
+   * Above ALT_BAND the aircraft holds a fixed screen position and the ground
+   * has long since dropped away, so without these there is NOTHING on screen
+   * that moves when you climb or descend — a 50 m glide changed only the
+   * number on the gauge. These layers slide vertically past you at every
+   * altitude, so gaining and losing height is always legible.
+   */
   private drawClouds(scrollX: number, alt: number): void {
     const g = this.cloudGfx;
     g.clear();
-    if (alt < 18) return;
 
-    const alpha = Math.min(alt / 75, 0.85) * 0.16;
-    // Screen height of the cloud layer, anchored to a real world altitude:
-    // below it they sit overhead, above it they fall away beneath you.
     const groundScreenY = this.groundY + Math.max(0, (alt - ALT_BAND) * this.pxPerM);
     const body = lerpColor(0x1e2632, 0xffffff, this.dl);           // night clouds go dark
     const shade = lerpColor(0x141a24, 0x9aa8b4, this.dl);
+    const hi = lerpColor(body, 0xffffff, 0.4);
 
-    const baseY = groundScreenY - CLOUD_LAYER_ALT_M * this.pxPerM;
-    if (baseY > this.height + 120) return;
-    for (let i = 0; i < this.cloudOffsets.length; i++) {
-      const span = this.width + 300;
-      const ox = ((this.cloudOffsets[i] - scrollX * 0.05) % span + span) % span - 150;
-      const oy = baseY + (i % 3) * 40;
-      const w = 80 + (i % 3) * 40;
-      // Shaded underside first, then the sunlit body
-      g.fillStyle(shade, alpha * 0.8);
-      g.fillEllipse(ox + 4, oy + 7, w * 0.95, 20);
-      g.fillStyle(body, alpha);
-      g.fillEllipse(ox, oy, w, 28);
-      g.fillEllipse(ox + 30, oy - 12, w * 0.7, 22);
-      g.fillEllipse(ox - 20, oy - 8, w * 0.5, 18);
-      g.fillStyle(lerpColor(body, 0xffffff, 0.4), alpha * 0.5);
-      g.fillEllipse(ox + 8, oy - 14, w * 0.4, 10);
+    for (let layer = 0; layer < CLOUD_LAYER_ALTS.length; layer++) {
+      const layerAlt = CLOUD_LAYER_ALTS[layer];
+      const baseY = groundScreenY - layerAlt * this.pxPerM;
+      if (baseY < -160 || baseY > this.height + 160) continue;
+
+      // Higher decks drift more slowly and thin out
+      const drift = 0.05 / (1 + layer * 0.5);
+      const alpha = 0.17 * (1 - layer * 0.11);
+      const seedOff = layer * 137;
+
+      for (let i = 0; i < this.cloudOffsets.length; i++) {
+        const span = this.width + 300;
+        const ox = ((this.cloudOffsets[i] + seedOff - scrollX * drift) % span + span) % span - 150;
+        const oy = baseY + ((i + layer) % 3) * 34;
+        const w = (80 + ((i + layer) % 3) * 40) * (1 - layer * 0.06);
+        g.fillStyle(shade, alpha * 0.8);
+        g.fillEllipse(ox + 4, oy + 7, w * 0.95, 20);
+        g.fillStyle(body, alpha);
+        g.fillEllipse(ox, oy, w, 28);
+        g.fillEllipse(ox + 30, oy - 12, w * 0.7, 22);
+        g.fillEllipse(ox - 20, oy - 8, w * 0.5, 18);
+        g.fillStyle(hi, alpha * 0.5);
+        g.fillEllipse(ox + 8, oy - 14, w * 0.4, 10);
+      }
     }
   }
 
@@ -1016,22 +1034,76 @@ export class ParallaxWorld {
     g.fillRect(sx0 + dir * 60, gy - 20, dir * 6, 20); // gate post
     g.fillRect(sx0 + dir * 110, gy - 20, dir * 6, 20);
 
-    // Buildings
+    // ── Back row: smaller, hazier, sets the depth ──
+    for (let i = 0; i < 7; i++) {
+      const bx = sx0 + dir * (26 + i * 62) - dir * 18;
+      const bw = 34 + (i % 3) * 10;
+      const bh = 22 + propRand(i + 61) * 26;
+      g.fillStyle(lerpColor(dark, this.pal.skyBot, 0.28), 1);
+      g.fillRect(Math.min(bx, bx + dir * bw), gy - bh, bw, bh);
+    }
+
+    // ── Front row ──
     const heights = [34, 58, 26, 70, 42, 30];
     for (let i = 0; i < heights.length; i++) {
       const bx = sx0 + dir * (40 + i * 72);
       const bw = 46 + (i % 3) * 12;
       const bh = heights[i];
+      const left = Math.min(bx, bx + dir * bw);
       g.fillStyle(dark, 1);
-      g.fillRect(Math.min(bx, bx + dir * bw), gy - bh, bw, bh);
-      // Lit windows
-      g.fillStyle(0xd08a30, 0.8);
-      for (let wy = gy - bh + 8; wy < gy - 8; wy += 14) {
-        for (let wxo = 8; wxo < bw - 6; wxo += 14) {
+      g.fillRect(left, gy - bh, bw, bh);
+
+      // Roofline varies: pitched, flat with parapet, or a shed slope
+      const roof = Math.floor(propRand(i + 7) * 3);
+      if (roof === 0) {
+        g.fillTriangle(left - 3, gy - bh, left + bw / 2, gy - bh - 13, left + bw + 3, gy - bh);
+      } else if (roof === 1) {
+        g.fillRect(left - 2, gy - bh - 4, bw + 4, 4);
+      } else {
+        g.fillTriangle(left - 2, gy - bh, left + bw + 2, gy - bh - 10, left + bw + 2, gy - bh);
+      }
+
+      // Chimney with smoke drifting off it
+      if (propRand(i + 19) > 0.45) {
+        const chx = left + bw * 0.7;
+        g.fillStyle(dark, 1);
+        g.fillRect(chx, gy - bh - 14, 5, 14);
+        for (let s2 = 0; s2 < 4; s2++) {
+          const sway = Math.sin(this.t * 0.8 + s2 + i) * (2 + s2 * 2);
+          g.fillStyle(0x1c1812, 0.16 * (1 - s2 / 5));
+          g.fillEllipse(chx + 2 + sway - s2 * 2, gy - bh - 20 - s2 * 9, 9 + s2 * 4, 6 + s2 * 2);
+        }
+      }
+
+      // Lit windows + the warm spill they throw on the ground
+      let anyLit = false;
+      g.fillStyle(0xe0a040, 0.85);
+      for (let wy = gy - bh + 10; wy < gy - 8; wy += 14) {
+        for (let wxo = 7; wxo < bw - 6; wxo += 13) {
           if (propRand(i * 31 + wy + wxo) < 0.45) {
-            g.fillRect(Math.min(bx, bx + dir * bw) + wxo, wy, 4, 5);
+            g.fillRect(left + wxo, wy, 4.5, 5.5);
+            anyLit = true;
           }
         }
+      }
+      if (anyLit) {
+        const spill = 0.10 + (1 - this.dl) * 0.14;
+        g.fillStyle(0xe0a040, spill);
+        g.fillEllipse(left + bw / 2, gy + 1, bw * 1.5, 13);
+      }
+    }
+
+    // Watchtowers on the wall, with a light sweeping the approach at night
+    for (const wx of [sx0 + dir * 14, sx0 + dir * 430]) {
+      g.fillStyle(dark, 1);
+      g.fillRect(wx - 5, gy - 40, 10, 40);
+      g.fillRect(wx - 9, gy - 48, 18, 9);
+      if (this.dl < 0.6) {
+        const sweep = Math.sin(this.t * 0.5 + wx * 0.01);
+        g.fillStyle(0xffe8b0, 0.10 * (1 - this.dl));
+        g.fillTriangle(wx, gy - 44, wx - dir * 150, gy - 90 + sweep * 55, wx - dir * 150, gy - 30 + sweep * 55);
+        g.fillStyle(0xffe8b0, 0.85);
+        g.fillCircle(wx, gy - 44, 2);
       }
     }
 
