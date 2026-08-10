@@ -60,6 +60,8 @@ export class AircraftSprite {
   private readonly legs: GearLeg[] = [];
   private readonly flapImg: Phaser.GameObjects.Image;
   private readonly damageImg: Phaser.GameObjects.Image;
+  /** Kept so the crash sequence can tear it off. */
+  private wingNearImg!: Phaser.GameObjects.Image;
   private readonly beaconCore: Phaser.GameObjects.Image;
   private readonly beaconGlow: Phaser.GameObjects.Image;
   private readonly lightCone: Phaser.GameObjects.Graphics;
@@ -143,7 +145,7 @@ export class AircraftSprite {
       }
     }
 
-    img(this.tex.wingNear);
+    this.wingNearImg = img(this.tex.wingNear);
 
     const hinge = flapHinge(spec);
     this.flapImg = scene.add.image(hinge.x, hinge.y, this.tex.flap)
@@ -163,6 +165,20 @@ export class AircraftSprite {
       .setScale(0.6).setTint(0xff3820).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0);
     this.beaconCore = img('px_soft', spec.beacon.x, spec.beacon.y)
       .setScale(0.18).setTint(0xffd0c0).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0);
+  }
+
+  /** Texture keys, so the crash sequence can spawn matching debris. */
+  get textureKeys(): AircraftTexKeys { return this.tex; }
+
+  /**
+   * The airframe loses the parts that visibly come off in a wreck. The pieces
+   * themselves are spawned by CrashSequence in scene space so they can tumble
+   * independently of the container.
+   */
+  shedParts(): void {
+    this.wingNearImg.setVisible(false);
+    for (const p of this.props) p.root.setVisible(false);
+    this.flapImg.setVisible(false);
   }
 
   // ── Construction helpers ───────────────────────────────────────────────────
@@ -285,6 +301,12 @@ export class AircraftSprite {
   /** Persistent fuel-mist trail from the wing (fuel-leak event). */
   setFuelLeak(on: boolean): void {
     this.particles?.setFuelLeak(on);
+  }
+
+  /** A round connected — sparks off the airframe where it went in. */
+  notifyHit(): void {
+    const p = this.localToScene(this.spec.wing.rootX - 6, this.spec.wing.y);
+    this.particles?.hit(p.x, p.y);
   }
 
   /** Weather turbulence 0–1: the airframe visibly rocks and jolts with it. */

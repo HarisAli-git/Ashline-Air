@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { AircraftController, type FlightInput } from '../entities/aircraft/AircraftController';
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
+import { CrashSequence } from '../entities/aircraft/CrashSequence';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
 import { biomeFor } from '../world/Biomes';
@@ -9,7 +10,7 @@ import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
 import { CargoHold } from '../entities/CargoHold';
 import { EventBus } from '../utils/EventBus';
-import { fadeIn, fadeToScene, flashToScene } from '../utils/transitions';
+import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
 import { clamp, distance, pixelsToKm } from '../utils/math';
@@ -38,6 +39,8 @@ export class FlightScene extends Phaser.Scene {
   private world!: ParallaxWorld;
   private fx!: WeatherFX;
   private aircraft!: AircraftSprite;
+  private crash!: CrashSequence;
+  private crashing = false;
   private engineRunning = true;
 
   // ── In-canvas HUD (approach guidance only — gauges live in React) ────────
@@ -101,6 +104,7 @@ export class FlightScene extends Phaser.Scene {
   init(data: FlightSceneData): void {
     this.contractId          = data.contractId;
     this.landed              = false;
+    this.crashing            = false;
     this.hasBeenAirborne     = false;
     this.scrollX             = 0;
     this.smoothDt            = 1 / 60;
@@ -196,6 +200,7 @@ export class FlightScene extends Phaser.Scene {
     const faction = window.gameData.factions.find(f => f.id === destSettlement?.factionId);
     if (faction) this.world.setFactionColor(parseInt(faction.color.replace('#', ''), 16));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
+    this.crash    = new CrashSequence(this, this.aircraft, groundY);
     this.fx       = new WeatherFX(this, width, height);
 
     // ── In-canvas approach indicator ──────────────────────────────────────
@@ -264,6 +269,7 @@ export class FlightScene extends Phaser.Scene {
       this.eventUnsubs.forEach(u => u());
       this.eventUnsubs = [];
       SoundEngine.stopFlightLoop();
+      this.crash.destroy();
     });
     SoundEngine.unlock();
     SoundEngine.stopAmbient();
@@ -283,6 +289,7 @@ export class FlightScene extends Phaser.Scene {
   // ── Main loop ─────────────────────────────────────────────────────────────
 
   update(time: number, delta: number): void {
+    if (this.crashing) { this.updateCrashSlide(delta / 1000); return; }
     if (this.landed || this.eventModalOpen) return;
 
     // Browsers hand out jittery frame deltas — ±2 ms is normal even on a
@@ -576,6 +583,32 @@ export class FlightScene extends Phaser.Scene {
     EventBus.emit('flight:state-update', this.state);
   }
 
+  /**
+   * While the wreck is tumbling: no physics, no input, but the world keeps
+   * scrolling — decelerating with the wreckage — so the crash reads as coming
+   * to a stop rather than the whole scene freezing at the moment of impact.
+   */
+  private updateCrashSlide(dt: number): void {
+    const sdt = Math.min(dt, 0.05);
+    this.crash.update(sdt);
+    this.scrollX += this.crash.slideSpeed() * sdt * WORLD_PX_PER_M;
+    this.world.update(sdt, {
+      scrollX: this.scrollX,
+      altitude: 0,
+      windX: 0,
+      routeTotalKm: this.routeKm,
+      condition: this.weather.current.condition,
+      minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
+      visibility: this.weather.current.visibility,
+      planeScreenX: AIRCRAFT_X,
+      planeScreenY: this.world.altitudeToScreenY(0),
+      planeWorldX: this.scrollX + AIRCRAFT_X,
+      speedFrac: 0,
+      progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
+    });
+    this.fx.update(sdt);
+  }
+
   /** True when the given world position is on either airfield's asphalt. */
   private isOnRunway(worldX: number): boolean {
     const PXM = WORLD_PX_PER_M;
@@ -675,6 +708,7 @@ export class FlightScene extends Phaser.Scene {
     if (fire.shots > 0) SoundEngine.gunfire();
     if (fire.hit) {
       SoundEngine.bulletHit();
+      this.aircraft.notifyHit();
       this.state.integrity = clamp(this.state.integrity - fire.damage, 0, 100);
       this.cameras.main.shake(120, 0.004 + Math.min(0.006, fire.damage * 0.0012));
       if (Math.random() < 0.2) this.cargo.applyDamage(4);
@@ -995,12 +1029,38 @@ export class FlightScene extends Phaser.Scene {
       reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
       landedOnRunway: this.isOnRunway(this.scrollX + AIRCRAFT_X),
     };
-    if (result.quality === 'crash') SoundEngine.crash(); else SoundEngine.chime();
-    if (result.quality === 'crash') {
-      flashToScene(this, 'PostFlightScene', data);
-    } else {
+    if (result.quality !== 'crash') {
+      SoundEngine.chime();
       fadeToScene(this, 'PostFlightScene', data);
+      return;
     }
+
+    // A crash is the one moment of the flight worth watching. Play it out —
+    // impact, break-up, cartwheel, burning wreck — and only then show the
+    // report. `crashing` keeps update() alive so the world still scrolls to a
+    // stop underneath the wreckage instead of freezing mid-slide.
+    this.crashing = true;
+    SoundEngine.stopFlightLoop();
+    // Silence the panel: nothing is overspeeding or being shot at any more,
+    // and leaving "CLIMB 340 m" flashing over a burning wreck is absurd.
+    this.groundThreat = null;
+    this.trafficAdvisory = null;
+    EventBus.emit('flight:status', {
+      engineFailed: false, underFire: false, groundThreat: null, stall: false,
+      overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
+    });
+    this.state.speed = 0;
+    this.state.verticalSpeed = 0;
+    this.state.throttle = 0;
+    EventBus.emit('flight:state-update', this.state);
+    this.crash.play(
+      {
+        speed: this.state.speed,
+        verticalSpeed: Math.abs(result.verticalSpeed),
+        gearUp: !this.state.gearDown,
+      },
+      () => fadeToScene(this, 'PostFlightScene', data),
+    );
   }
 
   /** Grades the landing from the impact values captured at touchdown. */

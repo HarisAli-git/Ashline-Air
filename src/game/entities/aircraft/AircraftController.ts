@@ -32,19 +32,38 @@ export const TUNING = {
   CL0: 0.25,                // lift coefficient at zero angle of attack
   CLalpha: 5.0,             // lift-curve slope, per radian
   CLmax: 1.45,              // stall happens here
-  stallDrop: 0.62,          // fraction of lift lost once fully stalled
+  stallDrop: 0.78,          // fraction of lift lost once fully stalled
+  stallWidth: 11 * DEG,     // AoA past the critical angle to a full stall
+  stallCD: 0.22,            // extra drag from a fully separated wing
   inducedK: 0.07,           // induced-drag factor (k·CL²)
   CD0: 0.105,               // parasitic drag — also sets max-speed thrust
+  idleDragCD: 0.024,        // windmilling prop at zero throttle: a real brake
   flapsCL: 0.45,            // extra lift from flaps
   flapsCD: 0.028,           // and the drag that comes with it
   gearCD: 0.014,            // retractable gear hanging out
   groundEffect: 0.55,       // induced drag retained at zero height (float)
+  /**
+   * The thin-aerofoil curve is fiction past these incidences. Clamping keeps
+   * the post-stall regime bounded — unclamped, a stall break ran the angle of
+   * attack to 58°, where CL = CL0 + 5α means nothing at all.
+   */
+  alphaAeroMax: 42 * DEG,
+  alphaAeroMin: -22 * DEG,
 
   // ── Pitch: a driven, damped, self-stabilising airframe ──
   controlPower: 78,         // elevator moment, deg/s² at cruise
   pitchStability: 3.4,      // restoring moment toward the trim ANGLE OF ATTACK
   pitchDamping: 2.8,        // pitch-rate damping
+  stallPitchDamp: 3.0,      // extra damping in the stall — stops porpoising
+  stallNoseDown: 54,        // deg/s² nose-down once fully stalled
   maxPitchRate: 65,         // deg/s clamp
+  pitchMin: -38,            // airborne nose-down limit; a stall break needs room
+
+  /**
+   * Trim speed at idle, as a multiple of the stall speed. The trim slides
+   * between this and cruise with the throttle — see the trim block in step().
+   */
+  trimLowFactor: 1.55,
 
   // ── Ground ──
   rollingFriction: 0.45,    // m/s² rolling resistance
@@ -184,18 +203,22 @@ export class AircraftController {
     // which caps dives and descents no matter how hard you push.
     if (onGround) s.flightPathAngle = 0;   // the wheels hold you on the runway
     const gamma = s.flightPathAngle;
-    const alpha = s.pitch * DEG - gamma;
+    const alpha = clamp(s.pitch * DEG - gamma, TUNING.alphaAeroMin, TUNING.alphaAeroMax);
 
-    // ── Wing: a real lift curve that stalls ───────────────────────────────
+    // ── Wing: linear to the break, then a genuine collapse ────────────────
     const flapCL = s.flapsDeployed ? TUNING.flapsCL : 0;
     const clMax = TUNING.CLmax + flapCL;
-    const clLinear = TUNING.CL0 + flapCL + TUNING.CLalpha * alpha;
+    const alphaCrit = (clMax - TUNING.CL0 - flapCL) / TUNING.CLalpha;
 
     let stallT = 0;
-    let CL = clLinear;
-    if (clLinear > clMax) {
-      // Past the critical angle the wing gives up — this IS the stall
-      stallT = clamp((clLinear - clMax) / (clMax * 0.55), 0, 1);
+    let CL: number;
+    if (alpha <= alphaCrit) {
+      CL = TUNING.CL0 + flapCL + TUNING.CLalpha * alpha;
+    } else {
+      // Past the critical ANGLE the wing gives up — this IS the stall, and it
+      // is keyed off α rather than a runaway linear CL so the collapse is
+      // bounded and the drag penalty below can be trusted.
+      stallT = clamp((alpha - alphaCrit) / TUNING.stallWidth, 0, 1);
       CL = clMax * (1 - TUNING.stallDrop * stallT);
     }
     CL = clamp(CL, -1.0, clMax);
@@ -203,7 +226,6 @@ export class AircraftController {
     // How close the wing is to letting go — this is what the warning horn
     // should track, NOT raw airspeed. You can be slow and perfectly happy,
     // and you can stall at speed by hauling the nose up.
-    const alphaCrit = (clMax - TUNING.CL0 - flapCL) / TUNING.CLalpha;
     this.stallMargin = clamp(1 - alpha / Math.max(0.01, alphaCrit), 0, 1);
 
     // Battle damage is not cosmetic: torn skin drags, a holed wing lifts
@@ -223,7 +245,10 @@ export class AircraftController {
     let CD = TUNING.CD0 + induced;
     if (s.flapsDeployed) CD += TUNING.flapsCD;
     if (s.gearDown && !this.gearFixed) CD += TUNING.gearCD;
-    CD += stallT * 0.09;                     // separated flow is draggy
+    CD += stallT * TUNING.stallCD;           // separated flow: nearly a barn door
+    // A prop turning at idle is a disc of drag, not a free-wheeling fan. This
+    // is most of what makes chopping the throttle actually slow you down.
+    CD += TUNING.idleDragCD * (1 - effThrottle);
 
     const aL = qK * CL * dmgLift;            // lift acceleration
     const aD = qK * CD * s.modifiers.dragMult * dmgDrag;
@@ -237,16 +262,26 @@ export class AircraftController {
     const elevator = onGround ? clamp(s.speed / Math.max(1, rotateAt), 0, 1) : 1;
     const qNorm = clamp((s.speed / this.vCruise) ** 2, 0.1, 1.7);
 
-    // Trim holds a SPEED, not an altitude. This is the classic relationship —
-    // pitch sets airspeed, power sets climb. Trimming for level flight at
-    // whatever speed you happen to have makes the aeroplane fight to keep its
-    // height with no engine, which is precisely the "it never comes down" bug.
-    // Flaps out means you are configured for the approach, so it trims slower.
-    const vTrim = s.flapsDeployed ? this.vStall * 1.35 : this.vCruise;
+    // Trim holds a SPEED, not an altitude — pitch sets airspeed, power sets
+    // climb — and the trimmed speed FOLLOWS THE POWER LEVER.
+    //
+    // That second half matters as much as the first. A real pilot re-trims
+    // when the power changes; with no trim wheel in the game the aeroplane has
+    // to do it. Pinned at cruise regardless of throttle, the trim simply dived
+    // to hold cruise speed no matter what: measured across the whole throttle
+    // range, settled airspeed was 126–130 km/h at 0% AND at 100%. The lever
+    // did nothing to speed, which is exactly the "reducing throttle doesn't
+    // slow me down, even with the engine off" complaint. Sliding the trim
+    // between a slow setting at idle and cruise at full power gives 92 km/h at
+    // idle and 128 at full, with level flight around half throttle.
+    const vTrimLow = this.vStall * TUNING.trimLowFactor;
+    const vTrim = s.flapsDeployed
+      ? vTrimLow                                   // configured for the approach
+      : vTrimLow + (this.vCruise - vTrimLow) * effThrottle;
     const clForLevel = clamp(GRAVITY / (this.K * vTrim * vTrim), 0, clMax);
     const alphaTrim = clamp(
       (clForLevel - TUNING.CL0 - flapCL) / TUNING.CLalpha,
-      -6 * DEG, (clMax - TUNING.CL0 - flapCL) / TUNING.CLalpha,
+      -6 * DEG, alphaCrit,
     );
     const pitchTrimDeg = onGround ? 0 : (gamma + alphaTrim) / DEG;
 
@@ -255,17 +290,19 @@ export class AircraftController {
     const stabilityMoment = (pitchTrimDeg - s.pitch) * TUNING.pitchStability * qNorm;
 
     s.pitchRate += (controlMoment + stabilityMoment) * dt;
-    s.pitchRate *= Math.exp(-dt * TUNING.pitchDamping);
+    // Extra damping while stalled: without it the aircraft porpoises between
+    // +35° and −26° indefinitely instead of breaking and recovering.
+    s.pitchRate *= Math.exp(-dt * (TUNING.pitchDamping + TUNING.stallPitchDamp * stallT));
 
     if (stallT > 0) {
       // A stalled wing drops its nose — that is how you recover
-      s.pitchRate -= 26 * stallT * dt;
+      s.pitchRate -= TUNING.stallNoseDown * stallT * dt;
       this.onBuffet?.(stallT);
     }
 
     s.pitchRate = clamp(s.pitchRate, -TUNING.maxPitchRate, TUNING.maxPitchRate);
     s.pitch += s.pitchRate * dt;
-    const lo = onGround ? -4 : -35;
+    const lo = onGround ? -4 : TUNING.pitchMin;
     const hi = onGround ? 16 : 35;
     if (s.pitch < lo || s.pitch > hi) {
       s.pitch = clamp(s.pitch, lo, hi);

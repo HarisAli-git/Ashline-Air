@@ -15,11 +15,14 @@ export class AircraftParticles {
   private readonly burst: Phaser.GameObjects.Particles.ParticleEmitter;
 
   private readonly fuelMist: Phaser.GameObjects.Particles.ParticleEmitter;
+  private readonly damageSmoke: Phaser.GameObjects.Particles.ParticleEmitter;
+  private readonly hitSparks: Phaser.GameObjects.Particles.ParticleEmitter;
 
   private exhaustOn = false;
   private fireOn = false;
   private rollOn = false;
   private leakOn = false;
+  private smokeOn = false;
 
   private readonly spec: AircraftVisualSpec;
 
@@ -91,6 +94,39 @@ export class AircraftParticles {
       frequency: 30,
       emitting: false,
     });
+
+    // Battle damage you can see from outside: a trail that starts as a wisp
+    // around 70% integrity and becomes a black plume as the airframe is chewed
+    // apart. Continuous, not a threshold — the aircraft should look progres-
+    // sively worse rather than flipping into "damaged" at one magic number.
+    this.damageSmoke = scene.add.particles(0, 0, 'px_soft', {
+      lifespan: { min: 700, max: 1600 },
+      speedX: { min: -190, max: -90 },
+      speedY: { min: -26, max: 8 },
+      scale: { start: 0.18, end: 1.5 },
+      alpha: { start: 0.5, end: 0 },
+      tint: 0x2a2620,
+      frequency: 60,
+      emitting: false,
+    });
+
+    // Struck-by-gunfire sparks, fired as one-shots from the hit point
+    this.hitSparks = scene.add.particles(0, 0, 'px_streak', {
+      lifespan: { min: 180, max: 420 },
+      speedX: { min: -320, max: -40 },
+      speedY: { min: -120, max: 120 },
+      scale: { start: 0.6, end: 0.1 },
+      alpha: { start: 1, end: 0 },
+      tint: [0xffe090, 0xffa030],
+      gravityY: 260,
+      blendMode: Phaser.BlendModes.ADD,
+      emitting: false,
+    });
+  }
+
+  /** A round went home — throw sparks and a puff off the airframe. */
+  hit(x: number, y: number): void {
+    this.hitSparks.explode(9, x, y);
   }
 
   /** Persistent thin mist streaming off the wing after a fuel-leak event. */
@@ -124,8 +160,24 @@ export class AircraftParticles {
       this.exhaust.particleTint = distress ? 0x26221c : 0x554e42;
     }
 
-    // Engine fire below 20% integrity
-    const wantFire = state.integrity < 20;
+    // Damage smoke: a wisp from 70% down to a black plume near destruction
+    const hurt = Phaser.Math.Clamp((70 - state.integrity) / 62, 0, 1);
+    const wantSmoke = hurt > 0.02;
+    if (wantSmoke !== this.smokeOn) {
+      this.smokeOn = wantSmoke;
+      if (wantSmoke) this.damageSmoke.start(); else this.damageSmoke.stop();
+    }
+    if (wantSmoke) {
+      const e1 = this.spec.engines[0];
+      const [sx2, sy2] = at(e1.x - e1.cowlLen * 0.2, e1.y + 1);
+      this.damageSmoke.setPosition(sx2, sy2);
+      this.damageSmoke.frequency = Phaser.Math.Linear(150, 14, hurt);
+      this.damageSmoke.particleTint = hurt > 0.6 ? 0x14120e : 0x3a352c;
+      this.damageSmoke.setParticleAlpha({ start: 0.22 + hurt * 0.45, end: 0 });
+    }
+
+    // Engine fire once it is genuinely coming apart
+    const wantFire = state.integrity < 25;
     if (wantFire !== this.fireOn) {
       this.fireOn = wantFire;
       if (wantFire) { this.fire.start(); this.embers.start(); }
@@ -170,5 +222,7 @@ export class AircraftParticles {
     this.rollDust.destroy();
     this.burst.destroy();
     this.fuelMist.destroy();
+    this.damageSmoke.destroy();
+    this.hitSparks.destroy();
   }
 }
