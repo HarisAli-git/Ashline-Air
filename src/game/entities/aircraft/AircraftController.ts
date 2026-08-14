@@ -37,7 +37,7 @@ export const TUNING = {
   stallCD: 0.22,            // extra drag from a fully separated wing
   inducedK: 0.07,           // induced-drag factor (k·CL²)
   CD0: 0.105,               // parasitic drag — also sets max-speed thrust
-  idleDragCD: 0.024,        // windmilling prop at zero throttle: a real brake
+  idleDragCD: 0.055,        // windmilling prop at zero throttle: a real brake
   flapsCL: 0.45,            // extra lift from flaps
   flapsCD: 0.028,           // and the drag that comes with it
   gearCD: 0.014,            // retractable gear hanging out
@@ -58,6 +58,13 @@ export const TUNING = {
   stallNoseDown: 54,        // deg/s² nose-down once fully stalled
   maxPitchRate: 65,         // deg/s clamp
   pitchMin: -38,            // airborne nose-down limit; a stall break needs room
+  /**
+   * Pitch disturbance that grows as the aircraft slows below flying speed.
+   * Down there it stops flying and starts wallowing: the controls go soft
+   * (elevator authority already scales with dynamic pressure) and the nose
+   * wanders on its own until power is restored.
+   */
+  wallow: 240,
 
   /**
    * Trim speed at idle, as a multiple of the stall speed. The trim slides
@@ -120,6 +127,8 @@ export class AircraftController {
   stallIntensity = 0;
   /** Margin above the stall angle, 1 = plenty, 0 = about to let go. */
   stallMargin = 1;
+  /** 0 = normal control, 1 = wallowing below flying speed. Read by the HUD. */
+  controlSlack = 0;
 
   constructor(definition: AircraftDefinition) {
     this.def = definition;
@@ -283,7 +292,25 @@ export class AircraftController {
       (clForLevel - TUNING.CL0 - flapCL) / TUNING.CLalpha,
       -6 * DEG, alphaCrit,
     );
-    const pitchTrimDeg = onGround ? 0 : (gamma + alphaTrim) / DEG;
+
+    // …and it trims onto the flight path THE CURRENT POWER CAN SUSTAIN, not
+    // onto whatever path we happen to be on.
+    //
+    // This is the other half of "chop the throttle and come down". Trimming to
+    // `gamma` gave the aeroplane no opinion about whether that path was
+    // payable: with the engine at idle it kept trying to hold whatever it had,
+    // pitched UP to chase the slower trim speed, and ballooned — measured as
+    // five seconds of CLIMB after the throttle was closed, and only 65 m lost
+    // in twenty seconds. Solving the sustainable angle from thrust minus drag
+    // puts the nose down the instant the power comes off: 120 m in the same
+    // twenty seconds, sinking from the first second.
+    const qTrim = this.K * vTrim * vTrim;
+    let cdTrim = TUNING.CD0 + TUNING.inducedK * clForLevel * clForLevel
+      + TUNING.idleDragCD * (1 - effThrottle);
+    if (s.flapsDeployed) cdTrim += TUNING.flapsCD;
+    if (s.gearDown && !this.gearFixed) cdTrim += TUNING.gearCD;
+    const gammaTrim = Math.asin(clamp((aT - qTrim * cdTrim) / GRAVITY, -0.62, 0.42));
+    const pitchTrimDeg = onGround ? 0 : (gammaTrim + alphaTrim) / DEG;
 
     const command = (input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0);
     const controlMoment = command * TUNING.controlPower * qNorm * elevator;
@@ -298,6 +325,15 @@ export class AircraftController {
       // A stalled wing drops its nose — that is how you recover
       s.pitchRate -= TUNING.stallNoseDown * stallT * dt;
       this.onBuffet?.(stallT);
+    }
+
+    // Below flying speed it wallows: the elevator has almost no dynamic
+    // pressure to work with and the nose wanders on its own. You are a
+    // passenger until you put the power back on.
+    const slack = clamp(1 - s.speed / (this.vStall * 1.25), 0, 1);
+    this.controlSlack = onGround ? 0 : slack;
+    if (slack > 0 && !onGround) {
+      s.pitchRate += (Math.random() - 0.5) * TUNING.wallow * slack * dt;
     }
 
     s.pitchRate = clamp(s.pitchRate, -TUNING.maxPitchRate, TUNING.maxPitchRate);
