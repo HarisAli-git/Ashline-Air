@@ -29,6 +29,12 @@ export interface FlightState {
 export interface FlightModifiers {
   fuelBurnMult: number;
   dragMult: number;
+  /**
+   * Multiplier on lift. Airframe icing drives this below 1, which raises the
+   * stall speed without touching the airspeed indicator — the wing quietly
+   * stops working at a speed that was comfortable a minute ago.
+   */
+  liftMult: number;
 }
 
 export interface LandingResult {

@@ -3,6 +3,7 @@ import { AircraftController, type FlightInput } from '../entities/aircraft/Aircr
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { CrashSequence } from '../entities/aircraft/CrashSequence';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
+import { WeatherHazards } from '../entities/weather/WeatherHazards';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
 import { biomeFor } from '../world/Biomes';
 import { WeatherFX } from '../world/WeatherFX';
@@ -32,6 +33,7 @@ export class FlightScene extends Phaser.Scene {
   // ── Physics ───────────────────────────────────────────────────────────────
   private controller!: AircraftController;
   private weather!: WeatherSystem;
+  private readonly hazards = new WeatherHazards();
   private state!: FlightState;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
 
@@ -85,6 +87,10 @@ export class FlightScene extends Phaser.Scene {
   /** What is shooting at us and the altitude that clears it. */
   private groundThreat: { label: string; clearM: number } | null = null;
   private threatHold = 0;         // keeps the caution readable between bursts
+  /** Current weather caution text, or null. */
+  private weatherCaution: string | null = null;
+  private iceLoad = 0;
+  private avionicsOut = false;
   private trafficAdvisory: number | null = null; // their height minus ours, m
   private trafficAvoid: 1 | -1 | null = null;    // +1 climb, -1 descend
   private engineFailed   = false;
@@ -129,6 +135,9 @@ export class FlightScene extends Phaser.Scene {
     this.threatAlertAt       = -99;
     this.groundThreat        = null;
     this.threatHold          = 0;
+    this.weatherCaution      = null;
+    this.iceLoad             = 0;
+    this.avionicsOut         = false;
     this.trafficAdvisory     = null;
     this.trafficAvoid        = null;
     this.engineFailed        = false;
@@ -161,6 +170,7 @@ export class FlightScene extends Phaser.Scene {
     this.baseTimestamp = SaveService.get().world.gameTimestamp;
 
     this.weather = new WeatherSystem();
+    this.hazards.reset();
     FlightEventService.reset(definition);
 
     // ── Route length (gameplay scale, from the contract's settlements) ─────
@@ -401,6 +411,11 @@ export class FlightScene extends Phaser.Scene {
     // ── Physics (fixed-step, frame-rate independent) ───────────────────────
     this.state = this.controller.update(this.state, input, sdt, windX);
 
+    // ── Weather with teeth ────────────────────────────────────────────────
+    // Icing, lightning and sand ingestion, each with its own answer. Applied
+    // before turbulence so the degraded lift is what the gusts act on.
+    this.applyWeatherHazards(sdt);
+
     // ── Turbulence: gusts nudge the aircraft, dt-scaled so a storm is rough
     //    but flyable (previously this was per-frame and slammed you down) ────
     const turbulence = this.weather.current.turbulenceIntensity;
@@ -549,6 +564,8 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Aircraft ───────────────────────────────────────────────────────────
     this.aircraft.setTurbulence(turbulence);
+    this.aircraft.setElevator((input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0));
+    this.aircraft.setIceLoad(this.iceLoad);
     this.aircraft.container.setY(this.world.altitudeToScreenY(this.state.altitude));
     this.aircraft.update(sdt, this.state);
 
@@ -784,12 +801,76 @@ export class FlightScene extends Phaser.Scene {
       engineFailed: this.engineFailed,
       underFire: this.underFire,
       groundThreat: this.groundThreat,
+      weatherCaution: this.weatherCaution,
+      iceLoad: this.iceLoad,
+      avionicsOut: this.avionicsOut,
       stall: this.stallWarning,
       overspeed,
       obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
       trafficDeltaM: this.trafficAdvisory,
       trafficAvoid: this.trafficAvoid,
     });
+  }
+
+  // ── Weather that costs you something ──────────────────────────────────────
+
+  /**
+   * Ice, lightning and grit. Each hazard degrades the aircraft over time, is
+   * announced before it becomes critical, and has one specific action that
+   * fixes it — descend out of the icing, restart after a strike, climb out of
+   * the sand. Storms are no longer scenery.
+   */
+  private applyWeatherHazards(sdt: number): void {
+    const rep = this.hazards.update(
+      sdt, this.weather.current.condition, this.state, this.engineRunning && !this.engineFailed,
+    );
+
+    if (rep.damage > 0) {
+      this.state.integrity = clamp(this.state.integrity - rep.damage, 0, 100);
+    }
+
+    // ── Lightning ─────────────────────────────────────────────────────────
+    if (rep.struck) {
+      this.cameras.main.flash(320, 255, 255, 255);
+      this.cameras.main.shake(520, 0.013);
+      SoundEngine.thunder();
+      SoundEngine.impact();
+      this.aircraft.notifyHit();
+      this.disengageWarp('lightning strike');
+      EventBus.emit('ui:show-notification', {
+        message: '⚡ LIGHTNING STRIKE — engine out, instruments gone. Hold E to restart.',
+        type: 'danger',
+      });
+    }
+
+    // ── Anything that kills the engine ────────────────────────────────────
+    if (rep.killEngine && this.engineRunning && !this.engineFailed) {
+      this.engineFailed = true;
+      this.engineRunning = false;
+      this.aircraft.stopEngine();
+      SoundEngine.engineSputter();
+      this.disengageWarp('engine out');
+      if (!rep.struck) {
+        EventBus.emit('ui:show-notification', {
+          message: '✖ SAND HAS KILLED THE ENGINE — hold E to restart',
+          type: 'danger',
+        });
+      }
+    }
+
+    // ── Announce a caution once, when it first appears ────────────────────
+    if (rep.caution !== this.weatherCaution) {
+      const rising = rep.caution !== null
+        && (this.weatherCaution === null || rep.caution.length > this.weatherCaution.length);
+      this.weatherCaution = rep.caution;
+      if (rep.caution && rising) {
+        SoundEngine.warn();
+        EventBus.emit('ui:show-notification', { message: `⚠ ${rep.caution}`, type: 'warning' });
+        this.disengageWarp(rep.caution.toLowerCase());
+      }
+    }
+    this.iceLoad = rep.iceLoad;
+    this.avionicsOut = rep.blackout > 0;
   }
 
   // ── Other traffic ─────────────────────────────────────────────────────────
@@ -1048,6 +1129,7 @@ export class FlightScene extends Phaser.Scene {
     EventBus.emit('flight:status', {
       engineFailed: false, underFire: false, groundThreat: null, stall: false,
       overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
+      weatherCaution: null, iceLoad: 0, avionicsOut: false,
     });
     this.state.speed = 0;
     this.state.verticalSpeed = 0;

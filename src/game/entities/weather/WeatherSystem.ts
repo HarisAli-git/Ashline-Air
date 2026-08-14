@@ -100,8 +100,16 @@ export class WeatherSystem {
     }
   }
 
-  /** DEV helper — jump straight to a condition (weather debug keys). */
+  /**
+   * DEV helper — jump straight to a condition (weather debug keys).
+   * Resets the change clock and cancels any squall, otherwise the natural
+   * roll can flip straight back out of the forced condition a second later
+   * and a debug key becomes a coin toss.
+   */
   forceCondition(condition: WeatherCondition): void {
+    this.squallLeft = 0;
+    this.preSquall = null;
+    this.timeSinceChange = 0;
     this.applyCondition(condition);
   }
 

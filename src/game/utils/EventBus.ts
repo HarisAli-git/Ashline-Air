@@ -42,6 +42,12 @@ export interface GameEvents {
     trafficDeltaM: number | null;
     /** Which way to go to miss it: +1 climb, -1 descend. */
     trafficAvoid: 1 | -1 | null;
+    /** Icing / sand / avionics caution from the weather, or null. */
+    weatherCaution: string | null;
+    /** 0–1 ice on the airframe, for the gauge. */
+    iceLoad: number;
+    /** Instruments blanked by a lightning strike. */
+    avionicsOut: boolean;
   };
 
   // Economy

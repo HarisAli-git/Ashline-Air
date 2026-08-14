@@ -29,6 +29,7 @@ export interface AircraftTexKeys {
   wheel: string;
   gearDoor: string;
   flap: string;
+  elevator: string;
   /** Shared canvas size of the hull-family textures (design units). */
   bodyW: number;
   bodyH: number;
@@ -189,12 +190,15 @@ export function ensureAircraftTextures(
   bake(scene, k('hull'), bodyW, bodyH, ox, oy, p => {
     const t = spec.tail;
 
-    // Stabiliser (behind fuselage, slightly darker)
+    // Fixed stabiliser only — the elevator behind it is a separate, hinged
+    // part so the aircraft is not one rigid lump when you move the stick.
     p.poly([
-      [-L * 0.32, -H * 0.22], [-L / 2 - 8, -H * 0.28],
-      [-L / 2 - 10, -H * 0.18], [-L * 0.32, -H * 0.14],
+      [-L * 0.32, -H * 0.22], [-L * 0.43, -H * 0.26],
+      [-L * 0.43, -H * 0.16], [-L * 0.32, -H * 0.14],
     ], pal.hullShade, 0.95);
-    p.line(-L * 0.33, -H * 0.22, -L / 2 - 8, -H * 0.27, 1, pal.hullLight, 0.5);
+    p.line(-L * 0.33, -H * 0.22, -L * 0.43, -H * 0.255, 1, pal.hullLight, 0.5);
+    // Hinge line
+    p.line(-L * 0.43, -H * 0.265, -L * 0.43, -H * 0.15, 0.8, 0x000000, 0.3);
 
     // Fin (swept vertical stabiliser)
     p.poly([
@@ -295,6 +299,19 @@ export function ensureAircraftTextures(
     }
   });
 
+  // ── Elevator: hinged at the stabiliser's trailing edge ─────────────────────
+  // Drawn in its own tiny canvas with the hinge at the RIGHT edge, so the
+  // sprite can rotate it about origin (1, 0.5) and it swings like a real one.
+  const elevLen = L * 0.07 + 10;
+  bake(scene, k('elevator'), elevLen + 6, H * 0.5, elevLen + 3, H * 0.25, p => {
+    p.poly([
+      [0, -H * 0.045], [-elevLen, -H * 0.075],
+      [-elevLen - 2, H * 0.035], [0, H * 0.045],
+    ], pal.hullShade, 1);
+    p.line(0, -H * 0.045, -elevLen, -H * 0.075, 1, pal.hullLight, 0.5);
+    p.line(0, H * 0.045, -elevLen - 2, H * 0.035, 0.8, 0x000000, 0.25);
+  });
+
   // ── Wings ──────────────────────────────────────────────────────────────────
   const w = spec.wing;
   bake(scene, k('wingNear'), bodyW, bodyH, ox, oy, p => {
@@ -329,7 +346,35 @@ export function ensureAircraftTextures(
     else if (w.layout === 'high') { fy = w.y - 2; fdrop = w.drop - 7; }
     const q = wingQuad(w.rootX - 6, fy, chord, w.span, w.sweep, fdrop);
     p.poly(q, pal.hullShade, 1);
-    p.line(q[0][0], q[0][1], q[3][0], q[3][1], 1.2, pal.hullLight, w.layout === 'biplane' ? 0.6 : 0.35);
+    // Spanwise shading, ribs and a lit leading edge — without these the upper
+    // wing of a biplane reads as a flat plank laid across the aeroplane.
+    p.poly([q[1], q[2], [q[2][0] + 3, q[2][1] - 3], [q[1][0] + 3, q[1][1] - 3]],
+      mixHex(pal.hullShade, 0x000000, 0.35), 0.7);
+    p.line(q[0][0], q[0][1], q[3][0], q[3][1], 1.6, mixHex(pal.hullLight, 0xffffff, 0.25), 0.75);
+    p.line(q[1][0], q[1][1], q[2][0], q[2][1], 0.9, 0x000000, 0.3);
+    for (let r = 1; r < 6; r++) {
+      const t = r / 6;
+      const xa = q[0][0] + (q[3][0] - q[0][0]) * t, ya = q[0][1] + (q[3][1] - q[0][1]) * t;
+      const xb = q[1][0] + (q[2][0] - q[1][0]) * t, yb = q[1][1] + (q[2][1] - q[1][1]) * t;
+      p.line(xa, ya, xb, yb, 0.6, 0x000000, 0.20);
+    }
+
+    // Biplane: real interplane struts and crossed bracing wires between the
+    // two wings, which is most of what makes a biplane read as a biplane.
+    if (w.layout === 'biplane') {
+      const upperY = fy + fdrop * 0.35;
+      const lowerY = w.y + w.drop * 0.35;
+      const s1 = w.rootX + w.chord * 0.30, s2 = w.rootX - w.chord * 0.34;
+      p.line(s1, upperY, s1 + 2, lowerY, 2.0, pal.hullShade, 1);
+      p.line(s2, upperY, s2 + 2, lowerY, 2.0, pal.hullShade, 1);
+      p.line(s1 - 16, upperY + 3, s1 - 14, lowerY + 2, 1.7, pal.hullShade, 0.95);
+      // Crossed flying wires
+      p.line(s1, upperY, s2 + 2, lowerY, 0.7, pal.hullLight, 0.45);
+      p.line(s2, upperY, s1 + 2, lowerY, 0.7, pal.hullLight, 0.45);
+      // Cabane struts up to the fuselage centreline
+      p.line(w.rootX + 6, upperY, w.rootX + 3, -H * 0.42, 1.6, pal.hullShade, 0.95);
+      p.line(w.rootX - 8, upperY, w.rootX - 5, -H * 0.42, 1.6, pal.hullShade, 0.95);
+    }
   });
 
   // ── Canopy / cockpit glazing ───────────────────────────────────────────────
@@ -546,6 +591,7 @@ export function ensureAircraftTextures(
     gearStrut: k('gearStrut'),
     wheel: k('wheel'),
     gearDoor: k('gearDoor'),
+    elevator: k('elevator'),
     flap: k('flap'),
     bodyW,
     bodyH,

@@ -194,7 +194,7 @@ export class AircraftController {
       flapsDeployed: false,
       distanceTravelled: 0,
       elapsedSeconds: 0,
-      modifiers: { fuelBurnMult: 1, dragMult: 1 },
+      modifiers: { fuelBurnMult: 1, dragMult: 1, liftMult: 1 },
     };
   }
 
@@ -287,7 +287,7 @@ export class AircraftController {
     // is most of what makes chopping the throttle actually slow you down.
     CD += TUNING.idleDragCD * Math.pow(1 - effThrottle, TUNING.idleDragCurve);
 
-    const aL = qK * CL * dmgLift;            // lift acceleration
+    const aL = qK * CL * dmgLift * s.modifiers.liftMult;   // lift acceleration
     const aD = qK * CD * s.modifiers.dragMult * dmgDrag;
 
     // ── Pitch: driven, damped, statically stable ──────────────────────────

@@ -75,10 +75,19 @@ export function FlightHUD(): React.ReactElement | null {
 
       {/* Annunciator panel — the things that will kill you, in priority order */}
       {status && (status.engineFailed || status.stall || status.overspeed || status.underFire
-        || status.obstacleAheadM !== null || status.trafficDeltaM !== null) && (
+        || status.obstacleAheadM !== null || status.trafficDeltaM !== null
+        || status.weatherCaution !== null) && (
         <div style={styles.annunciators}>
           {status.engineFailed && <Caution label="ENGINE OUT — HOLD E" tone="#ff4444" />}
           {status.stall && <Caution label="STALL" tone="#ff4444" />}
+          {/* Weather is now something you have to fly around, so it gets a
+              light of its own with the action spelled out. */}
+          {status.weatherCaution && (
+            <Caution
+              label={status.weatherCaution}
+              tone={status.avionicsOut || status.iceLoad > 0.6 ? '#ff4444' : '#88ccff'}
+            />
+          )}
           {status.overspeed && <Caution label="OVERSPEED — EASE OFF" tone="#ff4444" />}
           {/* Traffic reads like the real box: how far off they are vertically,
               and the single word that resolves it. */}
