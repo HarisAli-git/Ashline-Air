@@ -37,7 +37,24 @@ export const TUNING = {
   stallCD: 0.22,            // extra drag from a fully separated wing
   inducedK: 0.07,           // induced-drag factor (k·CL²)
   CD0: 0.105,               // parasitic drag — also sets max-speed thrust
-  idleDragCD: 0.055,        // windmilling prop at zero throttle: a real brake
+  /**
+   * A closed throttle is a huge speed brake, not a gentle one — a windmilling
+   * propeller is a disc of drag roughly the size of the aeroplane.
+   *
+   * At 0.055 the model settled into a comfortable, permanent glide with the
+   * engine dead: 93 km/h and −7.8 m/s, held for ever, with the wing still
+   * carrying 95% of the aircraft's weight. That is why gravity read as
+   * fictional. At 0.42 the aeroplane cannot hold itself up at all without
+   * power: 130 → 56 km/h in six seconds, then it stalls and falls.
+   *
+   * The cubic falloff matters as much as the number. Scaled linearly, half
+   * throttle still carried more braking drag than the airframe's own CD0 and
+   * dragged the whole envelope down — level flight needed 85% power. Cubed,
+   * the brake is savage at idle and gone by cruise, which is also the honest
+   * reading: a prop under power makes thrust, not drag.
+   */
+  idleDragCD: 0.42,
+  idleDragCurve: 3,
   flapsCL: 0.45,            // extra lift from flaps
   flapsCD: 0.028,           // and the drag that comes with it
   gearCD: 0.014,            // retractable gear hanging out
@@ -53,6 +70,17 @@ export const TUNING = {
   // ── Pitch: a driven, damped, self-stabilising airframe ──
   controlPower: 78,         // elevator moment, deg/s² at cruise
   pitchStability: 3.4,      // restoring moment toward the trim ANGLE OF ATTACK
+  /**
+   * Fraction of that self-trimming authority that survives at zero thrust.
+   *
+   * With it at 1 the aeroplane flew itself into a tidy equilibrium whatever
+   * the engine was doing — power off simply meant a different, equally stable
+   * attitude, so there was never a moment of being out of control. At 0.10 the
+   * airframe stops flying itself when the power comes off: the nose wanders,
+   * the wing mushes into a stall and it falls, and you are a passenger until
+   * the throttle goes back in (measured: ~4 s of full power to fly again).
+   */
+  stabIdle: 0.10,
   pitchDamping: 2.8,        // pitch-rate damping
   stallPitchDamp: 3.0,      // extra damping in the stall — stops porpoising
   stallNoseDown: 54,        // deg/s² nose-down once fully stalled
@@ -257,7 +285,7 @@ export class AircraftController {
     CD += stallT * TUNING.stallCD;           // separated flow: nearly a barn door
     // A prop turning at idle is a disc of drag, not a free-wheeling fan. This
     // is most of what makes chopping the throttle actually slow you down.
-    CD += TUNING.idleDragCD * (1 - effThrottle);
+    CD += TUNING.idleDragCD * Math.pow(1 - effThrottle, TUNING.idleDragCurve);
 
     const aL = qK * CL * dmgLift;            // lift acceleration
     const aD = qK * CD * s.modifiers.dragMult * dmgDrag;
@@ -306,7 +334,7 @@ export class AircraftController {
     // twenty seconds, sinking from the first second.
     const qTrim = this.K * vTrim * vTrim;
     let cdTrim = TUNING.CD0 + TUNING.inducedK * clForLevel * clForLevel
-      + TUNING.idleDragCD * (1 - effThrottle);
+      + TUNING.idleDragCD * Math.pow(1 - effThrottle, TUNING.idleDragCurve);
     if (s.flapsDeployed) cdTrim += TUNING.flapsCD;
     if (s.gearDown && !this.gearFixed) cdTrim += TUNING.gearCD;
     const gammaTrim = Math.asin(clamp((aT - qTrim * cdTrim) / GRAVITY, -0.62, 0.42));
@@ -314,7 +342,11 @@ export class AircraftController {
 
     const command = (input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0);
     const controlMoment = command * TUNING.controlPower * qNorm * elevator;
-    const stabilityMoment = (pitchTrimDeg - s.pitch) * TUNING.pitchStability * qNorm;
+    // Stability fades with power: with the engine dead the airframe largely
+    // stops holding its own attitude, which is what turns "no thrust" into
+    // "out of control" instead of "a different stable glide".
+    const stabPower = TUNING.stabIdle + (1 - TUNING.stabIdle) * effThrottle;
+    const stabilityMoment = (pitchTrimDeg - s.pitch) * TUNING.pitchStability * stabPower * qNorm;
 
     s.pitchRate += (controlMoment + stabilityMoment) * dt;
     // Extra damping while stalled: without it the aircraft porpoises between
