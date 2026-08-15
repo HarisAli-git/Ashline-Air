@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
-import type { AircraftVisualSpec } from './AircraftVisualSpec';
+import {
+  NEAR_THROW, FAR_THROW, stabRoot, STAB_FIXED_FRAC, type AircraftVisualSpec,
+} from './AircraftVisualSpec';
 
 /**
  * Bakes every part of a procedurally drawn aircraft into textures, once.
@@ -154,15 +156,30 @@ export function ensureSharedTextures(scene: Phaser.Scene): void {
 }
 
 // ── Wing planform helper ─────────────────────────────────────────────────────
+
+/**
+ * The wing as it projects into a side view.
+ *
+ * The camera sits a little above the aircraft, so a horizontal wing running
+ * TOWARD the viewer walks down the screen and one running away walks up it.
+ * Which way the throw goes is a property of the CAMERA, not of the aeroplane,
+ * so it is passed in explicitly: positive (down) for the near wing, negative
+ * for the far one. Deriving it from the sign of `drop` instead sent both wings
+ * of a high-wing transport sweeping upward, which drew a sail over the
+ * fuselage rather than a wing beside it. `drop` now only adds the aircraft's
+ * own dihedral on top of the camera throw.
+ */
 function wingQuad(
-  rootX: number, y: number, chord: number, span: number, sweep: number, drop: number,
+  rootX: number, y: number, chord: number, span: number, sweep: number,
+  drop: number, throwY: number,
 ): Array<[number, number]> {
-  const tipC = chord * 0.58;
-  const tipDX = -(sweep + span * 0.4);
+  const tipC = chord * 0.5;
+  const tipDX = -(sweep + span * 0.42);
+  const tipDY = drop + throwY;
   const leadRoot: [number, number]  = [rootX + chord * 0.55, y];
-  const trailRoot: [number, number] = [rootX - chord * 0.45, y + 1];
-  const trailTip: [number, number]  = [rootX - chord * 0.45 + tipDX + (chord - tipC) * 0.5, y + drop + 1];
-  const leadTip: [number, number]   = [rootX + chord * 0.55 + tipDX - (chord - tipC) * 0.5, y + drop];
+  const trailRoot: [number, number] = [rootX - chord * 0.45, y + 2];
+  const trailTip: [number, number]  = [rootX - chord * 0.45 + tipDX + (chord - tipC) * 0.5, y + tipDY + 2];
+  const leadTip: [number, number]   = [rootX + chord * 0.55 + tipDX - (chord - tipC) * 0.5, y + tipDY];
   return [leadRoot, trailRoot, trailTip, leadTip];
 }
 
@@ -186,27 +203,52 @@ export function ensureAircraftTextures(
   const ox = bodyW / 2;
   const oy = bodyH / 2;
 
+  /**
+   * Fuselage side profile, as a fraction of the half-height, along the body
+   * from tail tip (u = 0) to nose tip (u = 1). A thin upswept tail cone, a
+   * constant-section cabin, and a rounded nose — the shape that makes a
+   * fuselage read as a fuselage rather than a lozenge.
+   */
+  const f = spec.fuselage;
+  // Bluntness constant solved so `noseFull` really is the half-height left at
+  // the very tip: a fine cone at 0.25, a radome at 0.7.
+  const kNose = (1 - f.noseFull * f.noseFull) / 0.907;
+  const halfH = (u: number): number => {
+    const s0 = u < f.taperStart
+      ? f.tailDepth + (1 - f.tailDepth) * Math.pow(u / f.taperStart, 0.7)  // tail cone
+      : u < 0.70
+        ? 1                                                                 // cabin
+        : Math.sqrt(Math.max(0, 1 - Math.pow((u - 0.70) / 0.315, 2) * kNose)); // nose
+    return (H / 2) * s0;
+  };
+  /** Centreline: fuselages sweep up toward the tail. */
+  const camber = (u: number): number =>
+    -H * f.upsweep * Math.max(0, (f.taperStart + 0.08 - u) / (f.taperStart + 0.08));
+
   // ── Hull: fuselage + fin + stabiliser + weathering ─────────────────────────
   bake(scene, k('hull'), bodyW, bodyH, ox, oy, p => {
     const t = spec.tail;
 
-    // Fixed stabiliser only — the elevator behind it is a separate, hinged
-    // part so the aircraft is not one rigid lump when you move the stick.
-    p.poly([
-      [-L * 0.32, -H * 0.22], [-L * 0.43, -H * 0.26],
-      [-L * 0.43, -H * 0.16], [-L * 0.32, -H * 0.14],
-    ], pal.hullShade, 0.95);
-    p.line(-L * 0.33, -H * 0.22, -L * 0.43, -H * 0.255, 1, pal.hullLight, 0.5);
-    // Hinge line
-    p.line(-L * 0.43, -H * 0.265, -L * 0.43, -H * 0.15, 0.8, 0x000000, 0.3);
-
-    // Fin (swept vertical stabiliser)
+    // Fin (swept vertical stabiliser). Drawn BEFORE the tailplane on a T-tail,
+    // so the tailplane sits on top of it rather than behind it.
     p.poly([
       [-L * 0.33, -H * 0.42],
       [-L / 2 + t.finSweep, -H / 2 - t.finHeight],
       [-L / 2, -H / 2 - t.finHeight],
       [-L / 2 + 1, -H * 0.08],
     ], pal.hull, 1);
+
+    // Fixed stabiliser only — the elevator behind it is a separate, hinged
+    // part so the aircraft is not one rigid lump when you move the stick.
+    const sr = stabRoot(spec);
+    const sl = t.stabLen * STAB_FIXED_FRAC;
+    p.poly([
+      [sr.x, sr.y], [sr.x - sl, sr.y - H * 0.04],
+      [sr.x - sl, sr.y + H * 0.06], [sr.x, sr.y + H * 0.08],
+    ], pal.hullShade, 0.95);
+    p.line(sr.x - 1, sr.y, sr.x - sl, sr.y - H * 0.035, 1, pal.hullLight, 0.5);
+    // Hinge line
+    p.line(sr.x - sl, sr.y - H * 0.045, sr.x - sl, sr.y + H * 0.07, 0.8, 0x000000, 0.3);
     // Rudder hinge line + fin leading-edge light
     p.line(-L / 2 + t.finSweep * 0.55, -H / 2 - t.finHeight + 2, -L / 2 + 4, -H * 0.14, 1, 0x000000, 0.22);
     p.line(-L * 0.33, -H * 0.42, -L / 2 + t.finSweep, -H / 2 - t.finHeight, 1.2, pal.hullLight, 0.55);
@@ -218,40 +260,90 @@ export function ensureAircraftTextures(
       [-L / 2 + 1, -H / 2 - t.finHeight + 3],
     ], pal.accent, 0.75);
 
-    // Tail cone
-    p.poly([
-      [-L / 2, -H * 0.30], [-L * 0.12, -H / 2],
-      [-L * 0.12, H / 2], [-L / 2, H * 0.08],
-    ], pal.hull, 1);
-    // Centre body
-    p.rrect(-L * 0.15, -H / 2, L * 0.55, H, H * 0.3, pal.hull, 1);
-    // Nose
-    p.ellipse(L * 0.37, 0, L * 0.26, H * 0.94, pal.hull, 1);
-    p.circle(L * 0.46, 0, H * 0.29, pal.hull, 1);
+    // ── Fuselage: one continuous profile, shaded along its own outline ─────
+    //
+    // This used to be a rounded-rect "centre body" with an ellipse nose and a
+    // polygon tail stuck on either end, and then the cylinder shading was laid
+    // over it as flat RECTANGLES. The silhouette was round and the shading was
+    // square, so the seams showed and the whole thing read as a slab with bits
+    // glued on. The body is now sampled as a real profile — pointed nose,
+    // constant-section cabin, upswept tapering tail cone — and shaded column
+    // by column so the light wraps around the tube it is actually drawn on.
+    // It is baked once into a texture, so the per-column work is free.
+    const fuseTop = (u: number): number => camber(u) - halfH(u);
+    /**
+     * A freighter is a box with a rounded top, not a tube: the cargo floor
+     * runs flat from behind the nose gear back to the ramp. `bellyFlat` pulls
+     * the lower line onto that floor over exactly that stretch, which is most
+     * of what separates a cargo hold from a fat cigar.
+     */
+    const fuseBot = (u: number): number => {
+      const round = camber(u) + halfH(u);
+      if (f.bellyFlat <= 0) return round;
+      // The floor runs from the ramp hinge forward to where the nose starts
+      // curving up, and NOWHERE else. Extending it forward inflated the nose
+      // into a whale head; extending it aft flattened out the ramp entirely.
+      const ramp = f.taperStart * 0.8;
+      const zone = Phaser.Math.Clamp((u - ramp) / 0.07, 0, 1)
+                 * Phaser.Math.Clamp((0.70 - u) / 0.07, 0, 1);
+      return round + (H / 2 - round) * f.bellyFlat * zone;
+    };
+    const xOf = (u: number): number => -L / 2 + u * L;
 
-    // ── Form shading: the fuselage is a CYLINDER, so light wraps around it.
-    // Banded gradient from a lit crown through the base coat to a dark belly.
-    const bands = 9;
-    for (let i = 0; i < bands; i++) {
-      const t0 = i / bands, t1 = (i + 1) / bands;      // 0 = top, 1 = bottom
-      const y0 = -H / 2 + H * t0, hBand = H * (t1 - t0) + 0.6;
-      // Curved falloff — brightest just below the crown, darkest at the keel
-      const shade = Math.cos((t0 - 0.28) * Math.PI * 0.95);
-      const col = shade > 0
-        ? mixHex(pal.hull, pal.hullLight, shade * 0.55)
-        : mixHex(pal.hull, pal.hullShade, Math.min(1, -shade * 1.25));
-      p.rect(-L * 0.15, y0, L * 0.54, hBand, col, 1);
-      // Nose section follows the same wrap
-      p.ellipse(L * 0.36, y0 + hBand / 2, L * 0.25, hBand * 1.25, col, 0.95);
+    const COLS = Math.max(60, Math.round(L));
+    const BANDS = 10;
+    for (let c = 0; c < COLS; c++) {
+      const u = c / (COLS - 1);
+      const x = xOf(u);
+      const top = fuseTop(u), bot = fuseBot(u);
+      const span = bot - top;
+      if (span <= 0.5) continue;
+      const w = L / (COLS - 1) + 0.8;      // slight overlap, no seams
+      for (let b = 0; b < BANDS; b++) {
+        const t0 = b / BANDS, t1 = (b + 1) / BANDS;
+        // Brightest just below the crown, darkest at the keel
+        const shade = Math.cos((t0 - 0.28) * Math.PI * 0.95);
+        let col = shade > 0
+          ? mixHex(pal.hull, pal.hullLight, shade * 0.55)
+          : mixHex(pal.hull, pal.hullShade, Math.min(1, -shade * 1.25));
+        // The nose and tail turn away from the light as well as the belly
+        const endFade = Math.min(1, Math.min(u, 1 - u) / 0.16);
+        if (endFade < 1) col = mixHex(col, pal.hullShade, (1 - endFade) * 0.45);
+        p.rect(x, top + span * t0, w, span * (t1 - t0) + 0.5, col, 1);
+      }
     }
-    // Tail cone keeps the shading as it tapers
-    p.poly([
-      [-L / 2, -H * 0.30], [-L * 0.12, -H * 0.04],
-      [-L * 0.12, H / 2], [-L / 2, H * 0.08],
-    ], mixHex(pal.hull, pal.hullShade, 0.5), 0.95);
-    // Specular crown line and a hard keel shadow
-    p.rrect(-L * 0.15, -H / 2 + 0.5, L * 0.52, 2.2, 1.1, mixHex(pal.hullLight, 0xffffff, 0.35), 0.7);
-    p.rrect(-L * 0.14, H / 2 - 3, L * 0.5, 3, 1.5, mixHex(pal.hullShade, 0x000000, 0.4), 0.8);
+
+    // Outline: a dark edge top and bottom, and a specular crown just inside it
+    for (let c = 0; c < COLS - 1; c++) {
+      const u0 = c / (COLS - 1), u1 = (c + 1) / (COLS - 1);
+      if (fuseBot(u0) - fuseTop(u0) <= 0.5) continue;
+      p.line(xOf(u0), fuseTop(u0), xOf(u1), fuseTop(u1), 1.4, mixHex(pal.hullShade, 0x000000, 0.55), 0.85);
+      p.line(xOf(u0), fuseBot(u0), xOf(u1), fuseBot(u1), 1.6, mixHex(pal.hullShade, 0x000000, 0.7), 0.9);
+      if (u0 > 0.14 && u0 < 0.88) {
+        p.line(xOf(u0), fuseTop(u0) + 1.6, xOf(u1), fuseTop(u1) + 1.6,
+          1.5, mixHex(pal.hullLight, 0xffffff, 0.35), 0.55);
+      }
+    }
+
+    // Gear sponson: a high-wing transport has nowhere in the wing to fold the
+    // gear, so it lives in a blister on the fuselage side. Without it the legs
+    // appear to sprout straight out of a smooth belly.
+    const sp = spec.gear.sponson;
+    if (sp) {
+      const top = H * 0.10, bot = top + sp.h;
+      p.poly([
+        [sp.x - sp.w / 2, top],
+        [sp.x + sp.w / 2, top],
+        [sp.x + sp.w / 2 - sp.h * 0.55, bot],
+        [sp.x - sp.w / 2 + sp.h * 0.7, bot],
+      ], mixHex(pal.hull, pal.hullShade, 0.35), 1);
+      p.line(sp.x - sp.w / 2 + sp.h * 0.7, bot, sp.x + sp.w / 2 - sp.h * 0.55, bot,
+        1.4, mixHex(pal.hullShade, 0x000000, 0.55), 0.9);
+      p.line(sp.x - sp.w / 2, top + 1, sp.x + sp.w / 2, top + 1,
+        1.1, mixHex(pal.hullLight, 0xffffff, 0.2), 0.4);
+      // Bay door seam along the bottom
+      p.line(sp.x - sp.w * 0.3, bot - 1.5, sp.x + sp.w * 0.3, bot - 1.5, 0.8, 0x000000, 0.3);
+    }
 
     // Panel seams + rivet rows
     for (const fx of [-0.05, 0.12, 0.26]) {
@@ -302,7 +394,7 @@ export function ensureAircraftTextures(
   // ── Elevator: hinged at the stabiliser's trailing edge ─────────────────────
   // Drawn in its own tiny canvas with the hinge at the RIGHT edge, so the
   // sprite can rotate it about origin (1, 0.5) and it swings like a real one.
-  const elevLen = L * 0.07 + 10;
+  const elevLen = spec.tail.stabLen * (1 - STAB_FIXED_FRAC);
   bake(scene, k('elevator'), elevLen + 6, H * 0.5, elevLen + 3, H * 0.25, p => {
     p.poly([
       [0, -H * 0.045], [-elevLen, -H * 0.075],
@@ -315,7 +407,7 @@ export function ensureAircraftTextures(
   // ── Wings ──────────────────────────────────────────────────────────────────
   const w = spec.wing;
   bake(scene, k('wingNear'), bodyW, bodyH, ox, oy, p => {
-    const q = wingQuad(w.rootX, w.y, w.chord, w.span, w.sweep, w.drop);
+    const q = wingQuad(w.rootX, w.y, w.chord, w.span, w.sweep, w.drop, w.span * NEAR_THROW);
     p.poly(q, pal.hull, 1);
     // Spanwise shading — the wing is lit along the leading edge and falls
     // into shadow toward the trailing edge
@@ -334,17 +426,33 @@ export function ensureAircraftTextures(
     // Aileron hint near the tip
     const ax = (q[1][0] + q[2][0]) / 2, ay = (q[1][1] + q[2][1]) / 2;
     p.line(ax, ay, q[2][0], q[2][1], 0.8, 0x000000, 0.2);
-    // Root fairing
-    p.ellipse(w.rootX, w.y + 1, w.chord * 0.7, 6, pal.hull, 1);
+    // Root fairing: the wing has to grow out of the fuselage, not sit on it
+    p.ellipse(w.rootX, w.y + 1, w.chord * 0.82, 9, pal.hull, 1);
+    p.ellipse(w.rootX, w.y - 1, w.chord * 0.7, 5, mixHex(pal.hull, pal.hullLight, 0.4), 0.7);
+    p.line(w.rootX + w.chord * 0.42, w.y - 2, w.rootX - w.chord * 0.4, w.y + 1,
+      1, mixHex(pal.hullShade, 0x000000, 0.4), 0.5);
+
+    // Each engine is carried by the wing — draw the pylon that holds it there,
+    // or the nacelles read as boxes floating alongside the fuselage.
+    for (const e of spec.engines.filter(en => !en.far)) {
+      if (Math.abs(e.y - w.y) < 4) continue;         // already on the wing line
+      p.rect(e.x - 4, Math.min(e.y, w.y), 9, Math.abs(e.y - w.y) + 2,
+        mixHex(pal.hull, pal.hullShade, 0.5), 1);
+      p.line(e.x - 4, Math.min(e.y, w.y), e.x - 4, Math.max(e.y, w.y),
+        1, mixHex(pal.hullShade, 0x000000, 0.5), 0.7);
+    }
     // Wing weathering
     p.rect(w.rootX - w.chord * 0.1, w.y + w.drop * 0.4, 7, 4, pal.hullShade, 0.5);
   });
 
   bake(scene, k('wingFar'), bodyW, bodyH, ox, oy, p => {
-    let fy = w.y - 3, fdrop = -w.drop * 0.8, chord = w.chord;
-    if (w.layout === 'biplane') { fy = -H / 2 - 14; fdrop = -4; }
-    else if (w.layout === 'high') { fy = w.y - 2; fdrop = w.drop - 7; }
-    const q = wingQuad(w.rootX - 6, fy, chord, w.span, w.sweep, fdrop);
+    let fy = w.y - 3, fdrop = w.drop * 0.5, chord = w.chord;
+    // A biplane's "far" wing is really its UPPER wing — a parallel plane above
+    // the fuselage, so it takes the same downward camera throw as the lower one.
+    let throwY = -w.span * FAR_THROW;
+    if (w.layout === 'biplane') { fy = -H / 2 - 14; fdrop = -2; throwY = w.span * NEAR_THROW * 0.9; }
+    else if (w.layout === 'high') { fy = w.y - 2; }
+    const q = wingQuad(w.rootX - 6, fy, chord, w.span, w.sweep, fdrop, throwY);
     p.poly(q, pal.hullShade, 1);
     // Spanwise shading, ribs and a lit leading edge — without these the upper
     // wing of a biplane reads as a flat plank laid across the aeroplane.
@@ -406,19 +514,41 @@ export function ensureAircraftTextures(
       p.line(c.x + c.w * 0.28, -H / 2 - 6.8, c.x + c.w * 0.55, -H / 2 - 4.2, 1.6, pal.canopyGlint, 0.75);
       p.line(c.x + c.w * 0.3, -H / 2 - 4.4, c.x + c.w * 0.44, -H / 2 - 3.2, 1, pal.canopyGlint, 0.4);
     } else {
-      // Slanted windscreen at the front…
+      // The flight deck is SEATED ON THE NOSE, at stations taken from the
+      // fuselage profile. Authored x + w put the windscreen — and the crew
+      // silhouette inside it — several pixels out in front of the nose tip on
+      // the long aircraft, drawing a floating brown wedge ahead of the radome.
+      const skinTop = (u: number): number => camber(u) - halfH(u);
+      const uF = 0.905, uA = 0.775;
+      const xF = -L / 2 + uF * L, xA = -L / 2 + uA * L;
+      const yF = skinTop(uF), yA = skinTop(uA);
+
+      // Raised flight-deck roof: the crown steps up over the cockpit
       p.poly([
-        [c.x + c.w - 12, -H * 0.5 + 2],
-        [c.x + c.w, -H * 0.14],
-        [c.x + c.w - 7, -H * 0.12],
-        [c.x + c.w - 16, -H * 0.5 + 2],
+        [xA - 6, yA + 1], [xA + 4, yA - H * 0.10],
+        [xF - 2, yF - H * 0.05], [xF + 2, yF + 2],
+      ], mixHex(pal.hull, pal.hullLight, 0.25), 1);
+      p.line(xA + 4, yA - H * 0.10, xF - 2, yF - H * 0.05, 1.2,
+        mixHex(pal.hullLight, 0xffffff, 0.3), 0.5);
+
+      // Slanted windscreen down the front of it
+      p.poly([
+        [xA + 3, yA - H * 0.08], [xF - 3, yF - H * 0.03],
+        [xF - 1, yF + H * 0.16], [xA + 1, yA + H * 0.12],
       ], pal.canopy, 1);
-      p.line(c.x + c.w - 12, -H * 0.44, c.x + c.w - 4, -H * 0.18, 1, pal.canopyGlint, 0.6);
-      // Crew silhouette behind the windscreen
-      p.ellipse(c.x + c.w - 11, -H * 0.2, 7, 5, 0x2b2118, 0.9);
-      p.circle(c.x + c.w - 9.5, -H * 0.3, 2.4, 0x6b4a33, 0.95);
-      // …then a strip of square cabin windows
-      const n = Math.max(2, Math.floor((c.w - 18) / 11));
+      p.line(xA + 5, yA - H * 0.04, xF - 4, yF + H * 0.03, 1.2, pal.canopyGlint, 0.6);
+      // Centre post between the two windscreen panels
+      const mx = (xA + xF) / 2, my = (yA + yF) / 2;
+      p.line(mx, my - H * 0.05, mx + 1, my + H * 0.14, 0.9, pal.metal, 0.7);
+      // Crew silhouette behind the glass
+      p.ellipse(xA + 8, yA + H * 0.14, 7, 5, 0x2b2118, 0.9);
+      p.circle(xA + 9.5, yA + H * 0.04, 2.4, 0x6b4a33, 0.95);
+      // Side window in the cockpit door
+      p.rrect(xA - 7, yA + H * 0.10, 6, 5, 1.5, pal.canopy, 1);
+
+      // …then a strip of square cabin windows running aft along the shoulder
+      const strip = xA - 10 - c.x;
+      const n = Math.max(0, Math.floor(strip / 11));
       for (let i = 0; i < n; i++) {
         const wx = c.x + i * 11;
         p.rrect(wx, -H * 0.34, 6.5, 5.5, 1.5, pal.canopy, 1);
@@ -482,36 +612,74 @@ export function ensureAircraftTextures(
   const nacW = eng.cowlLen + 14, nacH = eng.cowlH + 8;
   bake(scene, k('nacelle'), nacW, nacH, nacW / 2, nacH / 2, p => {
     const cl = eng.cowlLen, ch = eng.cowlH;
-    p.rrect(-cl / 2, -ch / 2, cl, ch, ch * 0.35, pal.metal, 1);
+    const turbine = spec.engineStyle === 'turboprop';
+    // A nacelle is painted in the airframe's colours, not left bare — drawn in
+    // raw `metal` it read as a white crate bolted to the side of the aircraft.
+    const skin = mixHex(pal.hull, pal.metal, 0.4);
+
+    if (turbine) {
+      // A turboprop nacelle is a long slim tube that tapers to a small intake
+      // and runs back into a fairing over the wing — nothing like a radial's
+      // fat cowl, and drawing it as one made every modern aircraft in the
+      // fleet read as a 1940s bomber.
+      p.poly([
+        [-cl / 2, -ch * 0.30], [cl * 0.18, -ch / 2], [cl / 2 - 2, -ch * 0.34],
+        [cl / 2 - 2, ch * 0.34], [cl * 0.18, ch / 2], [-cl / 2, ch * 0.34],
+      ], skin, 1);
+    } else {
+      p.rrect(-cl / 2, -ch / 2, cl, ch, ch * 0.35, skin, 1);
+    }
+
     // Wrapped shading to match the fuselage
     for (let i = 0; i < 5; i++) {
       const t0 = i / 5, y0 = -ch / 2 + ch * t0;
       const sh = Math.cos((t0 - 0.28) * Math.PI);
-      const col = sh > 0 ? mixHex(pal.metal, 0xffffff, sh * 0.3)
-                         : mixHex(pal.metal, 0x000000, Math.min(1, -sh * 0.55));
-      p.rect(-cl / 2 + 0.5, y0, cl - 1, ch / 5 + 0.5, col, 0.9);
+      const col = sh > 0 ? mixHex(skin, pal.hullLight, sh * 0.55)
+                         : mixHex(skin, 0x000000, Math.min(1, -sh * 0.5));
+      const inset = turbine ? ch * 0.16 * Math.abs(t0 - 0.5) * 2 : 0;
+      p.rect(-cl / 2 + 0.5, y0 + inset, cl - 1, ch / 5 + 0.5 - inset, col, 0.9);
     }
-    // Radial cylinder heads poking out of the cowl
-    for (let i = 0; i < 4; i++) {
-      const cy = -ch / 2 + 3 + i * (ch - 6) / 3;
-      p.rrect(cl * 0.12, cy - 1.4, cl * 0.3, 2.8, 1.2, mixHex(pal.metal, 0x000000, 0.45), 0.9);
+
+    if (turbine) {
+      // Chin oil-cooler intake and the exhaust stub that vents over the wing
+      p.rrect(cl * 0.10, ch * 0.10, cl * 0.26, ch * 0.34, 2, mixHex(skin, 0x000000, 0.5), 0.95);
+      p.rrect(cl * 0.12, ch * 0.14, cl * 0.20, ch * 0.20, 1.5, 0x14120d, 0.85);
+      p.rrect(-cl * 0.30, -ch * 0.10, cl * 0.20, ch * 0.24, 2, mixHex(skin, 0x000000, 0.35), 1);
+      p.rrect(-cl * 0.36, -ch * 0.06, cl * 0.09, ch * 0.16, 1.2, 0x0d0b08, 1);
+      // Access-panel seams down the length
+      for (let i = 1; i < 4; i++) {
+        const x = -cl / 2 + (cl * i) / 4;
+        p.line(x, -ch * 0.30, x, ch * 0.30, 0.7, 0x000000, 0.22);
+      }
+      p.rrect(-cl / 2 + 2, -ch * 0.40, cl - 6, 2.2, 1.1, pal.hullLight, 0.5);
+      // Small annular intake, then a long pointed spinner
+      p.strokeEllipse(cl / 2 - 2, 0, ch * 0.34, ch * 0.42, 1.4, 0x191610, 0.9);
+      p.ellipse(cl / 2 - 2, 0, ch * 0.20, ch * 0.28, 0x14120d, 0.8);
+      p.tri(cl / 2 - 2, -3.4, cl / 2 + 12, 0, cl / 2 - 2, 3.4, mixHex(pal.accent, 0x000000, 0.3), 1);
+      p.tri(cl / 2 - 2, -3.4, cl / 2 + 12, 0, cl / 2 - 2, -0.3, mixHex(pal.accent, 0xffffff, 0.5), 1);
+      p.line(cl / 2 - 1, -2.2, cl / 2 + 9, -0.5, 0.9, 0xffffff, 0.55);
+    } else {
+      // Radial cylinder heads poking out of the cowl
+      for (let i = 0; i < 4; i++) {
+        const cy = -ch / 2 + 3 + i * (ch - 6) / 3;
+        p.rrect(cl * 0.12, cy - 1.4, cl * 0.3, 2.8, 1.2, mixHex(skin, 0x000000, 0.45), 0.9);
+      }
+      p.rrect(-cl / 2 + 1, -ch / 2 + 1, cl - 2, 2.5, 1.2, pal.hullLight, 0.55);
+      // Cooling gills
+      for (let i = 0; i < 3; i++) p.line(-cl * 0.1 + i * 4, -ch * 0.3, -cl * 0.1 + i * 4, ch * 0.3, 0.8, 0x000000, 0.25);
+      // Cowl mouth: a slim ring, not a big black disc (that read as a blob
+      // sitting behind the propeller)
+      p.strokeEllipse(cl / 2 - 1, 0, ch * 0.52, ch * 0.62, 1.6, 0x191610, 0.9);
+      p.ellipse(cl / 2 - 1, 0, ch * 0.34, ch * 0.44, 0x14120d, 0.75);
+      // Spinner: a narrow nose cone, lit from above
+      p.tri(cl / 2 - 1, -3.0, cl / 2 + 7, 0, cl / 2 - 1, 3.0, mixHex(pal.accent, 0x000000, 0.3), 1);
+      p.tri(cl / 2 - 1, -3.0, cl / 2 + 7, 0, cl / 2 - 1, -0.3, mixHex(pal.accent, 0xffffff, 0.5), 1);
+      p.line(cl / 2, -1.8, cl / 2 + 5, -0.5, 0.9, 0xffffff, 0.55);
+      // Exhaust stack with a heat-stained mouth
+      p.rrect(-cl * 0.30, ch * 0.40, 6.5, 3, 1.2, 0x2a231a, 1);
+      p.rrect(-cl * 0.34, ch * 0.42, 2.6, 2.4, 1, 0x0d0b08, 1);
+      p.rrect(-cl * 0.12, ch * 0.40, 5, 2.6, 1, 0x241e16, 1);
     }
-    p.rrect(-cl / 2 + 1, -ch / 2 + 1, cl - 2, 2.5, 1.2, pal.hullLight, 0.55);
-    // Cooling gills
-    for (let i = 0; i < 3; i++) p.line(-cl * 0.1 + i * 4, -ch * 0.3, -cl * 0.1 + i * 4, ch * 0.3, 0.8, 0x000000, 0.25);
-    // Intake lip + spinner cone
-    // Cowl mouth: a slim ring, not a big black disc (that read as a blob
-    // sitting behind the propeller)
-    p.strokeEllipse(cl / 2 - 1, 0, ch * 0.52, ch * 0.62, 1.6, 0x191610, 0.9);
-    p.ellipse(cl / 2 - 1, 0, ch * 0.34, ch * 0.44, 0x14120d, 0.75);
-    // Spinner: a narrow nose cone, lit from above
-    p.tri(cl / 2 - 1, -3.0, cl / 2 + 7, 0, cl / 2 - 1, 3.0, mixHex(pal.accent, 0x000000, 0.3), 1);
-    p.tri(cl / 2 - 1, -3.0, cl / 2 + 7, 0, cl / 2 - 1, -0.3, mixHex(pal.accent, 0xffffff, 0.5), 1);
-    p.line(cl / 2, -1.8, cl / 2 + 5, -0.5, 0.9, 0xffffff, 0.55);
-    // Exhaust stack with a heat-stained mouth
-    p.rrect(-cl * 0.30, ch * 0.40, 6.5, 3, 1.2, 0x2a231a, 1);
-    p.rrect(-cl * 0.34, ch * 0.42, 2.6, 2.4, 1, 0x0d0b08, 1);
-    p.rrect(-cl * 0.12, ch * 0.40, 5, 2.6, 1, 0x241e16, 1);
   });
 
   // ── Propeller: blade line, mid-rpm disc, full-rpm blur disc ────────────────
