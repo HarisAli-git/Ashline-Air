@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
+import { ProfileService } from '../../services/ProfileService';
+import { EventBus } from '../utils/EventBus';
 import { EconomyService } from '../../services/EconomyService';
 import { ContractService } from '../../services/ContractService';
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
@@ -54,7 +56,7 @@ export class MenuScene extends Phaser.Scene {
       throttle: 0.65, pitch: 1.5, pitchRate: 0, flightPathAngle: 0, speed: 30, groundSpeed: 30, altitude: 400, verticalSpeed: 0,
       heading: 0, fuel: 60, engineTemp: 0.35, integrity: 100,
       gearDown: true, flapsDeployed: false, distanceTravelled: 0, elapsedSeconds: 0,
-      modifiers: { fuelBurnMult: 1, dragMult: 1 },
+      modifiers: { fuelBurnMult: 1, dragMult: 1, liftMult: 1 },
     };
 
     this.tweens.add({
@@ -124,8 +126,14 @@ export class MenuScene extends Phaser.Scene {
     }
 
     // Replayable, so the setup is never lost behind a one-time cutscene
-    this.makeButton(cx, height * 0.695, 'THE STORY SO FAR', () => {
+    this.makeButton(cx, height * 0.685, 'THE STORY SO FAR', () => {
       fadeToScene(this, 'IntroScene', { next: 'MenuScene' });
+    });
+
+    // Whose progress this is. Several people can share a browser.
+    const pilot = ProfileService.ensureActive();
+    this.makeButton(cx, height * 0.775, `PILOT: ${pilot.name.toUpperCase()}`, () => {
+      EventBus.emit('ui:open-profiles');
     });
 
     // ── Bottom status bar ───────────────────────────────────────────────────

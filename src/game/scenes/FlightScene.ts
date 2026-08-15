@@ -1,7 +1,9 @@
 import Phaser from 'phaser';
 import { AircraftController, type FlightInput } from '../entities/aircraft/AircraftController';
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
+import { CrashSequence } from '../entities/aircraft/CrashSequence';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
+import { WeatherHazards } from '../entities/weather/WeatherHazards';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
 import { biomeFor } from '../world/Biomes';
 import { WeatherFX } from '../world/WeatherFX';
@@ -9,7 +11,7 @@ import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
 import { CargoHold } from '../entities/CargoHold';
 import { EventBus } from '../utils/EventBus';
-import { fadeIn, fadeToScene, flashToScene } from '../utils/transitions';
+import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
 import { clamp, distance, pixelsToKm } from '../utils/math';
@@ -31,6 +33,7 @@ export class FlightScene extends Phaser.Scene {
   // ── Physics ───────────────────────────────────────────────────────────────
   private controller!: AircraftController;
   private weather!: WeatherSystem;
+  private readonly hazards = new WeatherHazards();
   private state!: FlightState;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
 
@@ -38,6 +41,8 @@ export class FlightScene extends Phaser.Scene {
   private world!: ParallaxWorld;
   private fx!: WeatherFX;
   private aircraft!: AircraftSprite;
+  private crash!: CrashSequence;
+  private crashing = false;
   private engineRunning = true;
 
   // ── In-canvas HUD (approach guidance only — gauges live in React) ────────
@@ -82,6 +87,10 @@ export class FlightScene extends Phaser.Scene {
   /** What is shooting at us and the altitude that clears it. */
   private groundThreat: { label: string; clearM: number } | null = null;
   private threatHold = 0;         // keeps the caution readable between bursts
+  /** Current weather caution text, or null. */
+  private weatherCaution: string | null = null;
+  private iceLoad = 0;
+  private avionicsOut = false;
   private trafficAdvisory: number | null = null; // their height minus ours, m
   private trafficAvoid: 1 | -1 | null = null;    // +1 climb, -1 descend
   private engineFailed   = false;
@@ -101,6 +110,7 @@ export class FlightScene extends Phaser.Scene {
   init(data: FlightSceneData): void {
     this.contractId          = data.contractId;
     this.landed              = false;
+    this.crashing            = false;
     this.hasBeenAirborne     = false;
     this.scrollX             = 0;
     this.smoothDt            = 1 / 60;
@@ -125,6 +135,9 @@ export class FlightScene extends Phaser.Scene {
     this.threatAlertAt       = -99;
     this.groundThreat        = null;
     this.threatHold          = 0;
+    this.weatherCaution      = null;
+    this.iceLoad             = 0;
+    this.avionicsOut         = false;
     this.trafficAdvisory     = null;
     this.trafficAvoid        = null;
     this.engineFailed        = false;
@@ -157,6 +170,7 @@ export class FlightScene extends Phaser.Scene {
     this.baseTimestamp = SaveService.get().world.gameTimestamp;
 
     this.weather = new WeatherSystem();
+    this.hazards.reset();
     FlightEventService.reset(definition);
 
     // ── Route length (gameplay scale, from the contract's settlements) ─────
@@ -196,6 +210,7 @@ export class FlightScene extends Phaser.Scene {
     const faction = window.gameData.factions.find(f => f.id === destSettlement?.factionId);
     if (faction) this.world.setFactionColor(parseInt(faction.color.replace('#', ''), 16));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
+    this.crash    = new CrashSequence(this, this.aircraft, groundY);
     this.fx       = new WeatherFX(this, width, height);
 
     // ── In-canvas approach indicator ──────────────────────────────────────
@@ -264,6 +279,7 @@ export class FlightScene extends Phaser.Scene {
       this.eventUnsubs.forEach(u => u());
       this.eventUnsubs = [];
       SoundEngine.stopFlightLoop();
+      this.crash.destroy();
     });
     SoundEngine.unlock();
     SoundEngine.stopAmbient();
@@ -283,6 +299,7 @@ export class FlightScene extends Phaser.Scene {
   // ── Main loop ─────────────────────────────────────────────────────────────
 
   update(time: number, delta: number): void {
+    if (this.crashing) { this.updateCrashSlide(delta / 1000); return; }
     if (this.landed || this.eventModalOpen) return;
 
     // Browsers hand out jittery frame deltas — ±2 ms is normal even on a
@@ -393,6 +410,11 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Physics (fixed-step, frame-rate independent) ───────────────────────
     this.state = this.controller.update(this.state, input, sdt, windX);
+
+    // ── Weather with teeth ────────────────────────────────────────────────
+    // Icing, lightning and sand ingestion, each with its own answer. Applied
+    // before turbulence so the degraded lift is what the gusts act on.
+    this.applyWeatherHazards(sdt);
 
     // ── Turbulence: gusts nudge the aircraft, dt-scaled so a storm is rough
     //    but flyable (previously this was per-frame and slammed you down) ────
@@ -542,6 +564,8 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Aircraft ───────────────────────────────────────────────────────────
     this.aircraft.setTurbulence(turbulence);
+    this.aircraft.setElevator((input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0));
+    this.aircraft.setIceLoad(this.iceLoad);
     this.aircraft.container.setY(this.world.altitudeToScreenY(this.state.altitude));
     this.aircraft.update(sdt, this.state);
 
@@ -574,6 +598,32 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Events to React ────────────────────────────────────────────────────
     EventBus.emit('flight:state-update', this.state);
+  }
+
+  /**
+   * While the wreck is tumbling: no physics, no input, but the world keeps
+   * scrolling — decelerating with the wreckage — so the crash reads as coming
+   * to a stop rather than the whole scene freezing at the moment of impact.
+   */
+  private updateCrashSlide(dt: number): void {
+    const sdt = Math.min(dt, 0.05);
+    this.crash.update(sdt);
+    this.scrollX += this.crash.slideSpeed() * sdt * WORLD_PX_PER_M;
+    this.world.update(sdt, {
+      scrollX: this.scrollX,
+      altitude: 0,
+      windX: 0,
+      routeTotalKm: this.routeKm,
+      condition: this.weather.current.condition,
+      minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
+      visibility: this.weather.current.visibility,
+      planeScreenX: AIRCRAFT_X,
+      planeScreenY: this.world.altitudeToScreenY(0),
+      planeWorldX: this.scrollX + AIRCRAFT_X,
+      speedFrac: 0,
+      progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
+    });
+    this.fx.update(sdt);
   }
 
   /** True when the given world position is on either airfield's asphalt. */
@@ -632,7 +682,9 @@ export class FlightScene extends Phaser.Scene {
 
     // Klaxon for a tall obstacle we are not currently above. The range is set
     // so the call always lands with enough room to out-climb the obstacle.
-    const ahead = hz.ahead(worldX, 2600);
+    // Range set so the call always lands with room to out-climb the tallest
+    // obstacle in the mix (masts now reach 78 m).
+    const ahead = hz.ahead(worldX, 3600);
     if (ahead && alt < ahead.hazard.heightM + 12 &&
         this.state.elapsedSeconds - this.hazardAlertAt > 2.5) {
       this.hazardAlertAt = this.state.elapsedSeconds;
@@ -675,6 +727,7 @@ export class FlightScene extends Phaser.Scene {
     if (fire.shots > 0) SoundEngine.gunfire();
     if (fire.hit) {
       SoundEngine.bulletHit();
+      this.aircraft.notifyHit();
       this.state.integrity = clamp(this.state.integrity - fire.damage, 0, 100);
       this.cameras.main.shake(120, 0.004 + Math.min(0.006, fire.damage * 0.0012));
       if (Math.random() < 0.2) this.cargo.applyDamage(4);
@@ -750,12 +803,76 @@ export class FlightScene extends Phaser.Scene {
       engineFailed: this.engineFailed,
       underFire: this.underFire,
       groundThreat: this.groundThreat,
+      weatherCaution: this.weatherCaution,
+      iceLoad: this.iceLoad,
+      avionicsOut: this.avionicsOut,
       stall: this.stallWarning,
       overspeed,
       obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
       trafficDeltaM: this.trafficAdvisory,
       trafficAvoid: this.trafficAvoid,
     });
+  }
+
+  // ── Weather that costs you something ──────────────────────────────────────
+
+  /**
+   * Ice, lightning and grit. Each hazard degrades the aircraft over time, is
+   * announced before it becomes critical, and has one specific action that
+   * fixes it — descend out of the icing, restart after a strike, climb out of
+   * the sand. Storms are no longer scenery.
+   */
+  private applyWeatherHazards(sdt: number): void {
+    const rep = this.hazards.update(
+      sdt, this.weather.current.condition, this.state, this.engineRunning && !this.engineFailed,
+    );
+
+    if (rep.damage > 0) {
+      this.state.integrity = clamp(this.state.integrity - rep.damage, 0, 100);
+    }
+
+    // ── Lightning ─────────────────────────────────────────────────────────
+    if (rep.struck) {
+      this.cameras.main.flash(320, 255, 255, 255);
+      this.cameras.main.shake(520, 0.013);
+      SoundEngine.thunder();
+      SoundEngine.impact();
+      this.aircraft.notifyHit();
+      this.disengageWarp('lightning strike');
+      EventBus.emit('ui:show-notification', {
+        message: '⚡ LIGHTNING STRIKE — engine out, instruments gone. Hold E to restart.',
+        type: 'danger',
+      });
+    }
+
+    // ── Anything that kills the engine ────────────────────────────────────
+    if (rep.killEngine && this.engineRunning && !this.engineFailed) {
+      this.engineFailed = true;
+      this.engineRunning = false;
+      this.aircraft.stopEngine();
+      SoundEngine.engineSputter();
+      this.disengageWarp('engine out');
+      if (!rep.struck) {
+        EventBus.emit('ui:show-notification', {
+          message: '✖ SAND HAS KILLED THE ENGINE — hold E to restart',
+          type: 'danger',
+        });
+      }
+    }
+
+    // ── Announce a caution once, when it first appears ────────────────────
+    if (rep.caution !== this.weatherCaution) {
+      const rising = rep.caution !== null
+        && (this.weatherCaution === null || rep.caution.length > this.weatherCaution.length);
+      this.weatherCaution = rep.caution;
+      if (rep.caution && rising) {
+        SoundEngine.warn();
+        EventBus.emit('ui:show-notification', { message: `⚠ ${rep.caution}`, type: 'warning' });
+        this.disengageWarp(rep.caution.toLowerCase());
+      }
+    }
+    this.iceLoad = rep.iceLoad;
+    this.avionicsOut = rep.blackout > 0;
   }
 
   // ── Other traffic ─────────────────────────────────────────────────────────
@@ -995,12 +1112,39 @@ export class FlightScene extends Phaser.Scene {
       reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
       landedOnRunway: this.isOnRunway(this.scrollX + AIRCRAFT_X),
     };
-    if (result.quality === 'crash') SoundEngine.crash(); else SoundEngine.chime();
-    if (result.quality === 'crash') {
-      flashToScene(this, 'PostFlightScene', data);
-    } else {
+    if (result.quality !== 'crash') {
+      SoundEngine.chime();
       fadeToScene(this, 'PostFlightScene', data);
+      return;
     }
+
+    // A crash is the one moment of the flight worth watching. Play it out —
+    // impact, break-up, cartwheel, burning wreck — and only then show the
+    // report. `crashing` keeps update() alive so the world still scrolls to a
+    // stop underneath the wreckage instead of freezing mid-slide.
+    this.crashing = true;
+    SoundEngine.stopFlightLoop();
+    // Silence the panel: nothing is overspeeding or being shot at any more,
+    // and leaving "CLIMB 340 m" flashing over a burning wreck is absurd.
+    this.groundThreat = null;
+    this.trafficAdvisory = null;
+    EventBus.emit('flight:status', {
+      engineFailed: false, underFire: false, groundThreat: null, stall: false,
+      overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
+      weatherCaution: null, iceLoad: 0, avionicsOut: false,
+    });
+    this.state.speed = 0;
+    this.state.verticalSpeed = 0;
+    this.state.throttle = 0;
+    EventBus.emit('flight:state-update', this.state);
+    this.crash.play(
+      {
+        speed: this.state.speed,
+        verticalSpeed: Math.abs(result.verticalSpeed),
+        gearUp: !this.state.gearDown,
+      },
+      () => fadeToScene(this, 'PostFlightScene', data),
+    );
   }
 
   /** Grades the landing from the impact values captured at touchdown. */

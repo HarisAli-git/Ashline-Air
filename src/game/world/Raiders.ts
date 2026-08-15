@@ -47,9 +47,13 @@ export interface WeaponProfile {
   /** Horizontal reach, world px. */
   rangePx: number;
   rounds: number;
-  /** Hit chance on the deck, falling to zero at the ceiling. */
-  accuracy: number;
-  /** Integrity damage per round that connects. */
+  /**
+   * Aiming error in radians at point-blank, scaled up with your height. This
+   * is the ONLY thing that decides whether a round connects — there is no
+   * separate hit roll. See the note on hit detection below.
+   */
+  spread: number;
+  /** Integrity damage per round that actually strikes the airframe. */
   damage: number;
   /** Seconds between bursts. */
   cadence: number;
@@ -59,29 +63,42 @@ export interface WeaponProfile {
   label: string;
 }
 
+/**
+ * Fewer rounds, each of which matters.
+ *
+ * The old table threw three or four rounds per weapon per burst and then
+ * decided damage with a private dice roll that had nothing to do with where
+ * those rounds were drawn. The result was a sky full of tracer that you could
+ * fly straight through without consequence, while damage arrived from rounds
+ * that visibly missed. Now each weapon fires one or two aimed rounds and the
+ * drawn round IS the hit test, so the volume of fire on screen is exactly the
+ * volume of fire you have to avoid.
+ */
 export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
   // Rifles and a belt-fed over sandbags. Only dangerous down low.
-  nest:      { ceilingM: 75,  rangePx: 1900, rounds: 3, accuracy: 0.40, damage: 1.2, cadence: 0.55, flak: false, label: 'SMALL ARMS' },
-  // A marksman with height and time — fewer rounds, but they count.
-  tower:     { ceilingM: 110, rangePx: 2500, rounds: 1, accuracy: 0.50, damage: 2.2, cadence: 1.25, flak: false, label: 'MARKSMAN' },
+  nest:      { ceilingM: 75,  rangePx: 1700, rounds: 2, spread: 0.030, damage: 3.0, cadence: 0.85, flak: false, label: 'SMALL ARMS' },
+  // A marksman with height and time — one round, but it is aimed.
+  tower:     { ceilingM: 110, rangePx: 2300, rounds: 1, spread: 0.018, damage: 6.0, cadence: 1.60, flak: false, label: 'MARKSMAN' },
   // Pintle-mounted heavy MG. Reaches a normal cruise height.
-  technical: { ceilingM: 165, rangePx: 2800, rounds: 4, accuracy: 0.34, damage: 1.8, cadence: 0.75, flak: false, label: 'HEAVY MG' },
+  technical: { ceilingM: 165, rangePx: 2500, rounds: 2, spread: 0.034, damage: 4.5, cadence: 1.10, flak: false, label: 'HEAVY MG' },
   // Wheeled twin autocannon with fused shells. This is the one you climb for.
-  aa:        { ceilingM: 340, rangePx: 4400, rounds: 3, accuracy: 0.30, damage: 3.5, cadence: 1.15, flak: true,  label: 'AA BATTERY' },
+  aa:        { ceilingM: 340, rangePx: 3200, rounds: 2, spread: 0.026, damage: 9.0, cadence: 1.60, flak: true,  label: 'AA BATTERY' },
   camp:      null,
 };
 
 /**
- * How many weapons may engage at once.
- *
- * Without this the threat scales with how many emplacements happen to be
- * inside the widest range in the zone, and an AA battery's 4400 px reach means
- * that is most of them — measured at 65 integrity lost in a single low pass,
- * which is not a cost, it is a death sentence. Capping it to the nearest few
- * also happens to be the honest reading: not every gun in four kilometres of
- * broken country has a line on you.
+ * How many weapons may engage at once. Kept low deliberately: the complaint
+ * was never that there was too little fire, it was that there was far too much
+ * of it and none of it meant anything.
  */
-const MAX_SIMULTANEOUS = 3;
+const MAX_SIMULTANEOUS = 2;
+
+/**
+ * The aircraft's hit box for incoming rounds, in px — matched to the drawn
+ * sprite (~90 px long, ~30 px tall) so what looks like a near miss is one.
+ */
+const HIT_HALF_W = 40;
+const HIT_HALF_H = 13;
 
 /** Weapons further out than this do not set the "climb above" bar. */
 const COMMITTED_RANGE_PX = 2600;
@@ -117,10 +134,14 @@ interface Tracer {
   vy: number;           // screen px/s
   life: number;
   hot: number;          // starting life, for fade
-  hit: boolean;
+  /** Integrity this round takes off if it strikes the airframe. */
+  damage: number;
 }
 
 interface Spark { x: number; y: number; vx: number; vy: number; life: number; }
+
+/** A round that went home — a bright flash on the skin where it struck. */
+interface Impact { x: number; y: number; age: number; }
 
 const TRACER_SPEED = 1500;   // world px/s along the line of fire
 const MAX_TRACERS = 64;
@@ -145,27 +166,61 @@ export class Raiders {
   private list: Emplacement[] = [];
   private tracers: Tracer[] = [];
   private sparks: Spark[] = [];
+  private impacts: Impact[] = [];
+  /** Damage from rounds that struck since the last engage() — see update(). */
+  private pendingDamage = 0;
+  private pendingHits = 0;
+
+  /**
+   * Swept test of one round's step against the aircraft's box. Sampled along
+   * the segment because a round covers ~25 px per frame and would otherwise
+   * tunnel clean through a 26 px-tall aeroplane.
+   */
+  private strikes(
+    x0: number, y0: number, x1: number, y1: number,
+    target: { worldX: number; screenY: number },
+  ): boolean {
+    for (let i = 0; i <= 4; i++) {
+      const k = i / 4;
+      const dx = (x0 + (x1 - x0) * k - target.worldX) / HIT_HALF_W;
+      const dy = (y0 + (y1 - y0) * k - target.screenY) / HIT_HALF_H;
+      if (dx * dx + dy * dy <= 1) return true;
+    }
+    return false;
+  }
 
   /** Lay out positions inside each hostile stretch. Deterministic per route. */
   layout(zones: ReadonlyArray<readonly [number, number]>, seed: number): void {
     this.list = [];
     this.tracers = [];
     this.sparks = [];
+    this.impacts = [];
+    this.pendingDamage = 0;
+    this.pendingHits = 0;
 
     for (let z = 0; z < zones.length; z++) {
       const [a, b] = zones[z];
       const span = b - a;
-      // One position roughly every 700 px of zone, 4–9 per zone.
-      const n = Phaser.Math.Clamp(Math.round(span / 700), 4, 9);
+      // Positions are sparser than they were: one every ~1100 px, 3–6 a zone.
+      const n = Phaser.Math.Clamp(Math.round(span / 1100), 3, 6);
+
+      // An AA battery is a real piece of ordnance, not standard kit. At most
+      // ONE per zone and only in some zones — previously every middle
+      // emplacement had a 22% chance of being one, so a typical zone fielded
+      // two batteries whose 4.4 km reach overlapped the entire stretch. That
+      // is what made it feel like AA was everywhere.
+      const aaZone = rnd(seed * 53 + z * 17) < 0.45;
+      const aaSlot = aaZone ? 1 + Math.floor(rnd(seed * 71 + z) * Math.max(1, n - 2)) : -1;
+
       for (let i = 0; i < n; i++) {
         const id = seed * 977 + z * 131 + i * 29;
         const r = rnd(id);
         // The camp furniture anchors each end; weapons fill the middle.
         let kind: EmplacementKind;
         if (i === 0 || i === n - 1) kind = 'camp';
-        else if (r < 0.34) kind = 'nest';
-        else if (r < 0.60) kind = 'technical';
-        else if (r < 0.82) kind = 'aa';
+        else if (i === aaSlot) kind = 'aa';
+        else if (r < 0.45) kind = 'nest';
+        else if (r < 0.78) kind = 'technical';
         else kind = 'tower';
         this.list.push({
           x: a + span * ((i + 0.5) / n) + (rnd(id + 3) - 0.5) * (span / n) * 0.5,
@@ -211,14 +266,41 @@ export class Raiders {
       e.aim += Phaser.Math.Clamp(d, -rate * dt, rate * dt);
     }
 
-    // Rounds in flight
+    // ── Rounds in flight, and whether they hit ────────────────────────────
+    // The drawn round IS the hit test. Previously damage came from a private
+    // dice roll at the moment of firing, so a wall of tracer could pass
+    // straight through the aircraft for nothing while damage arrived from
+    // rounds that visibly missed. Now flying through the stream hurts and
+    // getting out of it works, because they are the same thing.
     for (let i = this.tracers.length - 1; i >= 0; i--) {
       const tr = this.tracers[i];
+      const px = tr.wx, py = tr.y;
       tr.wx += tr.vx * dt;
       tr.y += tr.vy * dt;
       tr.vy += 90 * dt;               // they do drop off at the top of the arc
       tr.life -= dt;
+
+      if (target && this.strikes(px, py, tr.wx, tr.y, target)) {
+        this.pendingDamage += tr.damage;
+        this.pendingHits++;
+        this.impacts.push({ x: target.worldX, y: target.screenY, age: 0 });
+        for (let k = 0; k < 7; k++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 50 + Math.random() * 170;
+          this.sparks.push({
+            x: target.worldX, y: target.screenY,
+            vx: Math.cos(a) * sp - 120, vy: Math.sin(a) * sp - 40,
+            life: 0.2 + Math.random() * 0.25,
+          });
+        }
+        this.tracers.splice(i, 1);
+        continue;
+      }
       if (tr.life <= 0) this.tracers.splice(i, 1);
+    }
+    for (let i = this.impacts.length - 1; i >= 0; i--) {
+      this.impacts[i].age += dt;
+      if (this.impacts[i].age > 0.35) this.impacts.splice(i, 1);
     }
     for (let i = this.sparks.length - 1; i >= 0; i--) {
       const s = this.sparks[i];
@@ -278,17 +360,21 @@ export class Raiders {
       if (e.cool > 0) continue;
       e.cool = w.cadence * (0.75 + Math.random() * 0.5);
 
-      // Exposure: on the deck they can hardly miss, at the ceiling they can
-      // hardly connect. Height is the whole defence, and the falloff is steep
-      // on purpose — a partial climb that does not clear the ceiling still has
-      // to be worth making, or the only choice on offer is "all or nothing".
+      // Height is the whole defence, and it works by spoiling their aim: on
+      // the deck the rounds go where they are pointed, near the ceiling they
+      // scatter. No hit roll — whether it connects is settled in update() by
+      // where the round actually goes.
       const exposure = 1 - target.altM / w.ceilingM;
-      const connects = Math.random() < w.accuracy * (0.12 + 0.88 * exposure);
+      const scatter = w.spread * (1 + (1 - exposure) * 3.2);
       shots++;
-      if (connects) { damage += w.damage; hit = true; }
-
-      this.fire(e, w, baseY, target, connects);
+      this.fire(e, w, baseY, target, scatter);
     }
+
+    // Damage banked by rounds that struck the airframe since the last call
+    damage = this.pendingDamage;
+    hit = this.pendingHits > 0;
+    this.pendingDamage = 0;
+    this.pendingHits = 0;
 
     return { engaged, label: worst?.label ?? null, clearAltitudeM: clearAlt, shots, damage, hit };
   }
@@ -299,7 +385,7 @@ export class Raiders {
     w: WeaponProfile,
     baseY: number,
     target: { worldX: number; screenY: number },
-    connects: boolean,
+    scatter: number,
   ): void {
     const p = pivotOf(e.kind);
     const mx = e.x + p.x + Math.cos(e.aim) * p.len;
@@ -308,13 +394,13 @@ export class Raiders {
     e.recoil = 1;
 
     for (let k = 0; k < w.rounds; k++) {
-      const solve = connects && k === 0;
       const dxw = target.worldX - mx;
       const dys = target.screenY - my;
       const len = Math.max(1, Math.hypot(dxw, dys));
-      // Misses are thrown wide; the near ones are what make it feel close
-      const spread = solve ? 0 : (Math.random() - 0.5) * 0.16;
-      const ca = Math.cos(spread), sa = Math.sin(spread);
+      // Aim error is all there is: some of these will pass through the
+      // aircraft and some will not, and update() finds out which.
+      const err = (Math.random() - 0.5) * 2 * scatter;
+      const ca = Math.cos(err), sa = Math.sin(err);
       const ux = (dxw * ca - dys * sa) / len;
       const uy = (dxw * sa + dys * ca) / len;
       const tof = len / TRACER_SPEED;
@@ -324,10 +410,9 @@ export class Raiders {
         // At an AA ceiling the gun itself is usually below the bottom of the
         // frame, so the burst IS the thing you see — and it has to read on its
         // own, at any altitude.
-        const scatter = solve ? 0 : (Math.random() - 0.5) * 2;
         this.pendingFlak.push({
-          wx: target.worldX + scatter * 90,
-          y: target.screenY + (Math.random() - 0.5) * 70,
+          wx: mx + ux * TRACER_SPEED * tof,
+          y: my + uy * TRACER_SPEED * tof,
           in: tof, big: k === 0,
         });
       }
@@ -335,11 +420,10 @@ export class Raiders {
       this.tracers.push({
         wx: mx, y: my,
         vx: ux * TRACER_SPEED, vy: uy * TRACER_SPEED,
-        life: solve ? tof : tof * (1.5 + Math.random() * 0.7),
-        hot: solve ? tof : tof * 2,
-        hit: solve,
+        life: tof * (1.35 + Math.random() * 0.5),
+        hot: tof * 1.8,
+        damage: w.damage,
       });
-      if (solve) this.pendingImpact = { x: target.worldX, y: target.screenY, in: tof };
     }
     if (this.tracers.length > MAX_TRACERS) {
       this.tracers.splice(0, this.tracers.length - MAX_TRACERS);
@@ -364,25 +448,11 @@ export class Raiders {
     return best;
   }
 
-  private pendingImpact: { x: number; y: number; in: number } | null = null;
   private pendingFlak: Array<{ wx: number; y: number; in: number; big: boolean }> = [];
   private flak: Flak[] = [];
 
-  /** Called at draw time — lands rounds and detonates shells whose fuse ran out. */
+  /** Called at draw time — detonates shells whose fuse has run out. */
   private tickImpact(dt: number): void {
-    if (this.pendingImpact) {
-      this.pendingImpact.in -= dt;
-      if (this.pendingImpact.in <= 0) {
-        const { x, y } = this.pendingImpact;
-        this.pendingImpact = null;
-        for (let i = 0; i < 9; i++) {
-          const a = Math.random() * Math.PI * 2;
-          const sp = 40 + Math.random() * 150;
-          this.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 40, life: 0.18 + Math.random() * 0.22 });
-        }
-      }
-    }
-
     for (let i = this.pendingFlak.length - 1; i >= 0; i--) {
       const f = this.pendingFlak[i];
       f.in -= dt;
@@ -484,6 +554,16 @@ export class Raiders {
       const a = Phaser.Math.Clamp(s.life / 0.4, 0, 1);
       g.fillStyle(0xffd070, a);
       g.fillRect(s.x - scrollX, s.y, 1.8, 1.8);
+    }
+    // Strike flash on the skin. With so few rounds in the air now, the one
+    // that connects has to be unmistakable.
+    for (const im of this.impacts) {
+      const k = 1 - im.age / 0.35;
+      const sx = im.x - scrollX;
+      g.fillStyle(0xffffff, 0.9 * k);
+      g.fillCircle(sx, im.y, 3 + (1 - k) * 5);
+      g.fillStyle(0xffb040, 0.5 * k);
+      g.fillCircle(sx, im.y, 8 + (1 - k) * 16);
     }
   }
 

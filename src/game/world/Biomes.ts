@@ -99,6 +99,9 @@ export function biomeFor(id: string | undefined): BiomeId {
     case 'ashford_basin':    return 'basin';
     case 'redrock_camp':     return 'redrock';
     case 'irongate_station': return 'industrial';
+    case 'saltmarsh_docks':  return 'basin';       // drowned flats, pale and low
+    case 'cinder_flats':     return 'industrial';  // burned-out refinery country
+    case 'highreach_relay':  return 'ashland';     // high burnt forest, snow caps
     default:                 return 'ashland';
   }
 }

@@ -42,6 +42,12 @@ export interface GameEvents {
     trafficDeltaM: number | null;
     /** Which way to go to miss it: +1 climb, -1 descend. */
     trafficAvoid: 1 | -1 | null;
+    /** Icing / sand / avionics caution from the weather, or null. */
+    weatherCaution: string | null;
+    /** 0–1 ice on the airframe, for the gauge. */
+    iceLoad: number;
+    /** Instruments blanked by a lightning strike. */
+    avionicsOut: boolean;
   };
 
   // Economy
@@ -58,6 +64,12 @@ export interface GameEvents {
   'player:location-changed': { settlementId: string };
   'player:settlement-unlocked': { settlementId: string; name: string };
   'player:money-changed': { amount: number; delta: number };
+  'player:fleet-changed': { definitionId: string };
+  'profile:changed': { id: string; name: string };
+  'ui:open-hangar': void;
+  'ui:open-profiles': void;
+  'ui:close-profiles': void;
+  'ui:close-hangar': void;
   'player:reputation-changed': { factionId: string; delta: number; total: number };
   'player:aircraft-damaged': { delta: number; newIntegrity: number };
 

@@ -11,6 +11,8 @@ import { EventBus }        from './game/utils/EventBus';
 import { SoundEngine }     from './game/audio/SoundEngine';
 import { FlightHUD }       from './ui/components/hud/FlightHUD';
 import { PreFlightOverlay }from './ui/components/screens/PreFlightOverlay';
+import { HangarScreen }   from './ui/components/screens/HangarScreen';
+import { ProfilesScreen } from './ui/components/screens/ProfilesScreen';
 import { GlobalNotification } from './ui/components/menus/Notification';
 
 type UILayer = 'none' | 'flight' | 'preflight';
@@ -23,6 +25,8 @@ export default function App(): React.ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const gameRef = useRef<Phaser.Game | null>(null);
   const [uiLayer, setUiLayer] = useState<UILayer>('none');
+  const [hangarOpen, setHangarOpen] = useState(false);
+  const [profilesOpen, setProfilesOpen] = useState(false);
   const [preflightState, setPreflightState] = useState<PreflightState | null>(null);
 
   // Browsers only allow audio after a user gesture — unlock on the first one
@@ -57,9 +61,15 @@ export default function App(): React.ReactElement {
       setPreflightState({ settlementId });
       setUiLayer('preflight');
     });
+    // The hangar is its own overlay: it can be opened over the map or the
+    // pre-flight board without tearing either of them down.
+    const u5 = EventBus.on('ui:open-hangar', () => setHangarOpen(true));
+    const u6 = EventBus.on('ui:close-hangar', () => setHangarOpen(false));
+    const u7 = EventBus.on('ui:open-profiles', () => setProfilesOpen(true));
+    const u8 = EventBus.on('ui:close-profiles', () => setProfilesOpen(false));
 
     return () => {
-      u1(); u2(); u3(); u4();
+      u1(); u2(); u3(); u4(); u5(); u6(); u7(); u8();
       gameRef.current?.destroy(true);
       gameRef.current = null;
     };
@@ -74,6 +84,9 @@ export default function App(): React.ReactElement {
       {uiLayer === 'preflight' && preflightState && (
         <PreFlightOverlay settlementId={preflightState.settlementId} />
       )}
+
+      {hangarOpen && <HangarScreen />}
+      {profilesOpen && <ProfilesScreen />}
 
       {/* Global notification always available */}
       <GlobalNotification />

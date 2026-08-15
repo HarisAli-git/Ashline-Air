@@ -1,7 +1,14 @@
 import type { SaveData, PlayerState, WorldState, OwnedAircraft, AircraftDefinition } from '../types';
 import { EventBus } from '../game/utils/EventBus';
+import { ProfileService } from './ProfileService';
 
-const SAVE_KEY = 'ashline_air_save';
+/**
+ * Saves are namespaced per pilot. `ProfileService.ensureActive()` guarantees
+ * there is one (adopting any pre-profiles save), so this never falls back.
+ */
+function saveKey(): string {
+  return ProfileService.saveKeyFor(ProfileService.ensureActive().id);
+}
 // v3: the player now has a position on the map, and settlements unlock
 const SAVE_VERSION = 3;
 
@@ -52,7 +59,7 @@ class SaveServiceClass {
   private current: SaveData | null = null;
 
   load(): SaveData {
-    const raw = localStorage.getItem(SAVE_KEY);
+    const raw = localStorage.getItem(saveKey());
     if (!raw) {
       this.current = makeDefaultSave();
       return this.current;
@@ -77,17 +84,22 @@ class SaveServiceClass {
       player,
       world,
     };
-    localStorage.setItem(SAVE_KEY, JSON.stringify(this.current));
+    localStorage.setItem(saveKey(), JSON.stringify(this.current));
     EventBus.emit('save:saved');
   }
 
+  /** Forget the in-memory save so the next read comes from the new pilot. */
+  invalidate(): void {
+    this.current = null;
+  }
+
   deleteSave(): void {
-    localStorage.removeItem(SAVE_KEY);
+    localStorage.removeItem(saveKey());
     this.current = null;
   }
 
   hasSave(): boolean {
-    return localStorage.getItem(SAVE_KEY) !== null;
+    return localStorage.getItem(saveKey()) !== null;
   }
 
   get(): SaveData {

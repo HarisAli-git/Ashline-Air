@@ -42,6 +42,9 @@ export interface FlightStatus {
   obstacleAheadM: number | null;
   trafficDeltaM: number | null;
   trafficAvoid: 1 | -1 | null;
+  weatherCaution: string | null;
+  iceLoad: number;
+  avionicsOut: boolean;
 }
 
 export function useFlightStatus(): FlightStatus | null {

@@ -59,7 +59,15 @@ export class AircraftSprite {
   private readonly props: PropAssembly[] = [];
   private readonly legs: GearLeg[] = [];
   private readonly flapImg: Phaser.GameObjects.Image;
+  /** Hinged elevator — the one control surface that reads in a side view. */
+  private readonly elevatorImg: Phaser.GameObjects.Image;
+  private elevatorCmd = 0;    // -1 (down) … +1 (up), smoothed
+  private elevatorTarget = 0;
   private readonly damageImg: Phaser.GameObjects.Image;
+  /** Rime drawn over the airframe as ice builds. */
+  private readonly iceGfx: Phaser.GameObjects.Graphics;
+  /** Kept so the crash sequence can tear it off. */
+  private wingNearImg!: Phaser.GameObjects.Image;
   private readonly beaconCore: Phaser.GameObjects.Image;
   private readonly beaconGlow: Phaser.GameObjects.Image;
   private readonly lightCone: Phaser.GameObjects.Graphics;
@@ -125,6 +133,7 @@ export class AircraftSprite {
 
     this.lightCone = scene.add.graphics();
     this.body.add(this.lightCone);
+    this.iceGfx = scene.add.graphics();
 
     for (const e of spec.engines.filter(e => e.far)) {
       img(this.tex.nacelle, e.x, e.y).setAlpha(0.85).setTint(0xb0b0b0);
@@ -132,6 +141,13 @@ export class AircraftSprite {
     }
 
     this.buildGear();
+
+    // Elevator hinges at the back of the fixed stabiliser. Added before the
+    // hull so it tucks behind the fuselage exactly as the stabiliser does.
+    this.elevatorImg = scene.add.image(-spec.length * 0.43, -spec.height * 0.20, this.tex.elevator)
+      .setScale(1 / SS)
+      .setOrigin(1, 0.5);
+    this.body.add(this.elevatorImg);
 
     img(this.tex.hull);
     this.damageImg = img(this.tex.damage[0]).setAlpha(0);
@@ -143,7 +159,7 @@ export class AircraftSprite {
       }
     }
 
-    img(this.tex.wingNear);
+    this.wingNearImg = img(this.tex.wingNear);
 
     const hinge = flapHinge(spec);
     this.flapImg = scene.add.image(hinge.x, hinge.y, this.tex.flap)
@@ -152,6 +168,7 @@ export class AircraftSprite {
     this.body.add(this.flapImg);
 
     img(this.tex.canopy);
+    this.body.add(this.iceGfx);
 
     for (const e of spec.engines.filter(e => !e.far)) {
       img(this.tex.nacelle, e.x, e.y);
@@ -163,6 +180,20 @@ export class AircraftSprite {
       .setScale(0.6).setTint(0xff3820).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0);
     this.beaconCore = img('px_soft', spec.beacon.x, spec.beacon.y)
       .setScale(0.18).setTint(0xffd0c0).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0);
+  }
+
+  /** Texture keys, so the crash sequence can spawn matching debris. */
+  get textureKeys(): AircraftTexKeys { return this.tex; }
+
+  /**
+   * The airframe loses the parts that visibly come off in a wreck. The pieces
+   * themselves are spawned by CrashSequence in scene space so they can tumble
+   * independently of the container.
+   */
+  shedParts(): void {
+    this.wingNearImg.setVisible(false);
+    for (const p of this.props) p.root.setVisible(false);
+    this.flapImg.setVisible(false);
   }
 
   // ── Construction helpers ───────────────────────────────────────────────────
@@ -283,8 +314,61 @@ export class AircraftSprite {
   }
 
   /** Persistent fuel-mist trail from the wing (fuel-leak event). */
+  /**
+   * Rime building on the leading edges. Icing costs you lift and drag whether
+   * or not you can see it, so it has to be visible on the airframe — a number
+   * on a panel is not a thing a pilot notices in a blizzard.
+   */
+  setIceLoad(load: number): void {
+    const g = this.iceGfx;
+    g.clear();
+    if (load <= 0.02) return;
+
+    const s = this.spec;
+    const a = Math.min(1, load * 1.3);
+    const thick = 0.8 + load * 2.6;
+
+    // Wing leading edge, tailplane, fin and the nose bowl collect it first
+    g.lineStyle(thick, 0xdff0ff, 0.55 * a);
+    const w = s.wing;
+    g.lineBetween(w.rootX + w.chord * 0.5, w.y - 1, w.rootX - w.chord * 0.5, w.y - 1);
+    // Tailplane and fin, measured back from the tail cone
+    const tailX = -s.length * 0.42;
+    g.lineStyle(thick * 0.8, 0xdff0ff, 0.45 * a);
+    g.lineBetween(tailX + s.tail.stabLen * 0.4, 0, tailX - s.tail.stabLen * 0.6, 0);
+    g.lineBetween(tailX, -2, tailX - s.tail.finSweep, -s.tail.finHeight * 0.85);
+
+    // Lumpy accretion — rime is not a smooth coat
+    g.fillStyle(0xeaf6ff, 0.5 * a);
+    for (let i = 0; i < 9; i++) {
+      const t = i / 8;
+      const x = w.rootX + w.chord * 0.5 - w.chord * t;
+      const r = (0.7 + Math.sin(i * 2.3) * 0.4 + load * 1.6);
+      g.fillCircle(x, w.y - 1, r);
+    }
+    // The nose picks up the worst of it
+    const e0 = s.engines[0];
+    g.fillStyle(0xeaf6ff, 0.42 * a);
+    g.fillEllipse(e0.x + e0.cowlLen * 0.45, e0.y, 4 + load * 7, e0.cowlH * 0.8);
+  }
+
+  /**
+   * Elevator command, -1 (nose down) … +1 (nose up). Driven by the stick, not
+   * by the resulting pitch, so the surface leads the aeroplane the way a real
+   * one does — you see the control move, then the nose follow.
+   */
+  setElevator(cmd: number): void {
+    this.elevatorTarget = Phaser.Math.Clamp(cmd, -1, 1);
+  }
+
   setFuelLeak(on: boolean): void {
     this.particles?.setFuelLeak(on);
+  }
+
+  /** A round connected — sparks off the airframe where it went in. */
+  notifyHit(): void {
+    const p = this.localToScene(this.spec.wing.rootX - 6, this.spec.wing.y);
+    this.particles?.hit(p.x, p.y);
   }
 
   /** Weather turbulence 0–1: the airframe visibly rocks and jolts with it. */
@@ -326,6 +410,11 @@ export class AircraftSprite {
     this.updateGear(dt, state);
     this.updateFlaps(dt, state.flapsDeployed);
     this.updateDamage(dt, state.integrity);
+
+    // Elevator: a control surface has inertia and a hinge, so it eases toward
+    // the commanded position rather than snapping. Deflects up to 22°.
+    this.elevatorCmd += (this.elevatorTarget - this.elevatorCmd) * Math.min(1, dt * 11);
+    this.elevatorImg.setRotation(Phaser.Math.DegToRad(-this.elevatorCmd * 27));
     this.updateBeacon(dt);
     this.updateLightCone(state);
     this.updateAttitude(state);
