@@ -147,6 +147,34 @@ export const AIRCRAFT_SPECS: Record<string, AircraftVisualSpec> = {
     groundStanceDeg: 9,
   },
 
+  // High-wing regional freighter — the ATR-shaped workhorse of the fleet:
+  // a long slab-sided fuselage, a big T-tail, and the wing carried on the
+  // roof so the cabin floor sits low enough to load off a truck bed.
+  regional_freighter: {
+    scale: 0.88,
+    length: 200,
+    height: 38,
+    palette: {
+      hull: 0x8c8a80, hullShade: 0x5e5d56, hullLight: 0xb4b2a6,
+      accent: 0x2f6fa8, rust: 0x6a4a30,
+      canopy: 0x1e2a33, canopyGlint: 0xbfe0ec,
+      prop: 0x201d1a, metal: 0x9a958a,
+    },
+    wing:  { layout: 'high', rootX: 6, y: -16, chord: 46, span: 84, sweep: 10, drop: -4 },
+    tail:  { finHeight: 46, finSweep: 24, stabLen: 40 },
+    canopy: { style: 'windows', x: 70, w: 40 },
+    engines: [
+      { x: 34, y: -12, cowlLen: 40, cowlH: 19 },
+      { x: 22, y: -18, cowlLen: 40, cowlH: 19, far: true },
+    ],
+    prop:  { r: 26, bladePairs: 2 },
+    gear:  { fixed: false, mainX: 16, noseX: 76, tailWheelX: null, strutLen: 22, wheelR: 9, hingeY: 16 },
+    flap:  { maxDeflectDeg: 38 },
+    beacon: { x: -94, y: -62 },
+    exhaust: { x: 16, y: 6 },
+    groundContactY: 47,
+  },
+
   twin_turboprop: {
     scale: 0.95,
     length: 190,

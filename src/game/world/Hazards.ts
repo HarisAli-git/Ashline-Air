@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { drawObstacle, type ObstacleKind, type ObstacleStyle } from './Obstacles';
 
 /**
  * Everything along the route that can actually hurt you.
@@ -13,7 +14,7 @@ import Phaser from 'phaser';
  * climbing is safe but costs fuel, time and airspeed.
  */
 
-export type HazardKind = 'mast' | 'tower' | 'crane';
+export type HazardKind = ObstacleKind;
 
 export interface Hazard {
   x: number;          // world px
@@ -28,6 +29,20 @@ export interface Hazard {
  * over sandbags and a wheeled autocannon do not share a ceiling, and the
  * whole point of the hostile zones is that you have to read which is which.
  */
+
+/** Height range in metres for each obstacle, and its collision footprint. */
+const HEIGHT_BAND: Record<HazardKind, [number, number]> = {
+  mast:    [34, 78],   // the one that genuinely makes you climb
+  turbine: [36, 68],
+  stack:   [26, 54],
+  tower:   [18, 40],
+  pylon:   [22, 38],
+  crane:   [16, 34],
+};
+
+const HALF_WIDTH: Record<HazardKind, number> = {
+  mast: 11, turbine: 14, stack: 15, tower: 22, pylon: 20, crane: 30,
+};
 
 function hash(i: number): number {
   const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
@@ -51,19 +66,18 @@ export class Hazards {
     let x = startPx + 1800;
     let i = seed * 31;
     while (x < endPx - 400) {
+      // Weighted so the tall ones — the masts and turbines that actually force
+      // a climb — stay uncommon, and the low clutter is what you meet most.
       const r = hash(i++);
-      const kind: HazardKind = r < 0.45 ? 'mast' : r < 0.78 ? 'tower' : 'crane';
-      const heightM =
-        kind === 'mast' ? 26 + hash(i++) * 34 :
-        kind === 'tower' ? 17 + hash(i++) * 22 :
-        15 + hash(i++) * 16;
-      this.list.push({
-        x,
-        kind,
-        heightM,
-        halfWidth: kind === 'crane' ? 26 : kind === 'tower' ? 20 : 10,
-        seed: i,
-      });
+      const kind: HazardKind =
+        r < 0.22 ? 'mast' :
+        r < 0.42 ? 'tower' :
+        r < 0.58 ? 'crane' :
+        r < 0.74 ? 'pylon' :
+        r < 0.89 ? 'stack' : 'turbine';
+      const band = HEIGHT_BAND[kind];
+      const heightM = band[0] + hash(i++) * (band[1] - band[0]);
+      this.list.push({ x, kind, heightM, halfWidth: HALF_WIDTH[kind], seed: i });
       x += minGap + hash(i++) * 3000;
     }
 
@@ -123,7 +137,7 @@ export class Hazards {
     pxPerM: number,
     width: number,
     t: number,
-    daylight: number,
+    style: ObstacleStyle,
   ): void {
     // Hostile ground: a dirty haze band with raider camp markers
     for (const [a, b] of this.hostile) {
@@ -145,78 +159,9 @@ export class Hazards {
 
     for (const h of this.list) {
       const sx = h.x - scrollX;
-      if (sx < -80 || sx > width + 80) continue;
+      if (sx < -140 || sx > width + 140) continue;
       const topY = baseY - h.heightM * pxPerM;
-      const bodyH = baseY - topY;
-      if (bodyH <= 2) continue;
-
-      switch (h.kind) {
-        case 'mast': {
-          // Guyed lattice radio mast with an aircraft warning light
-          g.lineStyle(1, 0x2a2620, 0.75);
-          g.lineBetween(sx, baseY, sx - bodyH * 0.32, baseY);
-          g.lineBetween(sx, baseY - bodyH * 0.55, sx - bodyH * 0.32, baseY);
-          g.lineBetween(sx, baseY, sx + bodyH * 0.32, baseY);
-          g.lineBetween(sx, baseY - bodyH * 0.55, sx + bodyH * 0.32, baseY);
-
-          g.lineStyle(2.2, 0x33302a, 1);
-          g.lineBetween(sx - 4, baseY, sx - 1, topY);
-          g.lineBetween(sx + 4, baseY, sx + 1, topY);
-          g.lineStyle(1, 0x33302a, 0.9);
-          const rungs = Math.max(4, Math.floor(bodyH / 14));
-          for (let r = 1; r < rungs; r++) {
-            const y = baseY - (bodyH * r) / rungs;
-            const w = 4 - (3 * r) / rungs;
-            g.lineBetween(sx - w, y, sx + w, y);
-          }
-          // Strobe on top — the thing you should be looking for at night
-          const on = Math.sin(t * 3) > 0;
-          if (on) {
-            g.fillStyle(0xff3020, 0.95);
-            g.fillCircle(sx, topY - 2, 2.6);
-            g.fillStyle(0xff3020, 0.25 + (1 - daylight) * 0.25);
-            g.fillCircle(sx, topY - 2, 8);
-          }
-          break;
-        }
-        case 'tower': {
-          // Ruined concrete tower, jagged top, dead windows
-          g.fillStyle(0x1a1713, 1);
-          g.beginPath();
-          g.moveTo(sx - h.halfWidth, baseY);
-          g.lineTo(sx - h.halfWidth, topY + 8);
-          g.lineTo(sx - h.halfWidth * 0.3, topY);
-          g.lineTo(sx + h.halfWidth * 0.4, topY + 5);
-          g.lineTo(sx + h.halfWidth, topY + 12);
-          g.lineTo(sx + h.halfWidth, baseY);
-          g.closePath();
-          g.fillPath();
-          g.fillStyle(0x000000, 0.5);
-          for (let wy = topY + 18; wy < baseY - 8; wy += 15) {
-            for (let wx = sx - h.halfWidth + 5; wx < sx + h.halfWidth - 4; wx += 10) {
-              if (hash(wx + wy + h.seed) < 0.6) g.fillRect(wx, wy, 4, 6);
-            }
-          }
-          break;
-        }
-        default: {
-          // Gantry crane, cable and hook swinging in the wind
-          const legSpread = h.halfWidth;
-          g.lineStyle(2.4, 0x3a3128, 1);
-          g.lineBetween(sx - legSpread, baseY, sx - 3, topY);
-          g.lineBetween(sx + legSpread, baseY, sx + 3, topY);
-          g.lineBetween(sx - 3, topY, sx + legSpread * 1.6, topY - 4);
-          g.lineStyle(1.2, 0x3a3128, 0.9);
-          g.lineBetween(sx + legSpread * 1.6, topY - 4, sx + 3, topY - 14);
-          g.lineBetween(sx + 3, topY - 14, sx - 3, topY);
-          const swing = Math.sin(t * 0.8 + h.seed) * 6;
-          g.lineStyle(1, 0x2a241c, 0.9);
-          g.lineBetween(sx + legSpread * 1.3, topY - 3, sx + legSpread * 1.3 + swing, topY + 26);
-          g.fillStyle(0x2a241c, 1);
-          g.fillRect(sx + legSpread * 1.3 + swing - 3, topY + 26, 6, 5);
-          break;
-        }
-      }
+      drawObstacle(g, h.kind, sx, baseY, topY, h.halfWidth, h.seed, t, style);
     }
   }
 

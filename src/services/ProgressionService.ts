@@ -33,12 +33,35 @@ interface UnlockRule {
   blurb: string;
 }
 
+/**
+ * The route network opens up one field at a time. Each rung asks for a few
+ * more completed runs and a bit more standing, so the map grows at roughly the
+ * pace the hangar does and there is always a next thing to be working toward.
+ */
 const UNLOCKS: UnlockRule[] = [
   {
     settlementId: 'irongate_station',
     deliveries: 3,
     reputation: 10,
     blurb: 'The Guild has seen your manifests. Irongate Station will take your traffic.',
+  },
+  {
+    settlementId: 'saltmarsh_docks',
+    deliveries: 7,
+    reputation: 45,
+    blurb: 'The barge crews have vouched for you. Saltmarsh Docks is on your chart.',
+  },
+  {
+    settlementId: 'cinder_flats',
+    deliveries: 12,
+    reputation: 90,
+    blurb: 'Word reached the Flats that you fly through trouble instead of around it. They want a word — and they pay.',
+  },
+  {
+    settlementId: 'highreach_relay',
+    deliveries: 18,
+    reputation: 150,
+    blurb: 'Highreach has cleared you for the mountain strip. Short runway, thin air, and the best rates in the wasteland.',
   },
 ];
 

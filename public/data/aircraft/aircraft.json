@@ -63,6 +63,27 @@
     }
   },
   {
+    "id": "regional_freighter",
+    "name": "ATR-Series Freighter",
+    "tier": 2,
+    "description": "A pre-war regional turboprop stripped to bare metal and converted for cargo. High wing, big doors, and it will get into strips the heavy stuff cannot.",
+    "unlockCost": 62000,
+    "spriteKey": "aircraft_regional_freighter",
+    "stats": {
+      "maxSpeed": 420,
+      "cruiseSpeed": 330,
+      "stallSpeed": 105,
+      "maxAltitude": 7600,
+      "climbRate": 9,
+      "cargoCapacity": 2000,
+      "fuelCapacity": 520,
+      "fuelBurnRate": 42,
+      "engineReliability": 0.95,
+      "landingDifficulty": 4,
+      "repairCostPerUnit": 52
+    }
+  },
+  {
     "id": "twin_turboprop",
     "name": "Twin Turboprop",
     "tier": 2,

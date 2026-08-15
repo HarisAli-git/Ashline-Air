@@ -330,7 +330,11 @@ export class ParallaxWorld {
 
     this.hazardGfx.clear();
     if (gy < this.height + 40) {
-      this.hazards.draw(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
+      // Obstacles are lit by the sky they stand against, so they get the
+      // current horizon colour rather than being flat black cut-outs.
+      this.hazards.draw(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, {
+        rim: this.pal.skyBot, daylight: this.dl,
+      });
       this.raiders.draw(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl, this.crowdStyle, dt);
     }
 

@@ -64,6 +64,12 @@ export interface GameEvents {
   'player:location-changed': { settlementId: string };
   'player:settlement-unlocked': { settlementId: string; name: string };
   'player:money-changed': { amount: number; delta: number };
+  'player:fleet-changed': { definitionId: string };
+  'profile:changed': { id: string; name: string };
+  'ui:open-hangar': void;
+  'ui:open-profiles': void;
+  'ui:close-profiles': void;
+  'ui:close-hangar': void;
   'player:reputation-changed': { factionId: string; delta: number; total: number };
   'player:aircraft-damaged': { delta: number; newIntegrity: number };
 

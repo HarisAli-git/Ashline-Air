@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { SaveService } from '../../services/SaveService';
 import { ProgressionService } from '../../services/ProgressionService';
+import { DevService } from '../../services/DevService';
 import { EventBus } from '../utils/EventBus';
 import { fadeIn, fadeToScene } from '../utils/transitions';
 import { ensureSharedTextures } from '../entities/aircraft/render/AircraftPainter';
@@ -54,6 +55,19 @@ export class MapScene extends Phaser.Scene {
     this.drawChrome(width, height, save.world.gameTimestamp);
     this.seedMotes(width, height);
     this.animGfx = this.add.graphics();
+
+    // The chart is built once in create() from the save, so anything that
+    // changes the save behind it — buying an aircraft, servicing, the dev
+    // unlock — leaves stale markers, a stale header and settlements still
+    // showing LOCKED. Rebuild when the hangar hands control back.
+    const rebuild = (): void => {
+      if (this.scene.isActive()) this.scene.restart();
+    };
+    const unsubs = [
+      EventBus.on('ui:close-hangar', rebuild),
+      EventBus.on('player:settlement-unlocked', rebuild),
+    ];
+    this.events.once('shutdown', () => unsubs.forEach(u => u()));
   }
 
   update(_time: number, delta: number): void {
@@ -378,6 +392,40 @@ export class MapScene extends Phaser.Scene {
     this.add.text(cx, cy - 38, 'N', {
       fontSize: '11px', color: '#ffd080', fontFamily: 'monospace',
     }).setOrigin(0.5);
+
+    // ── Hangar: the only place the money you earn has to go ────────────────
+    const hangarBtn = this.add.text(width - 16, 52, '⌂  HANGAR', {
+      fontSize: '13px', color: '#ffd080', fontFamily: 'monospace',
+      backgroundColor: '#1a1409', padding: { x: 10, y: 5 },
+    }).setOrigin(1, 0.5).setInteractive({ useHandCursor: true });
+    hangarBtn.on('pointerover', () => hangarBtn.setStyle({ color: '#fff0c0' }));
+    hangarBtn.on('pointerout',  () => hangarBtn.setStyle({ color: '#ffd080' }));
+    hangarBtn.on('pointerdown', () => {
+      SoundEngine.click();
+      EventBus.emit('ui:open-hangar');
+    });
+
+    // DEV: grant everything, so the later content can be inspected without
+    // playing thirty contracts to reach it.
+    if (DevService.enabled) {
+      const devBtn = this.add.text(width - 16, 78, 'DEV: UNLOCK ALL', {
+        fontSize: '11px', color: '#88ccff', fontFamily: 'monospace',
+        backgroundColor: '#0d1420', padding: { x: 8, y: 4 },
+      }).setOrigin(1, 0.5).setInteractive({ useHandCursor: true });
+      devBtn.on('pointerdown', () => {
+        SoundEngine.click();
+        EventBus.emit('ui:show-notification', {
+          message: DevService.unlockEverything(), type: 'success',
+        });
+        this.scene.restart();
+      });
+      this.input.keyboard?.on('keydown-U', () => {
+        EventBus.emit('ui:show-notification', {
+          message: DevService.unlockEverything(), type: 'success',
+        });
+        this.scene.restart();
+      });
+    }
 
     // Standing orders: where you are, and what the next destination wants
     const here = ProgressionService.currentLocation(save);

@@ -682,7 +682,9 @@ export class FlightScene extends Phaser.Scene {
 
     // Klaxon for a tall obstacle we are not currently above. The range is set
     // so the call always lands with enough room to out-climb the obstacle.
-    const ahead = hz.ahead(worldX, 2600);
+    // Range set so the call always lands with room to out-climb the tallest
+    // obstacle in the mix (masts now reach 78 m).
+    const ahead = hz.ahead(worldX, 3600);
     if (ahead && alt < ahead.hazard.heightM + 12 &&
         this.state.elapsedSeconds - this.hazardAlertAt > 2.5) {
       this.hazardAlertAt = this.state.elapsedSeconds;
