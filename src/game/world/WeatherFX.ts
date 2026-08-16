@@ -34,8 +34,8 @@ const FX: Record<WeatherCondition, ConditionFX> = {
 
 export class WeatherFX {
   private readonly scene: Phaser.Scene;
-  private readonly width: number;
-  private readonly height: number;
+  private width: number;   // mutable: see resize()
+  private height: number;   // mutable: see resize()
 
   private readonly overlay: Phaser.GameObjects.Rectangle;
   private readonly flash: Phaser.GameObjects.Rectangle;
@@ -55,6 +55,12 @@ export class WeatherFX {
   private boltGfx!: Phaser.GameObjects.Graphics;
   private bolt: Array<[number, number]> = [];
   private boltBranches: Array<Array<[number, number]>> = [];
+
+  /** Re-fit to a new canvas size; all effects are drawn per frame from these. */
+  resize(width: number, height: number): void {
+    this.width = width;
+    this.height = height;
+  }
 
   constructor(scene: Phaser.Scene, width: number, height: number) {
     this.scene = scene;

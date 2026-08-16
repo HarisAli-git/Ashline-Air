@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { ProfileService, type Pilot } from '../../../services/ProfileService';
 import { SaveService } from '../../../services/SaveService';
 import { EventBus } from '../../../game/utils/EventBus';
+import { useViewport } from '../../viewport';
+import { panelChrome } from './panelChrome';
 
 /**
  * Pick a pilot. No account, no password — each pilot is a named save slot in
@@ -13,6 +15,7 @@ export function ProfilesScreen(): React.ReactElement {
   const [name, setName] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const activeId = ProfileService.activeId;
+  const vp = useViewport();
 
   const refresh = (): void => setPilots(ProfileService.list());
 
@@ -46,8 +49,8 @@ export function ProfilesScreen(): React.ReactElement {
   };
 
   return (
-    <div style={styles.backdrop}>
-      <div style={styles.panel}>
+    <div style={{ ...styles.backdrop, ...panelChrome(vp, 560, 520).backdrop, background: 'rgba(6,5,3,0.93)', zIndex: 50 }}>
+      <div style={{ ...styles.panel, ...panelChrome(vp, 560, 520).panel }}>
         <div style={styles.header}>
           <span style={styles.title}>PILOTS</span>
           {activeId && (
@@ -57,7 +60,7 @@ export function ProfilesScreen(): React.ReactElement {
           )}
         </div>
 
-        <div style={styles.list}>
+        <div className="aa-scroll" style={styles.list}>
           {pilots.length === 0 && (
             <div style={styles.empty}>No pilots yet. Sign one on below.</div>
           )}
@@ -115,7 +118,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontFamily: 'monospace', zIndex: 50,
   },
-  panel: { width: 560, background: '#100d07', border: '1px solid #3a2f1a' },
+  panel: {},   // sized by panelChrome()
   header: {
     display: 'flex', alignItems: 'center', padding: '10px 16px',
     borderBottom: '1px solid #3a2f1a', background: '#0a0804',
@@ -125,7 +128,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'transparent', border: '1px solid #5a4a20', color: '#c8b888',
     padding: '4px 12px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 11,
   },
-  list: { maxHeight: 320, overflowY: 'auto', padding: 10 },
+  list: { flex: 1, minHeight: 0, overflowY: 'auto', padding: 10 },
   empty: { color: '#6a5a3a', fontSize: 12, padding: 16, textAlign: 'center' },
   row: {
     display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px',

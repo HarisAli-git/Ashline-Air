@@ -15,6 +15,8 @@ import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
 import { clamp, distance, pixelsToKm } from '../utils/math';
+import { isTouchDevice } from '../utils/device';
+import { TouchInput } from '../utils/touchInput';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
 const GROUND_Y_OFFSET = 110;  // px from screen bottom to ground line
@@ -145,10 +147,32 @@ export class FlightScene extends Phaser.Scene {
     this.restartHoldFor      = 0;
   }
 
+  /** Kept so it can be repositioned on resize and hidden on touch devices. */
+  private keyHintText!: Phaser.GameObjects.Text;
+
+  /**
+   * Re-fit to a new design canvas without restarting — a flight in progress
+   * must survive a window resize or a device rotation.
+   *
+   * Only the WIDTH ever changes (`DESIGN_H` is fixed, see GameSize.ts), so the
+   * ground line, the altitude bands and every physics-facing constant are
+   * untouched; this is purely the horizontal furniture.
+   */
+  relayout(width: number, height: number): void {
+    const groundY = height - GROUND_Y_OFFSET;
+    this.cameras.resize(width, height);
+    this.world?.resize(width, height, groundY);
+    this.fx?.resize(width, height);
+    this.approachText?.setPosition(width / 2, height / 2 - 30);
+    this.keyHintText?.setPosition(width - 12, 12);
+  }
+
   create(): void {
     const { width, height } = this.cameras.main;
     const groundY = height - GROUND_Y_OFFSET;
     fadeIn(this);
+    // A button still held when the last flight ended must not leak into this one
+    TouchInput.reset();
 
     // ── Physics init ──────────────────────────────────────────────────────
     const { owned, def: definition } = SaveService.getActiveAircraft();
@@ -219,11 +243,15 @@ export class FlightScene extends Phaser.Scene {
       backgroundColor: '#00000099', padding: { x: 14, y: 6 },
     }).setOrigin(0.5).setDepth(10).setAlpha(0);
 
-    this.add.text(width - 12, height - 12,
+    // Keyboard legend, TOP right. The bottom of the canvas belongs to the
+    // React instrument panel, whose height in design units varies with the
+    // display scale — anything anchored to the bottom edge disappears behind
+    // it on some screens and not others. The top-right corner is always free.
+    this.keyHintText = this.add.text(width - 12, 12,
       'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine/Restart   T: Time   M: Mute   ESC: Abort',
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
-    ).setOrigin(1, 1).setDepth(10);
+    ).setOrigin(1, 0).setDepth(10).setVisible(!isTouchDevice());
 
     this.warpText = this.add.text(14, 14, '»» TIME ×4', {
       fontSize: '15px', color: '#ffd080', fontFamily: 'monospace', fontStyle: 'bold',
@@ -320,15 +348,27 @@ export class FlightScene extends Phaser.Scene {
     this.flapsToggleCooldown = Math.max(0, this.flapsToggleCooldown - delta);
 
     // ── Input ──────────────────────────────────────────────────────────────
+    // Keyboard OR on-screen control — a tablet with a keyboard attached is not
+    // an either/or, so the two sources are simply combined.
     const input: FlightInput = {
-      throttleUp:   this.keys.W.isDown,
-      throttleDown: this.keys.S.isDown,
-      pitchUp:      this.keys.A.isDown,
-      pitchDown:    this.keys.D.isDown,
+      throttleUp:   this.keys.W.isDown || TouchInput.isHeld('throttleUp'),
+      throttleDown: this.keys.S.isDown || TouchInput.isHeld('throttleDown'),
+      pitchUp:      this.keys.A.isDown || TouchInput.isHeld('pitchUp'),
+      pitchDown:    this.keys.D.isDown || TouchInput.isHeld('pitchDown'),
       engineOn:     this.engineRunning,
     };
 
-    if (Phaser.Input.Keyboard.JustDown(this.keys.E)) {
+    // The touch throttle is a LEVER: it gives an absolute demand, which is
+    // turned back into the same up/down the keyboard produces so the engine
+    // still spools at its own rate. Snapping the throttle straight to the
+    // slider position would let a finger flick bypass the spool entirely.
+    const demand = TouchInput.getThrottleTarget();
+    if (demand !== null) {
+      input.throttleUp   = this.state.throttle < demand - 0.015;
+      input.throttleDown = this.state.throttle > demand + 0.015;
+    }
+
+    if ((Phaser.Input.Keyboard.JustDown(this.keys.E) || TouchInput.consume('engine'))) {
       if (this.engineFailed) {
         // A failed engine needs cranking — it does not just snap back on
         if (this.restartHoldFor <= 0) {
@@ -349,7 +389,7 @@ export class FlightScene extends Phaser.Scene {
         }
       }
     }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.G) && this.gearToggleCooldown === 0) {
+    if ((Phaser.Input.Keyboard.JustDown(this.keys.G) || TouchInput.consume('gear')) && this.gearToggleCooldown === 0) {
       if (!this.aircraft.hasRetractableGear) {
         EventBus.emit('ui:show-notification', { message: 'This aircraft has fixed landing gear.', type: 'info' });
         this.gearToggleCooldown = 500;
@@ -361,11 +401,11 @@ export class FlightScene extends Phaser.Scene {
         EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
       }
     }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.M)) {
+    if ((Phaser.Input.Keyboard.JustDown(this.keys.M) || TouchInput.consume('mute'))) {
       const muted = SoundEngine.toggleMute();
       EventBus.emit('ui:show-notification', { message: muted ? 'Sound muted.' : 'Sound on.', type: 'info' });
     }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.F) && this.flapsToggleCooldown === 0) {
+    if ((Phaser.Input.Keyboard.JustDown(this.keys.F) || TouchInput.consume('flaps')) && this.flapsToggleCooldown === 0) {
       this.state.flapsDeployed = !this.state.flapsDeployed;
       this.flapsToggleCooldown = 500;
       SoundEngine.flapMove();
@@ -377,7 +417,7 @@ export class FlightScene extends Phaser.Scene {
         type: 'info',
       });
     }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.T)) {
+    if ((Phaser.Input.Keyboard.JustDown(this.keys.T) || TouchInput.consume('time'))) {
       if (this.timeScale === 4) {
         this.timeScale = 8;
         this.warpText.setText('»» TIME ×8').setVisible(true);
@@ -389,12 +429,12 @@ export class FlightScene extends Phaser.Scene {
       } else if (this.state.altitude > 30 && !this.rollout) {
         this.timeScale = 4;
         this.warpText.setText('»» TIME ×4').setVisible(true);
-        EventBus.emit('ui:show-notification', { message: '»» Time warp ×4 — press T again for ×8. Auto-disengages when something needs you.', type: 'info' });
+        EventBus.emit('ui:show-notification', { message: `»» Time warp ×4 — ${isTouchDevice() ? 'tap TIME again' : 'press T again'} for ×8. Auto-disengages when something needs you.`, type: 'info' });
       } else {
         EventBus.emit('ui:show-notification', { message: 'Time warp needs stable flight above 30 m.', type: 'warning' });
       }
     }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.ESC)) {
+    if ((Phaser.Input.Keyboard.JustDown(this.keys.ESC) || TouchInput.consume('abort'))) {
       EventBus.emit('scene:return-to-map');
       EventBus.emit('ui:show-notification', { message: 'Flight aborted.', type: 'warning' });
       fadeToScene(this, 'MapScene');

@@ -33,7 +33,7 @@ export function PreFlightOverlay({ settlementId }: Props): React.ReactElement {
       </div>
 
       {/* Content */}
-      <div style={styles.content}>
+      <div className="aa-scroll" style={styles.content}>
         {tab === 'contracts' && (
           <ContractBoard
             settlementId={settlementId}
@@ -48,12 +48,16 @@ export function PreFlightOverlay({ settlementId }: Props): React.ReactElement {
 
 const styles: Record<string, React.CSSProperties> = {
   overlay: {
-    position: 'fixed',
-    top: 80,
+    // absolute so it belongs to the canvas rect, and sized against the screen:
+    // a fixed 560 px box at top:80 overhung a phone and pushed its own FLY
+    // button below the fold.
+    position: 'absolute',
+    top: 'calc(56px + env(safe-area-inset-top, 0px))',
     left: '50%',
     transform: 'translateX(-50%)',
-    width: 560,
-    maxHeight: '75vh',
+    width: 'min(560px, calc(100% - 24px))',
+    maxHeight: 'calc(100% - 112px)',
+    pointerEvents: 'auto',
     background: 'rgba(10,8,4,0.96)',
     border: '1px solid #3a2a10',
     borderRadius: 4,
@@ -69,6 +73,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   tab: {
     flex: 1,
+    minHeight: 44,   // tappable
     background: 'transparent',
     border: 'none',
     borderBottom: '2px solid transparent',
@@ -86,6 +91,7 @@ const styles: Record<string, React.CSSProperties> = {
   content: {
     overflowY: 'auto',
     flex: 1,
+    minHeight: 0,
   },
   toast: {
     background: 'rgba(10,8,4,0.95)',

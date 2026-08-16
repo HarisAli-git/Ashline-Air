@@ -4,6 +4,8 @@ import { SaveService } from '../../../services/SaveService';
 import { DevService } from '../../../services/DevService';
 import { EventBus } from '../../../game/utils/EventBus';
 import type { AircraftDefinition } from '../../../types';
+import { useViewport } from '../../viewport';
+import { panelChrome, tappable } from './panelChrome';
 
 /**
  * The hangar: the screen that turns money into capability.
@@ -28,6 +30,7 @@ export function HangarScreen(): React.ReactElement {
     return () => { u1(); u2(); };
   }, [refresh]);
 
+  const vp = useViewport();
   const save = SaveService.get();
   const fleet = AircraftService.all();
   const activeIdx = AircraftService.activeIndex(save);
@@ -58,13 +61,15 @@ export function HangarScreen(): React.ReactElement {
     refresh();
   };
 
+  const chrome = panelChrome(vp, 940, 560);
+
   return (
-    <div style={styles.backdrop}>
-      <div style={styles.panel}>
+    <div style={{ ...styles.backdrop, ...chrome.backdrop, background: 'rgba(6,5,3,0.88)', zIndex: 40 }}>
+      <div style={{ ...styles.panel, ...chrome.panel }}>
         <div style={styles.header}>
           <span style={styles.title}>HANGAR</span>
           <span style={styles.money}>₢ {save.player.money.toLocaleString()}</span>
-          <button style={styles.close} onClick={() => EventBus.emit('ui:close-hangar')}>
+          <button style={tappable(vp, styles.close)} onClick={() => EventBus.emit('ui:close-hangar')}>
             CLOSE
           </button>
         </div>
@@ -78,7 +83,7 @@ export function HangarScreen(): React.ReactElement {
               <span style={{ color: '#ffd080' }}>FLYING: {def.name}</span>
               <span style={styles.cond}>⛽ {Math.round((active.fuel / def.stats.fuelCapacity) * 100)}%</span>
               <span style={styles.cond}>⚙ {Math.round(active.integrity)}%</span>
-              <button style={styles.serviceBtn} onClick={service}>FUEL &amp; REPAIR</button>
+              <button style={tappable(vp, styles.serviceBtn)} onClick={service}>FUEL &amp; REPAIR</button>
               {DevService.enabled && (
                 <button
                   style={{ ...styles.serviceBtn, borderColor: '#88ccff', color: '#88ccff' }}
@@ -94,7 +99,7 @@ export function HangarScreen(): React.ReactElement {
           );
         })()}
 
-        <div style={styles.list}>
+        <div className="aa-scroll" style={styles.list}>
           {fleet.map(def => {
             const av = AircraftService.availability(def, save);
             return <Row key={def.id} def={def} av={av} onBuy={() => buy(def)} onSelect={() => select(def.id)} />;
@@ -173,32 +178,30 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontFamily: 'monospace', zIndex: 40,
   },
-  panel: {
-    width: 940, height: 560, background: '#100d07',
-    border: '1px solid #3a2f1a', display: 'flex', flexDirection: 'column',
-  },
+  // Size comes from panelChrome() so it can never exceed the viewport.
+  panel: {},
   header: {
     display: 'flex', alignItems: 'center', gap: 16, padding: '10px 16px',
-    borderBottom: '1px solid #3a2f1a', background: '#0a0804',
+    borderBottom: '1px solid #3a2f1a', background: '#0a0804', flexShrink: 0,
   },
   title: { color: '#ffd080', fontSize: 16, fontWeight: 'bold', letterSpacing: 4, flex: 1 },
   money: { color: '#ffd080', fontSize: 16 },
   close: {
     background: 'transparent', border: '1px solid #5a4a20', color: '#c8b888',
-    padding: '4px 12px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 12,
+    padding: '8px 14px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 12,
   },
   activeBar: {
-    display: 'flex', alignItems: 'center', gap: 14, padding: '8px 16px',
-    borderBottom: '1px solid #241c10', fontSize: 12, color: '#c8b888',
+    display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '8px 16px',
+    borderBottom: '1px solid #241c10', fontSize: 12, color: '#c8b888', flexShrink: 0,
   },
   cond: { color: '#8a7a5a' },
   serviceBtn: {
     background: 'transparent', border: '1px solid #5a4a20', color: '#e8d5b7',
     padding: '3px 10px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 11,
   },
-  list: { flex: 1, overflowY: 'auto', padding: 10 },
+  list: { flex: 1, minHeight: 0, overflowY: 'auto', padding: 10 },
   row: {
-    display: 'flex', gap: 12, padding: '10px 12px', marginBottom: 8,
+    display: 'flex', flexWrap: 'wrap', gap: 12, padding: '10px 12px', marginBottom: 8,
     border: '1px solid #3a2f1a', background: '#15110a', alignItems: 'center',
   },
   rowMain: { flex: 1, minWidth: 0 },
@@ -214,8 +217,11 @@ const styles: Record<string, React.CSSProperties> = {
   statLabel: { color: '#4a4030', fontSize: 9, letterSpacing: 1 },
   statValue: { color: '#c8b888', fontSize: 12 },
   rowAction: {
-    width: 190, display: 'flex', flexDirection: 'column',
-    alignItems: 'flex-end', gap: 3,
+    // Shrinks and wraps under the description on a narrow panel instead of
+    // squeezing the aircraft name into a two-character column.
+    width: 190, flex: '0 1 190px', minWidth: 120,
+    display: 'flex', flexDirection: 'column',
+    alignItems: 'flex-end', gap: 3, marginLeft: 'auto',
   },
   primaryBtn: {
     background: '#2a2010', border: '1px solid #8a6a2a', color: '#ffd080',
