@@ -144,9 +144,9 @@ function applyDaylight(c: number, dl: number): number {
 
 export class ParallaxWorld {
   private readonly scene: Phaser.Scene;
-  private readonly width: number;
-  private readonly height: number;
-  private readonly groundY: number;
+  private width: number;   // mutable: see resize()
+  private height: number;   // mutable: see resize()
+  private groundY: number;   // mutable: see resize()
 
   private readonly skyGfx: Phaser.GameObjects.Graphics;
   private readonly farGfx: Phaser.GameObjects.Graphics;
@@ -189,6 +189,20 @@ export class ParallaxWorld {
   /** Scratch buffers for ridge sampling — reused so no per-frame allocation. */
   private readonly rsX: number[] = [];
   private readonly rsH: number[] = [];
+
+  /**
+   * Re-fit the world to a new canvas size, in place.
+   *
+   * Everything here is drawn from scratch every frame against `width`/`height`,
+   * so re-fitting is just updating them — no geometry is cached against the old
+   * size. That is what lets FlightScene survive a window resize or a device
+   * rotation without restarting and throwing away the flight in progress.
+   */
+  resize(width: number, height: number, groundY: number): void {
+    this.width = width;
+    this.height = height;
+    this.groundY = groundY;
+  }
 
   constructor(scene: Phaser.Scene, width: number, height: number, groundY: number) {
     this.scene = scene;

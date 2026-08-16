@@ -2,21 +2,65 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      viewport-fit=cover lets the canvas run under a notch; the UI pulls itself
+      back out with env(safe-area-inset-*). user-scalable=no is deliberate: a
+      game with drag controls must not pinch-zoom or double-tap-zoom the page
+      out from under the player.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0d0a04" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Ashline Air</title>
     <style>
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
       html, body {
         width: 100%;
-        height: 100%;
+        /* dvh tracks the *dynamic* viewport, so the layout does not jump when
+           mobile browser chrome slides away mid-flight. svh is the fallback. */
+        height: 100svh;
+        height: 100dvh;
         background: #0d0a04;
-        display: flex;
-        align-items: center;
-        justify-content: center;
         overflow: hidden;
+        /* No rubber-banding, no pull-to-refresh, no text selection on a drag,
+           and no grey flash when a control is tapped. */
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        -webkit-text-size-adjust: 100%;
       }
+
+      /* The game surface owns its gestures. Scrollable panels opt back in with
+         `touch-action: pan-y`, so the ONE place scrolling is wanted still works. */
+      body { touch-action: none; }
+
+      #root { width: 100%; height: 100%; }
+
+      canvas { display: block; touch-action: none; }
+
+      button { font: inherit; -webkit-tap-highlight-color: transparent; }
       button:focus { outline: none; }
+
+      /* Thin, dark scrollbars for the panels that do scroll. */
+      .aa-scroll {
+        overflow-y: auto;
+        touch-action: pan-y;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+        scrollbar-color: #5a4a20 transparent;
+      }
+      .aa-scroll::-webkit-scrollbar { width: 8px; }
+      .aa-scroll::-webkit-scrollbar-thumb {
+        background: #5a4a20; border-radius: 4px;
+      }
     </style>
   </head>
   <body>

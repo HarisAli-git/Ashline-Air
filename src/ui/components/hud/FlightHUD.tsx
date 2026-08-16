@@ -2,8 +2,11 @@ import React from 'react';
 import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo, useFlightStatus } from '../../store/gameStore';
 import { EventBus } from '../../../game/utils/EventBus';
 import { SaveService } from '../../../services/SaveService';
+import { useViewport } from '../../viewport';
+import { hudStyles, type HudStyles } from './hudStyles';
 
 export function FlightHUD(): React.ReactElement | null {
+  const vp = useViewport();
   const state = useFlightState();
   const event = useEventModal();
   const { gearDown, flapsDeployed } = useGearFlaps();
@@ -12,6 +15,12 @@ export function FlightHUD(): React.ReactElement | null {
   const status = useFlightStatus();
 
   if (!state) return null;
+
+  // A phone gets a genuinely COMPACT panel, not the desktop one scaled down:
+  // at 390 px tall the full instrument strip ate a fifth of the screen and
+  // "115 km/h" wrapped onto two lines. Secondary gauges drop out instead.
+  const compact = vp.isCompact;
+  const styles = hudStyles(vp.uiScale, compact);
 
   const { def } = SaveService.getActiveAircraft();
   const throttlePct = Math.round(state.throttle * 100);
@@ -47,16 +56,19 @@ export function FlightHUD(): React.ReactElement | null {
 
       {/* Main instrument panel — bottom strip */}
       <div style={styles.panel}>
-        <AttitudeIndicator pitch={state.pitch} />
-        <Gauge label="ALT" value={`${state.altitude.toFixed(0)} m`} />
-        <Gauge label="SPD" value={`${speedKmh} km/h`} />
-        <Gauge label="V/S" value={`${state.verticalSpeed.toFixed(1)} m/s`} color={state.verticalSpeed < -4 ? '#ff4444' : undefined} />
-        <Gauge label="THR" value={`${throttlePct}%`} pct={state.throttle} barColor="#c9a44a" />
-        <Gauge label="FUEL" value={`${state.fuel.toFixed(0)} L`} color={fuelColor} pct={fuelFrac} barColor={fuelColor} />
-        <Gauge label="ENG" value={`${tempPct}%`} color={tempColor} pct={state.engineTemp} barColor={tempColor} />
-        <Gauge label="INT" value={`${state.integrity.toFixed(0)}%`} color={integrityColor} pct={state.integrity / 100} barColor={integrityColor} />
-        {cargo && (
+        {!compact && <AttitudeIndicator pitch={state.pitch} styles={styles} />}
+        <Gauge s={styles} label="ALT" value={`${state.altitude.toFixed(0)} m`} />
+        <Gauge s={styles} label="SPD" value={compact ? `${speedKmh}` : `${speedKmh} km/h`} />
+        <Gauge s={styles} label="V/S" value={`${state.verticalSpeed.toFixed(1)}`} color={state.verticalSpeed < -4 ? '#ff4444' : undefined} />
+        <Gauge s={styles} label="THR" value={`${throttlePct}%`} pct={state.throttle} barColor="#c9a44a" />
+        <Gauge s={styles} label="FUEL" value={`${state.fuel.toFixed(0)} L`} color={fuelColor} pct={fuelFrac} barColor={fuelColor} />
+        {!compact && (
+          <Gauge s={styles} label="ENG" value={`${tempPct}%`} color={tempColor} pct={state.engineTemp} barColor={tempColor} />
+        )}
+        <Gauge s={styles} label="INT" value={`${state.integrity.toFixed(0)}%`} color={integrityColor} pct={state.integrity / 100} barColor={integrityColor} />
+        {cargo && !compact && (
           <Gauge
+            s={styles}
             label="CARGO"
             value={`${cargo.average.toFixed(0)}%`}
             color={cargo.average > 75 ? '#00ff88' : cargo.average > 45 ? '#ffd080' : '#ff4444'}
@@ -65,11 +77,11 @@ export function FlightHUD(): React.ReactElement | null {
           />
         )}
         {remainingKm !== null && (
-          <Gauge label="DIST" value={`${remainingKm.toFixed(1)} km`} color={remainingKm < 1.5 ? '#00ff88' : undefined} />
+          <Gauge s={styles} label="DIST" value={`${remainingKm.toFixed(1)}`} color={remainingKm < 1.5 ? '#00ff88' : undefined} />
         )}
         <div style={styles.toggles}>
           <span style={{ color: gearDown ? '#00ff88' : '#888' }}>GEAR {gearDown ? '▼' : '▲'}</span>
-          <span style={{ color: flapsDeployed ? '#ffd080' : '#888' }}>FLAPS {flapsDeployed ? 'ON' : 'OFF'}</span>
+          <span style={{ color: flapsDeployed ? '#ffd080' : '#888' }}>FLAP {flapsDeployed ? 'ON' : 'OFF'}</span>
         </div>
       </div>
 
@@ -78,21 +90,23 @@ export function FlightHUD(): React.ReactElement | null {
         || status.obstacleAheadM !== null || status.trafficDeltaM !== null
         || status.weatherCaution !== null) && (
         <div style={styles.annunciators}>
-          {status.engineFailed && <Caution label="ENGINE OUT — HOLD E" tone="#ff4444" />}
-          {status.stall && <Caution label="STALL" tone="#ff4444" />}
+          {status.engineFailed && <Caution styles={styles} label={compact ? 'ENGINE OUT' : 'ENGINE OUT — HOLD E'} tone="#ff4444" />}
+          {status.stall && <Caution styles={styles} label="STALL" tone="#ff4444" />}
           {/* Weather is now something you have to fly around, so it gets a
               light of its own with the action spelled out. */}
           {status.weatherCaution && (
             <Caution
+              styles={styles}
               label={status.weatherCaution}
               tone={status.avionicsOut || status.iceLoad > 0.6 ? '#ff4444' : '#88ccff'}
             />
           )}
-          {status.overspeed && <Caution label="OVERSPEED — EASE OFF" tone="#ff4444" />}
+          {status.overspeed && <Caution styles={styles} label="OVERSPEED — EASE OFF" tone="#ff4444" />}
           {/* Traffic reads like the real box: how far off they are vertically,
               and the single word that resolves it. */}
           {status.trafficDeltaM !== null && (
             <Caution
+              styles={styles}
               label={`✈ TRAFFIC ${Math.abs(Math.round(status.trafficDeltaM))} m ${status.trafficDeltaM >= 0 ? '▲' : '▼'} — ${status.trafficAvoid === 1 ? 'CLIMB' : 'DESCEND'}`}
               tone="#ff4444"
             />
@@ -101,6 +115,7 @@ export function FlightHUD(): React.ReactElement | null {
               doesn't tell you whether that means 80 m or 340 m. */}
           {status.underFire && (
             <Caution
+              styles={styles}
               label={status.groundThreat
                 ? `${status.groundThreat.label} — CLIMB ${Math.round(status.groundThreat.clearM)} m`
                 : 'TAKING FIRE — CLIMB'}
@@ -108,7 +123,7 @@ export function FlightHUD(): React.ReactElement | null {
             />
           )}
           {status.obstacleAheadM !== null && (
-            <Caution label={`OBSTACLE ${Math.round(status.obstacleAheadM)} m`} tone="#ffd080" />
+            <Caution styles={styles} label={`OBSTACLE ${Math.round(status.obstacleAheadM)} m`} tone="#ffd080" />
           )}
         </div>
       )}
@@ -140,7 +155,9 @@ export function FlightHUD(): React.ReactElement | null {
 }
 
 /** Blinking caution light in the annunciator stack. */
-function Caution({ label, tone }: { label: string; tone: string }): React.ReactElement {
+function Caution({ label, tone, styles }: {
+  label: string; tone: string; styles: HudStyles;
+}): React.ReactElement {
   return (
     <div style={{ ...styles.caution, color: tone, borderColor: tone }}>
       {label}
@@ -149,7 +166,9 @@ function Caution({ label, tone }: { label: string; tone: string }): React.ReactE
 }
 
 /** Mini artificial horizon: the sky/ground card shifts with pitch. */
-function AttitudeIndicator({ pitch }: { pitch: number }): React.ReactElement {
+function AttitudeIndicator({ pitch, styles }: {
+  pitch: number; styles: HudStyles;
+}): React.ReactElement {
   const shift = Math.max(-30, Math.min(30, pitch)) * 0.55;
   return (
     <div style={styles.adi}>
@@ -167,9 +186,9 @@ function AttitudeIndicator({ pitch }: { pitch: number }): React.ReactElement {
 }
 
 function Gauge({
-  label, value, color = '#e8d5b7', pct, barColor,
+  s: styles, label, value, color = '#e8d5b7', pct, barColor,
 }: {
-  label: string; value: string; color?: string; pct?: number; barColor?: string;
+  s: HudStyles; label: string; value: string; color?: string; pct?: number; barColor?: string;
 }): React.ReactElement {
   return (
     <div style={styles.gauge}>
@@ -187,198 +206,3 @@ function Gauge({
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  routeStrip: {
-    position: 'fixed',
-    top: 8,
-    left: '50%',
-    transform: 'translateX(-50%)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    width: 520,
-    padding: '6px 14px',
-    background: 'rgba(10,8,4,0.75)',
-    border: '1px solid #3a2a10',
-    borderRadius: 4,
-    fontFamily: 'monospace',
-    zIndex: 90,
-  },
-  routeDot: {
-    width: 8,
-    height: 8,
-    borderRadius: '50%',
-    flexShrink: 0,
-  },
-  routeTrack: {
-    position: 'relative',
-    flex: 1,
-    height: 4,
-    background: '#241a0c',
-    borderRadius: 2,
-  },
-  routeFill: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    height: '100%',
-    background: '#5a4a20',
-    borderRadius: 2,
-  },
-  planeMarker: {
-    position: 'absolute',
-    top: -9,
-    fontSize: 13,
-    color: '#ffd080',
-    transition: 'left 0.4s linear',
-  },
-  routeLabel: {
-    fontSize: 11,
-    color: '#c8b888',
-    whiteSpace: 'nowrap',
-    flexShrink: 0,
-  },
-  panel: {
-    position: 'fixed',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 22,
-    padding: '8px 24px 10px',
-    background: 'linear-gradient(180deg, rgba(16,12,6,0.92) 0%, rgba(8,6,3,0.95) 100%)',
-    borderTop: '2px solid #3a2a10',
-    boxShadow: '0 -4px 18px rgba(0,0,0,0.55)',
-    fontFamily: 'monospace',
-    zIndex: 100,
-  },
-  annunciators: {
-    position: 'fixed',
-    top: 92,
-    left: '50%',
-    transform: 'translateX(-50%)',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: 6,
-    zIndex: 150,
-    pointerEvents: 'none',
-  },
-  caution: {
-    border: '1px solid',
-    borderRadius: 3,
-    padding: '4px 14px',
-    fontFamily: 'monospace',
-    fontSize: 13,
-    fontWeight: 'bold',
-    letterSpacing: 2,
-    background: 'rgba(10,8,4,0.85)',
-    animation: 'none',
-  },
-  adi: {
-    position: 'relative',
-    width: 46,
-    height: 46,
-    borderRadius: '50%',
-    overflow: 'hidden',
-    border: '2px solid #3a2a10',
-    flexShrink: 0,
-  },
-  adiCard: {
-    position: 'absolute',
-    left: 0,
-    top: '-50%',
-    width: '100%',
-    height: '200%',
-    transition: 'transform 0.12s linear',
-  },
-  adiSky: { position: 'absolute', top: 0, width: '100%', height: '50%', background: '#3d5a74' },
-  adiGround: { position: 'absolute', top: '50%', width: '100%', height: '50%', background: '#5a4226' },
-  adiHorizon: { position: 'absolute', top: 'calc(50% - 1px)', width: '100%', height: 2, background: '#e8d5b7' },
-  adiWingL: { position: 'absolute', top: 'calc(50% - 1px)', left: 5, width: 12, height: 2, background: '#ffd080' },
-  adiWingR: { position: 'absolute', top: 'calc(50% - 1px)', right: 5, width: 12, height: 2, background: '#ffd080' },
-  adiDot: { position: 'absolute', top: 'calc(50% - 2px)', left: 'calc(50% - 2px)', width: 4, height: 4, borderRadius: '50%', background: '#ffd080' },
-  gauge: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    minWidth: 64,
-    gap: 2,
-  },
-  gaugeLabel: {
-    fontSize: 10,
-    color: '#6a5a3a',
-    letterSpacing: 2,
-  },
-  gaugeValue: {
-    fontSize: 16,
-    color: '#e8d5b7',
-    fontWeight: 'bold',
-  },
-  barBg: {
-    width: 56,
-    height: 3,
-    background: '#241a0c',
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  barFill: {
-    height: '100%',
-    borderRadius: 2,
-  },
-  toggles: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4,
-    fontSize: 13,
-    fontFamily: 'monospace',
-    marginLeft: 'auto',
-  },
-  modalBackdrop: {
-    position: 'fixed',
-    inset: 0,
-    background: 'rgba(0,0,0,0.75)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 300,
-  },
-  modal: {
-    background: '#1a1208',
-    border: '1px solid #5a4a20',
-    padding: '32px 40px',
-    maxWidth: 520,
-    width: '90%',
-    fontFamily: 'monospace',
-    borderRadius: 4,
-  },
-  modalTitle: {
-    color: '#ffd080',
-    fontSize: 22,
-    marginBottom: 12,
-  },
-  modalDesc: {
-    color: '#c8b888',
-    fontSize: 15,
-    lineHeight: 1.6,
-    marginBottom: 24,
-  },
-  choices: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 10,
-  },
-  choiceBtn: {
-    background: 'transparent',
-    border: '1px solid #5a4a20',
-    color: '#e8d5b7',
-    fontFamily: 'monospace',
-    fontSize: 14,
-    padding: '10px 16px',
-    cursor: 'pointer',
-    textAlign: 'left',
-    borderRadius: 2,
-  },
-};

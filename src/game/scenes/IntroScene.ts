@@ -3,6 +3,7 @@ import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import { drawUndead, drawCorpse, drawHorde, undeadKindFor, type CrowdStyle } from '../world/Crowds';
 import { drawFighter, drawMuzzleFlash, garrisonPalette, RAIDER_PALETTE } from '../world/Figures';
+import { isTouchDevice } from '../utils/device';
 
 /**
  * How the world got like this.
@@ -92,7 +93,9 @@ export class IntroScene extends Phaser.Scene {
     }).setOrigin(0.5, 0).setAlpha(0);
 
     this.hintText = this.add.text(width - 16, height - 14,
-      'ENTER / CLICK — continue      ESC — skip', {
+      isTouchDevice()
+        ? 'TAP — continue'
+        : 'ENTER / CLICK — continue      ESC — skip', {
       fontSize: '11px', color: '#4a4030', fontFamily: 'monospace',
     }).setOrigin(1, 1);
 
