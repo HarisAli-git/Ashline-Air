@@ -39,6 +39,10 @@ export interface FlightStatus {
   groundThreat: { label: string; clearM: number } | null;
   /** How well the gunners have read your flying, 0–1. */
   rangedOn: number;
+  /** Vertical speed of the AIR, m/s, positive up. */
+  airVertical: number;
+  inThermal: boolean;
+  weatherAhead: { kind: string; km: number } | null;
   stall: boolean;
   overspeed: boolean;
   obstacleAheadM: number | null;

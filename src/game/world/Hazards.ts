@@ -104,6 +104,9 @@ export class Hazards {
   }
 
   /** The obstacle the aircraft is currently inside, if any. */
+  /** Every structure on the route — the air flows around all of them. */
+  get all(): ReadonlyArray<Hazard> { return this.list; }
+
   /** Structures within reach of a point — used to wreck whatever a crash lands on. */
   near(worldX: number, extraPx: number): Hazard[] {
     return this.list.filter(h => Math.abs(h.x - worldX) <= h.halfWidth + extraPx);

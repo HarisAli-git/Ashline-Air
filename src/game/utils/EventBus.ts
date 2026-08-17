@@ -45,6 +45,25 @@ export interface GameEvents {
      * it. A hidden accuracy modifier would just feel like bad luck.
      */
     rangedOn: number;
+    /**
+     * Vertical speed of the AIR, m/s, positive up — a variometer reading.
+     *
+     * This is the instrument the whole air-mass system needs to be playable:
+     * lift is invisible, and without a needle telling you the air is going up
+     * the player can only ever notice that their altitude changed for no
+     * apparent reason. With it, hunting a thermal becomes a skill.
+     */
+    airVertical: number;
+    /** True while inside a working thermal core. */
+    inThermal: boolean;
+    /**
+     * Weather cell ahead: what it is and how far to its leading edge, in km.
+     *
+     * Without this the cells are just a nastier random condition. The whole
+     * point is the decision — over it, round it, or straight through — and a
+     * decision needs enough warning to act on.
+     */
+    weatherAhead: { kind: string; km: number } | null;
     stall: boolean;
     overspeed: boolean;
     obstacleAheadM: number | null;

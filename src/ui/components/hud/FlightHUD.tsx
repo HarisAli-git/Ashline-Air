@@ -60,6 +60,13 @@ export function FlightHUD(): React.ReactElement | null {
         <Gauge s={styles} label="ALT" value={`${state.altitude.toFixed(0)} m`} />
         <Gauge s={styles} label="SPD" value={compact ? `${speedKmh}` : `${speedKmh} km/h`} />
         <Gauge s={styles} label="V/S" value={`${state.verticalSpeed.toFixed(1)}`} color={state.verticalSpeed < -4 ? '#ff4444' : undefined} />
+        {/*
+          Variometer: what the AIR is doing, not what you are doing.
+          Lift is invisible, so without this the player can only notice that
+          their altitude changed for no reason. With it, hunting a thermal is
+          a skill you can practise.
+        */}
+        {status && <Vario styles={styles} air={status.airVertical} inThermal={status.inThermal} />}
         <Gauge s={styles} label="THR" value={`${throttlePct}%`} pct={state.throttle} barColor="#c9a44a" />
         <Gauge s={styles} label="FUEL" value={`${state.fuel.toFixed(0)} L`} color={fuelColor} pct={fuelFrac} barColor={fuelColor} />
         {!compact && (
@@ -122,6 +129,14 @@ export function FlightHUD(): React.ReactElement | null {
               tone={status.groundThreat && status.groundThreat.clearM > 200 ? '#ff4444' : '#ff8844'}
             />
           )}
+          {/* Weather you can still do something about. Named, and distanced. */}
+          {status.weatherAhead && (
+            <Caution
+              styles={styles}
+              label={`${WEATHER_LABEL[status.weatherAhead.kind] ?? 'WEATHER'} AHEAD — ${status.weatherAhead.km.toFixed(1)} km`}
+              tone={status.weatherAhead.kind === 'thunderstorm' ? '#ff8844' : '#88ccff'}
+            />
+          )}
           {/* They only get accurate if you let them. Say so, and say the fix. */}
           {status.underFire && status.rangedOn > 0.45 && (
             <Caution
@@ -178,6 +193,50 @@ export function FlightHUD(): React.ReactElement | null {
         </div>
       )}
     </>
+  );
+}
+
+/** Plain names for what is standing in the way. */
+const WEATHER_LABEL: Record<string, string> = {
+  thunderstorm: '⛈ STORM CELL',
+  dust_storm: '🌫 DUST WALL',
+  blizzard: '❄ BLIZZARD',
+  fog: '🌫 FOG BANK',
+  strong_winds: '💨 ROUGH AIR',
+  cloudy: '☁ CLOUD',
+};
+
+/**
+ * Vertical air movement, as a needle you read at a glance.
+ *
+ * Deliberately NOT another number in the row: a needle that swings and a
+ * colour that changes is legible in peripheral vision while you are flying,
+ * which is the only way it is any use.
+ */
+function Vario({ styles, air, inThermal }: {
+  styles: HudStyles; air: number; inThermal: boolean;
+}): React.ReactElement {
+  // ±5 m/s covers everything the field produces
+  const t = Math.max(-1, Math.min(1, air / 5));
+  const up = air > 0.3;
+  const tone = inThermal ? '#00ff88' : up ? '#9fe8b0' : air < -1.2 ? '#ff8844' : '#6a5a3a';
+  return (
+    <div style={styles.gauge}>
+      <span style={styles.gaugeLabel}>AIR</span>
+      <div style={styles.varioTrack}>
+        <div style={styles.varioZero} />
+        <div style={{
+          ...styles.varioNeedle,
+          background: tone,
+          // Up is up: positive lift drives the bar above the centre line
+          height: `${Math.abs(t) * 50}%`,
+          top: air >= 0 ? `${50 - Math.abs(t) * 50}%` : '50%',
+        }} />
+      </div>
+      <span style={{ ...styles.gaugeValue, color: tone, fontSize: styles.gaugeLabel.fontSize }}>
+        {inThermal ? 'LIFT' : `${air >= 0 ? '+' : ''}${air.toFixed(1)}`}
+      </span>
+    </div>
   );
 }
 

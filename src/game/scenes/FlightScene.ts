@@ -88,6 +88,12 @@ export class FlightScene extends Phaser.Scene {
   private gustTimer     = 0;
   /** Slow wave driving sustained gusts and downdraughts. */
   private gustPhase = 0;
+  /** Vertical speed of the air itself, m/s — shown on the variometer. */
+  private airVertical = 0;
+  private inThermal = false;
+  private airTurb = 0;
+  /** The cell standing in the way, for the annunciator. */
+  private weatherAhead: { kind: string; km: number } | null = null;
   /** Traffic passed inside 30 m without hitting it — paid out on delivery. */
   private closeCalls = 0;
   private notifiedApproach = false;
@@ -245,6 +251,11 @@ export class FlightScene extends Phaser.Scene {
     // Obstacles and raider ground are deterministic per contract, so a route
     // you have flown before hands you the same threats.
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+    // Weather becomes a set of places on this route rather than a global mood.
+    this.world.weatherField.reset(
+      this.hashRoute(this.contractId), this.routeKm * 1000 * WORLD_PX_PER_M,
+    );
+    this.weather.attachField(this.world.weatherField);
 
     // ── The frequency is not empty ────────────────────────────────────────
     // Other pilots call their intentions before they fly them, so a conflict
@@ -494,11 +505,37 @@ export class FlightScene extends Phaser.Scene {
     const sdt = dt * this.timeScale;
 
     // ── Weather → wind ─────────────────────────────────────────────────────
-    this.weather.update(delta * this.timeScale);
+    this.weather.update(delta * this.timeScale, this.scrollX + AIRCRAFT_X);
     const windX = this.weather.windX() * 0.4;
 
+    // ── The air the aeroplane is flying through ───────────────────────────
+    // Sampled at the aircraft's own world position, then handed to the
+    // controller as a vertical wind so the aerodynamics stay untouched: the
+    // wing does not know it is in a thermal, it just goes up with the air.
+    const airX = this.scrollX + AIRCRAFT_X;
+    // Convection dies under cloud, and with the sun. An overcast route has
+    // dead air and has to be flown on the engine.
+    // Cloud over your head shuts the heating off — straight from the cell.
+    const wx = this.world.weatherField.sample(airX);
+    const cover = wx.convection;
+    const minutes = this.baseTimestamp + this.state.elapsedSeconds;
+    const dayFrac = ((minutes / 60) % 24) / 24;
+    const solar = Math.max(0, Math.sin((dayFrac - 0.25) * Math.PI * 2));
+    this.world.air.setConditions(solar, cover);
+    const air = this.world.air.sample(airX, this.state.altitude);
+    // A cell's own updraught/outflow rides on top of the convective field.
+    air.vertical += wx.draught;
+
+    // What is standing between here and the destination, and how far off it is
+    this.weatherAhead = wx.ahead && wx.distanceToEdge < 26000 && wx.ahead.kind !== 'clear'
+      ? { kind: wx.ahead.kind, km: wx.distanceToEdge / (WORLD_PX_PER_M * 1000) }
+      : null;
+    this.airVertical = air.vertical;
+    this.inThermal = air.inThermal;
+    this.airTurb = air.turbulence;
+
     // ── Physics (fixed-step, frame-rate independent) ───────────────────────
-    this.state = this.controller.update(this.state, input, sdt, windX);
+    this.state = this.controller.update(this.state, input, sdt, windX, air.vertical);
 
     // ── Weather with teeth ────────────────────────────────────────────────
     // Icing, lightning and sand ingestion, each with its own answer. Applied
@@ -507,7 +544,7 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Turbulence: gusts nudge the aircraft, dt-scaled so a storm is rough
     //    but flyable (previously this was per-frame and slammed you down) ────
-    const turbulence = this.weather.current.turbulenceIntensity;
+    const turbulence = Math.min(1, this.weather.current.turbulenceIntensity + this.airTurb);
 
     // Rough air makes the aeroplane HARDER TO FLY, not merely bumpy: the tail
     // is working in disturbed flow, so the airframe stops holding an attitude
@@ -934,6 +971,9 @@ export class FlightScene extends Phaser.Scene {
       underFire: this.underFire,
       groundThreat: this.groundThreat,
       rangedOn: this.world.raiders.rangedOn,
+      airVertical: this.airVertical,
+      inThermal: this.inThermal,
+      weatherAhead: this.weatherAhead,
       weatherCaution: this.weatherCaution,
       iceLoad: this.iceLoad,
       avionicsOut: this.avionicsOut,
@@ -1413,7 +1453,7 @@ export class FlightScene extends Phaser.Scene {
     this.groundThreat = null;
     this.trafficAdvisory = null;
     EventBus.emit('flight:status', {
-      engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, stall: false,
+      engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
       overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false,
     });

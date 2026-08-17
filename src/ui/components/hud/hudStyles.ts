@@ -131,6 +131,23 @@ export function hudStyles(uiScale: number, compact: boolean): HudStyles {
       fontWeight: 'bold',
       whiteSpace: 'nowrap',
     },
+    varioTrack: {
+      position: 'relative',
+      width: compact ? n(9) : n(13),
+      height: compact ? n(20) : n(30),
+      background: '#241a0c',
+      borderRadius: 2,
+      overflow: 'hidden',
+    },
+    varioZero: {
+      position: 'absolute', left: 0, right: 0, top: '50%',
+      height: 1, background: '#6a5a3a',
+    },
+    varioNeedle: {
+      position: 'absolute', left: 1, right: 1,
+      borderRadius: 1,
+      transition: 'height 0.12s linear, top 0.12s linear',
+    },
     barBg: { width: compact ? n(30) : n(56), height: compact ? 2 : 3, background: '#241a0c', borderRadius: 2, overflow: 'hidden' },
     barFill: { height: '100%', borderRadius: 2 },
 
