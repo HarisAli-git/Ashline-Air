@@ -151,37 +151,54 @@ export function hudStyles(uiScale: number, compact: boolean): HudStyles {
       inset: 0,
       background: 'rgba(0,0,0,0.75)',
       display: 'flex',
-      alignItems: 'center',
+      // On a phone a centred box is the wrong shape: it fights the on-screen
+      // controls for the middle of a 390 px-tall screen. A bottom sheet uses
+      // the edge nobody is flying with.
+      alignItems: compact ? 'flex-end' : 'center',
       justifyContent: 'center',
       zIndex: 300,
-      padding: n(12),
-      // The modal is the one thing in the HUD that takes input.
+      padding: compact ? 0 : n(12),
       pointerEvents: 'auto',
     },
     modal: {
       background: '#1a1208',
       border: '1px solid #5a4a20',
-      padding: compact ? `${n(16)}px ${n(18)}px` : `${n(28)}px ${n(36)}px`,
-      maxWidth: n(520),
-      width: '92%',
-      // Long events must not push their own choices off a short screen.
-      maxHeight: '86%',
+      borderWidth: compact ? '1px 0 0' : 1,
+      padding: compact
+        ? `${n(10)}px ${n(14)}px calc(${n(10)}px + env(safe-area-inset-bottom, 0px))`
+        : `${n(28)}px ${n(36)}px`,
+      maxWidth: compact ? '100%' : n(520),
+      width: compact ? '100%' : '92%',
+      // Never more than half the screen: the player still has to be able to
+      // see the aeroplane they are deciding about.
+      maxHeight: compact ? '58%' : '86%',
       overflowY: 'auto',
       fontFamily: 'monospace',
-      borderRadius: 4,
+      borderRadius: compact ? '10px 10px 0 0' : 4,
     },
-    modalTitle: { color: '#ffd080', fontSize: n(compact ? 16 : 22), marginBottom: n(10) },
-    modalDesc: { color: '#c8b888', fontSize: n(compact ? 12 : 15), lineHeight: 1.55, marginBottom: n(compact ? 14 : 22) },
-    choices: { display: 'flex', flexDirection: 'column', gap: n(9) },
+    modalTitle: {
+      color: '#ffd080',
+      fontSize: n(compact ? 14 : 22),
+      lineHeight: 1.25,
+      marginBottom: n(compact ? 5 : 10),
+    },
+    modalDesc: {
+      color: '#c8b888',
+      fontSize: n(compact ? 11 : 15),
+      lineHeight: compact ? 1.4 : 1.55,
+      marginBottom: n(compact ? 9 : 22),
+    },
+    choices: { display: 'flex', flexDirection: 'column', gap: n(compact ? 6 : 9) },
     choiceBtn: {
       background: 'transparent',
       border: '1px solid #5a4a20',
       color: '#e8d5b7',
       fontFamily: 'monospace',
       fontSize: n(compact ? 12 : 14),
+      lineHeight: 1.3,
       // 44 px is the smallest reliably tappable target on a touchscreen.
       minHeight: 44,
-      padding: `${n(9)}px ${n(14)}px`,
+      padding: `${n(compact ? 6 : 9)}px ${n(12)}px`,
       cursor: 'pointer',
       textAlign: 'left',
       borderRadius: 2,

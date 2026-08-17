@@ -19,6 +19,8 @@ import { OrientationGate } from './ui/components/OrientationGate';
 import { designSizeFor } from './game/GameSize';
 import { attachResponsiveScale } from './game/utils/responsive';
 import { bindViewportCanvas, refreshViewport, useViewport } from './ui/viewport';
+import { armFullscreenOnGesture } from './ui/fullscreen';
+import { isTouchDevice } from './game/utils/device';
 
 type UILayer = 'none' | 'flight' | 'preflight';
 
@@ -34,6 +36,15 @@ export default function App(): React.ReactElement {
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [preflightState, setPreflightState] = useState<PreflightState | null>(null);
   const vp = useViewport();
+
+  // The same first gesture that unlocks audio also claims the screen: mobile
+  // browsers keep the URL bar over the page and only the Fullscreen API takes
+  // it back, and it can only be asked for from a user gesture.
+  useEffect(() => {
+    if (!isTouchDevice()) return;
+    const disarm = armFullscreenOnGesture(() => refreshViewport());
+    return disarm;
+  }, []);
 
   // Browsers only allow audio after a user gesture — unlock on the first one
   useEffect(() => {
