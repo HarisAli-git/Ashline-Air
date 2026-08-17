@@ -4,6 +4,7 @@ import { ContractService } from '../../../services/ContractService';
 import { EventBus } from '../../../game/utils/EventBus';
 import { SoundEngine } from '../../../game/audio/SoundEngine';
 import type { Contract, GoodDefinition } from '../../../types';
+import { canOperate } from '../../../services/AirfieldService';
 
 interface Props {
   settlementId: string;
@@ -56,6 +57,17 @@ export function ContractBoard({ settlementId, onContractAccepted }: Props): Reac
         type: 'warning',
       });
       return;
+    }
+    // Can this aeroplane actually get INTO the destination? This is the gate
+    // that makes the fleet mean something: a heavy freighter simply cannot use
+    // a 430 m mountain shelf, however well it pays.
+    const dest = window.gameData.settlements.find(x => x.id === contract.destinationId);
+    if (dest) {
+      const verdict = canOperate(activeAircraft, dest);
+      if (!verdict.ok) {
+        EventBus.emit('ui:show-notification', { message: verdict.reason, type: 'warning' });
+        return;
+      }
     }
     const updated = ContractService.acceptContract(contract);
 
@@ -118,6 +130,16 @@ export function ContractBoard({ settlementId, onContractAccepted }: Props): Reac
                 <span style={styles.rep}>  +{c.reward.reputationGain} rep</span>
                 <span style={styles.expiry}>  ⏱ {minutesLeft} min</span>
                 {tooHeavy && <span style={styles.tooHeavy}>  ⚠ {payloadWeight(c)} kg</span>}
+                {(() => {
+                  const d = window.gameData.settlements.find(x => x.id === c.destinationId);
+                  if (!d) return null;
+                  const v = canOperate(activeAircraft, d);
+                  return (
+                    <span style={v.ok ? styles.field : styles.tooHeavy}>
+                      {'  '}▭ {d.field.runwayM} m{v.ok ? '' : ` — need ${activeAircraft.stats.runwayM} m`}
+                    </span>
+                  );
+                })()}
               </div>
               {locked ? (
                 <span style={styles.lockedTag}>🔒 LOCKED — need {c.reputationRequirement} rep</span>
@@ -138,6 +160,7 @@ export function ContractBoard({ settlementId, onContractAccepted }: Props): Reac
 
 const styles: Record<string, React.CSSProperties> = {
   board: { padding: 16, fontFamily: 'monospace', color: '#e8d5b7' },
+  field: { color: '#8a7a5a' },
   heading: { fontSize: 18, color: '#ffd080', marginBottom: 12, letterSpacing: 3 },
   list: { display: 'flex', flexDirection: 'column', gap: 12 },
   card: {

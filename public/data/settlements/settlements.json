@@ -44,7 +44,13 @@
         "demandLevel": 60,
         "basePrice": 420
       }
-    ]
+    ],
+    "field": {
+      "runwayM": 1500,
+      "elevationM": 120,
+      "approach": "open",
+      "note": "Long hard strip. Anything that flies can use it."
+    }
   },
   {
     "id": "redrock_camp",
@@ -91,12 +97,18 @@
         "demandLevel": 30,
         "basePrice": 750
       }
-    ]
+    ],
+    "field": {
+      "runwayM": 520,
+      "elevationM": 430,
+      "approach": "canyon",
+      "note": "Graded dirt between the mesas. Light aircraft only."
+    }
   },
   {
     "id": "irongate_station",
     "name": "Irongate Station",
-    "description": "A Merchants Guild stronghold built around a pre-war rail depot. Bustling and lawless — if you have coin, you can buy anything.",
+    "description": "A Merchants Guild stronghold built around a pre-war rail depot. Bustling and lawless \u2014 if you have coin, you can buy anything.",
     "factionId": "merchants_guild",
     "position": {
       "x": 500,
@@ -138,7 +150,13 @@
         "demandLevel": 50,
         "basePrice": 240
       }
-    ]
+    ],
+    "field": {
+      "runwayM": 1800,
+      "elevationM": 200,
+      "approach": "industrial",
+      "note": "Pre-war freight apron. Built for heavy metal."
+    }
   },
   {
     "id": "saltmarsh_docks",
@@ -185,7 +203,13 @@
         "demandLevel": 75,
         "basePrice": 190
       }
-    ]
+    ],
+    "field": {
+      "runwayM": 900,
+      "elevationM": 10,
+      "approach": "coastal",
+      "note": "Old causeway strip. Salt air, crosswind, usually damp."
+    }
   },
   {
     "id": "cinder_flats",
@@ -232,7 +256,13 @@
         "demandLevel": 55,
         "basePrice": 400
       }
-    ]
+    ],
+    "field": {
+      "runwayM": 1200,
+      "elevationM": 260,
+      "approach": "open",
+      "note": "Burned-out airbase. Cracked, but long."
+    }
   },
   {
     "id": "highreach_relay",
@@ -279,6 +309,12 @@
         "demandLevel": 70,
         "basePrice": 430
       }
-    ]
+    ],
+    "field": {
+      "runwayM": 430,
+      "elevationM": 1450,
+      "approach": "mountain",
+      "note": "A shelf cut into the ridge. Short, high, one way in."
+    }
   }
 ]

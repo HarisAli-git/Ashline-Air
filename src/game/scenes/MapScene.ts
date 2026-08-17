@@ -8,6 +8,7 @@ import { ensureSharedTextures } from '../entities/aircraft/render/AircraftPainte
 import { SoundEngine } from '../audio/SoundEngine';
 import { distance, pixelsToKm } from '../utils/math';
 import type { SettlementDefinition } from '../../types';
+import { canOperate, fieldSummary } from '../../services/AirfieldService';
 
 const KM_PER_PIXEL = 0.5;
 
@@ -398,7 +399,18 @@ export class MapScene extends Phaser.Scene {
       fontFamily: 'monospace',
     }).setOrigin(0.5, 0);
 
-    container.add([dot, label]);
+    // The runway is the thing that decides whether you can go, so it belongs
+    // on the chart next to the name — not buried in a refusal message.
+    const active = SaveService.getActiveAircraft().def;
+    const verdict = canOperate(active, settlement);
+    const strip = this.add.text(0, (isHere ? 38 : 22) + 14,
+      `▭ ${settlement.field.runwayM} m${verdict.ok ? '' : '  ✕'}`, {
+      fontSize: '9px',
+      color: !unlocked ? '#3a3428' : verdict.ok ? '#7a6a48' : '#b05a3a',
+      fontFamily: 'monospace',
+    }).setOrigin(0.5, 0);
+
+    container.add([dot, label, strip]);
 
     if (!unlocked) {
       const lock = this.add.text(0, -24, 'LOCKED', {
@@ -574,6 +586,8 @@ export class MapScene extends Phaser.Scene {
       `${faction?.name ?? 'Unknown'} · rep ${rep}`,
       `Population: ${settlement.population.toLocaleString()}`,
       `Security: ${settlement.securityLevel}/10`,
+      `Field: ${fieldSummary(settlement)}`,
+      settlement.field.note,
       `Contracts: ${contracts}`,
       ProgressionService.canDepartFrom(settlement.id)
         ? '▸ YOUR AIRCRAFT IS HERE'
