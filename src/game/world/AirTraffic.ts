@@ -279,7 +279,12 @@ export class AirTraffic {
     dl: number,
   ): void {
     const kind = p.kind;
-    const s = kind === 'ultralight' ? 0.72 : kind === 'courier' ? 1.0 : kind === 'gunship' ? 1.2 : 1.14;
+    // Traffic shares the player's altitude plane, so it has to share the
+    // player's SCALE. It was drawn at roughly half size — measured against the
+    // smallest aircraft in the fleet, a courier came out 55% of a crop duster
+    // and half a military transport — which is what made other aeroplanes read
+    // as toys hanging in the sky rather than something you might hit.
+    const s = kind === 'ultralight' ? 1.35 : kind === 'courier' ? 1.85 : kind === 'gunship' ? 2.05 : 2.0;
     const dir = p.dir;
     // Going down: the nose drops as it spirals
     const pitch = p.doom === null ? 0 : Phaser.Math.Clamp(-p.doom * 0.35, -1.0, 0);
@@ -345,13 +350,16 @@ export class AirTraffic {
       const wDrop = high ? -5 : 5;
 
       // ── Far side, dimmed: one cheap move that gives the airframe depth ──
-      poly([[L(-24), -3], [L(-44), -8], [L(-44), -5], [L(-24), 0]], pal.dark, 0.7, 1.4);
+      poly([[L(-24), -3], [L(-38), -7], [L(-38), -4.2], [L(-24), 0]], pal.dark, 0.7, 1.4);
       poly([[L(6), wy], [L(-16), wy + wDrop], [L(-24), wy + wDrop * 0.6], [L(-2), wy + 1.8]],
         pal.dark, 0.7, 1.4);
 
       // ── Fin: tall and clearly its own shape ─────────────────────────────
-      poly([[L(-26), -6], [L(-36), -28], [L(-25), -27], [L(-18), -6]], pal.hull);
-      poly([[L(-36), -28], [L(-30), -27.4], [L(-28), -15], [L(-34), -15]], pal.trim, 0.9, 0);
+      // Fin height is ~1.2× the fuselage depth, as on a real transport. At 22
+      // units against a 13.6-unit body it was half again taller than anything
+      // that flies, and that single proportion is most of the "weird".
+      poly([[L(-26), -6], [L(-34), -21], [L(-24.5), -20.4], [L(-18), -6]], pal.hull);
+      poly([[L(-34), -21], [L(-29), -20.6], [L(-27.5), -12], [L(-32.5), -12]], pal.trim, 0.9, 0);
 
       // ── Fuselage ────────────────────────────────────────────────────────
       poly([
@@ -364,7 +372,7 @@ export class AirTraffic {
       poly([[L(-16), 5.7], [L(8), 5.7], [L(25), 3.7], [L(24), 2.2], [L(7), 4.1], [L(-15), 4.1]], pal.dark, 0.85, 0);
 
       // ── Near tailplane, over the fuselage ───────────────────────────────
-      poly([[L(-22), -2], [L(-45), -7], [L(-45), -3.5], [L(-22), 1.4]], pal.hull);
+      poly([[L(-22), -2], [L(-39), -6.2], [L(-39), -3], [L(-22), 1.4]], pal.hull);
 
       // ── Cockpit ─────────────────────────────────────────────────────────
       poly([[L(26), -4.6], [L(14), -7], [L(13), -2.4], [L(25), -1.4]], 0x9ec0cc, 0.6, 1.2);
@@ -428,10 +436,14 @@ export class AirTraffic {
         g.fillStyle(0xffffff, 0.95); g.fillCircle(f.x, f.y, 1.9);
         g.fillStyle(0xffffff, 0.24); g.fillCircle(f.x, f.y, 7);
       }
-      const nav = P(-24, -10);
+      // Nav light on the WINGTIP, where one actually lives, and sized with the
+      // airframe. Pinned at a fixed radius near the wing root it stayed put
+      // while everything else doubled, and read as a green lamp bolted to the
+      // fuselage. It is a point of light, not a feature of the aeroplane.
+      const nav = P(-22, kind === 'courier' ? 7.5 : -13.5);
       const navCol = dir > 0 ? 0x30ff70 : 0xff3030;
-      g.fillStyle(navCol, 0.9); g.fillCircle(nav.x, nav.y, 1.6);
-      g.fillStyle(navCol, 0.22 + (1 - dl) * 0.28); g.fillCircle(nav.x, nav.y, 5);
+      g.fillStyle(navCol, 0.85); g.fillCircle(nav.x, nav.y, 0.9 * s);
+      g.fillStyle(navCol, 0.14 + (1 - dl) * 0.20); g.fillCircle(nav.x, nav.y, 2.6 * s);
     } else {
       // Engine fire licking back over the wing
       const fl = 0.6 + Math.sin(t * 17 + p.seed) * 0.4;

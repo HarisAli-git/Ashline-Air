@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import type { WeatherCondition } from '../../types';
+import type { ApproachKind, WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
 import { Raiders, MAX_ENGAGEMENT_M, type RaiderFireReport } from './Raiders';
 import { AirTraffic } from './AirTraffic';
@@ -120,6 +120,9 @@ export interface WorldFrame {
   /** Usable runway at each end, in metres — from the settlements' profiles. */
   originRunwayM?: number;
   destRunwayM?: number;
+  /** What each field is PAVED with, from its approach type. */
+  originSurface?: ApproachKind;
+  destSurface?: ApproachKind;
   condition: WeatherCondition;
   minutesOfDay: number; // world-clock minutes 0–1439, drives the day/night cycle
   visibility: number;   // 0–1 from weather, dims the sun/moon
@@ -1050,8 +1053,8 @@ export class ParallaxWorld {
     const dstLen = (f.destRunwayM ?? 600) * PXM;
     const oriFrom = -oriLen * 0.28, oriTo = oriLen * 0.72;
     const dstFrom = destPx - dstLen * 0.5, dstTo = destPx + dstLen * 0.5;
-    this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f);
-    this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f);
+    this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f, f.originSurface ?? 'open');
+    this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f, f.destSurface ?? 'open');
     // Origin airfield sits just behind the spawn point (aircraft spawns at
     // screen/world ~300) so the field is on screen from the first frame; the
     // destination's is at its strip entrance, overflown on approach.
@@ -1373,6 +1376,7 @@ export class ParallaxWorld {
     scrollX: number,
     gy: number,
     f: WorldFrame,
+    surface: ApproachKind = 'open',
   ): void {
     const x0 = fromM - scrollX;
     const x1 = toM - scrollX;
@@ -1381,15 +1385,49 @@ export class ParallaxWorld {
     const sx0 = Math.max(-60, x0);
     const sx1 = Math.min(this.width + 60, x1);
 
-    // Slab with edge line and worn shoulders
-    g.fillStyle(0x1c1c1a, 0.95);
-    g.fillRect(sx0, gy + 1, sx1 - sx0, 13);
-    g.fillStyle(0x2a2a26, 0.9);
-    g.fillRect(sx0, gy + 1, sx1 - sx0, 2);
-    g.lineStyle(1, 0xb8b0a0, 0.35);
-    g.lineBetween(sx0, gy + 1.5, sx1, gy + 1.5); // painted edge line
-    g.lineStyle(1, 0x3a3a36, 0.8);
-    g.lineBetween(sx0, gy + 14, sx1, gy + 14);
+    /**
+     * Every field used to be the same 13-px black stripe, which is why one
+     * landing looked like every other. The surface is what a place IS: a
+     * nomad strip is scraped dirt, a pre-war freight apron is cracked
+     * concrete, a coastal causeway is salt-bleached. Driven by the same
+     * approach type that gates which aircraft can use the field.
+     */
+    const SURFACES: Record<ApproachKind, {
+      deck: number; near: number; far: number; mark: number; loose: boolean;
+    }> = {
+      open:       { deck: 0x24231f, near: 0x171613, far: 0x393730, mark: 0xc8c0a8, loose: false },
+      industrial: { deck: 0x33322c, near: 0x1d1c18, far: 0x4a473d, mark: 0xd6cfb4, loose: false },
+      coastal:    { deck: 0x2b2b28, near: 0x1a1a18, far: 0x484a44, mark: 0xbfc4bb, loose: false },
+      canyon:     { deck: 0x5a4227, near: 0x332413, far: 0x74582f, mark: 0xa08a5c, loose: true  },
+      mountain:   { deck: 0x4e4438, near: 0x2c261e, far: 0x675944, mark: 0x9c9078, loose: true },
+    };
+    const S = SURFACES[surface] ?? SURFACES.open;
+
+    // ── The deck, as a SURFACE rather than a line ───────────────────────
+    // Banded from the far edge down to the near one so it reads as ground
+    // receding away from the camera instead of a stripe painted on the world.
+    const DECK = 22;
+    const BANDS = 9;
+    for (let i = 0; i < BANDS; i++) {
+      const t = i / (BANDS - 1);
+      const c = Phaser.Display.Color.Interpolate.ColorWithColor(
+        Phaser.Display.Color.IntegerToColor(S.far),
+        Phaser.Display.Color.IntegerToColor(S.near),
+        100, Math.round(t * 100),
+      );
+      g.fillStyle(Phaser.Display.Color.GetColor(c.r, c.g, c.b), 1);
+      g.fillRect(sx0, gy + 1 + (DECK * i) / BANDS, sx1 - sx0, DECK / BANDS + 0.8);
+    }
+    // Shoulders: graded dirt either side of the hard surface
+    g.fillStyle(lerpColor(S.deck, this.pal.ground ?? 0x4a3d28, 0.6), 0.85);
+    g.fillRect(sx0, gy - 3, sx1 - sx0, 4);
+    g.fillRect(sx0, gy + 1 + DECK, sx1 - sx0, 5);
+    // Painted edge lines, top and bottom of the deck
+    g.lineStyle(1.2, S.mark, S.loose ? 0.10 : 0.34);
+    g.lineBetween(sx0, gy + 2.2, sx1, gy + 2.2);
+    g.lineBetween(sx0, gy + DECK - 1, sx1, gy + DECK - 1);
+    g.lineStyle(1, 0x000000, 0.5);
+    g.lineBetween(sx0, gy + 1 + DECK, sx1, gy + 1 + DECK);
 
     // Asphalt patchwork speckle
     {
@@ -1401,7 +1439,7 @@ export class ParallaxWorld {
         if (wx < fromM + 6 || wx > toM - 6) continue;
         const dx = wx - scrollX;
         g.fillStyle(propRand(i + 55) > 0.5 ? 0x000000 : 0x4a4a44, 0.25);
-        g.fillRect(dx, gy + 3 + propRand(i + 8) * 8, 3 + propRand(i) * 5, 1.4);
+        g.fillRect(dx, gy + 3 + propRand(i + 8) * (DECK - 7), 3 + propRand(i) * 6, 1.6);
       }
     }
 
@@ -1411,7 +1449,7 @@ export class ParallaxWorld {
         const tx = endX + i * 15;
         if (tx < -20 || tx > this.width + 20) continue;
         g.fillStyle(0xc8c0a8, 0.75);
-        g.fillRect(tx, gy + 3, 7, 9);
+        g.fillRect(tx, gy + 3.5, 7, DECK - 6);
       }
     }
 
@@ -1419,7 +1457,7 @@ export class ParallaxWorld {
     for (const ax of [x0 + 190, x1 - 265]) {
       if (ax > -60 && ax < this.width + 60) {
         g.fillStyle(0xd8d0b8, 0.6);
-        g.fillRect(ax, gy + 4.5, 34, 5);
+        g.fillRect(ax, gy + 7, 34, 6);
       }
     }
 
@@ -1429,7 +1467,7 @@ export class ParallaxWorld {
         const rx = endX + dir * (i * 26 + propRand(i + 61) * 18);
         if (rx < -40 || rx > this.width + 40) continue;
         g.fillStyle(0x0c0a08, 0.4);
-        g.fillRect(rx, gy + 5 + propRand(i + 31) * 5, 16 + propRand(i + 41) * 14, 1.8);
+        g.fillRect(rx, gy + 6 + propRand(i + 31) * 10, 16 + propRand(i + 41) * 14, 2.4);
       }
     }
 
@@ -1439,7 +1477,7 @@ export class ParallaxWorld {
     for (let wx = fromM + 120; wx < toM - 110; wx += dashW + gap) {
       const dx = wx - scrollX;
       if (dx < -40 || dx > this.width + 40) continue;
-      g.fillRect(dx, gy + 7, dashW, 2.5);
+      g.fillRect(dx, gy + DECK * 0.5, dashW, 3);
     }
 
     // Sequenced approach strobes leading in to the threshold ("the rabbit")

@@ -83,31 +83,31 @@
     "choices": [
       {
         "id": "seal_leak",
-        "label": "Attempt to seal the leak manually",
+        "label": "Seal it from the cabin and press on",
         "consequences": [
           {
             "type": "multiply",
             "target": "fuelBurnRate",
             "value": 1.3,
-            "description": "Leak partially sealed — reduced but not stopped"
+            "description": "Leak slowed, not stopped — burn up 30%"
           },
           {
             "type": "delta",
             "target": "integrity",
             "value": -3,
-            "description": "Slight structural stress from repair attempt"
+            "description": "Structural stress from the patch"
           }
         ]
       },
       {
         "id": "divert_immediately",
-        "label": "Divert to nearest settlement",
+        "label": "Shut it down and put her on the deck now",
         "consequences": [
           {
-            "type": "multiply",
-            "target": "fuelBurnRate",
-            "value": 1.6,
-            "description": "Leak worsens as you descend"
+            "type": "action",
+            "target": "divert",
+            "value": 0,
+            "description": "Diverting — contract stays open"
           }
         ]
       }
@@ -127,31 +127,37 @@
     "choices": [
       {
         "id": "assess_damage",
-        "label": "Assess damage and continue",
+        "label": "Assess the damage and press on",
         "consequences": [
           {
             "type": "delta",
             "target": "integrity",
             "value": -10,
-            "description": "Bird strike damages leading edge"
+            "description": "Leading edge caved in"
           },
           {
             "type": "delta",
             "target": "engineTemp",
             "value": 0.1,
-            "description": "Debris ingested into engine"
+            "description": "Debris through the engine"
           }
         ]
       },
       {
         "id": "emergency_land",
-        "label": "Declare emergency and land immediately",
+        "label": "Declare an emergency and land short",
         "consequences": [
           {
             "type": "delta",
             "target": "integrity",
             "value": -5,
-            "description": "You manage a controlled descent"
+            "description": "Controlled descent, light damage"
+          },
+          {
+            "type": "action",
+            "target": "divert",
+            "value": 0,
+            "description": "Diverting — contract stays open"
           }
         ]
       }
@@ -171,55 +177,67 @@
     "choices": [
       {
         "id": "fly_through",
-        "label": "Fly through — you've seen worse",
+        "label": "Bore straight through it",
         "consequences": [
           {
             "type": "delta",
             "target": "integrity",
             "value": -15,
-            "description": "Abrasive particles scour the airframe"
+            "description": "Grit scours the airframe"
           },
           {
             "type": "multiply",
             "target": "fuelBurnRate",
             "value": 1.2,
-            "description": "Headwinds increase fuel burn"
+            "description": "Headwind drives the burn up"
           }
         ]
       },
       {
         "id": "climb_over",
-        "label": "Climb above the storm",
+        "label": "Climb over the top",
         "consequences": [
           {
             "type": "delta",
             "target": "fuel",
             "value": -10,
-            "description": "Climb burns extra fuel"
+            "description": "The climb costs fuel"
           },
           {
             "type": "delta",
-            "target": "integrity",
-            "value": -3,
-            "description": "Minor turbulence at altitude"
+            "target": "altitude",
+            "value": 320,
+            "description": "Up and over"
+          },
+          {
+            "type": "action",
+            "target": "clear_weather",
+            "value": 0,
+            "description": "Clear air above the storm"
           }
         ]
       },
       {
         "id": "go_around",
-        "label": "Detour around the storm",
+        "label": "Track around the edge of it",
         "consequences": [
           {
             "type": "delta",
             "target": "fuel",
             "value": -15,
-            "description": "Extra distance costs fuel"
+            "description": "The long way costs fuel"
           },
           {
-            "type": "delta",
-            "target": "elapsedSeconds",
-            "value": 600,
-            "description": "Significant time added to flight"
+            "type": "action",
+            "target": "extend_route",
+            "value": 0.8,
+            "description": "0.8 km added to the leg"
+          },
+          {
+            "type": "action",
+            "target": "clear_weather",
+            "value": 0,
+            "description": "You skirt the worst of it"
           }
         ]
       }
@@ -239,37 +257,43 @@
     "choices": [
       {
         "id": "investigate",
-        "label": "Divert and investigate",
+        "label": "Divert, find them, then carry on",
         "consequences": [
           {
             "type": "delta",
             "target": "fuel",
             "value": -12,
-            "description": "Diversion burns fuel"
+            "description": "The detour costs fuel"
+          },
+          {
+            "type": "action",
+            "target": "extend_route",
+            "value": 0.6,
+            "description": "0.6 km added to the leg"
           },
           {
             "type": "add_reputation",
             "target": "republic",
             "value": 20,
-            "description": "Republic hears of your rescue"
+            "description": "The Republic hears about it"
           },
           {
             "type": "add_money",
             "target": "player",
             "value": 500,
-            "description": "Reward from survivors"
+            "description": "The survivors pay what they have"
           }
         ]
       },
       {
         "id": "ignore",
-        "label": "Log the signal and continue",
+        "label": "Log the position and keep going",
         "consequences": [
           {
             "type": "add_reputation",
             "target": "republic",
             "value": -10,
-            "description": "Republic pilots talk"
+            "description": "Republic pilots talk. Word gets around."
           }
         ]
       }
@@ -289,31 +313,43 @@
     "choices": [
       {
         "id": "increase_throttle",
-        "label": "Increase throttle to compensate",
+        "label": "Firewall it and hold the schedule",
         "consequences": [
+          {
+            "type": "action",
+            "target": "full_power",
+            "value": 0.35,
+            "description": "Throttle up"
+          },
           {
             "type": "multiply",
             "target": "fuelBurnRate",
             "value": 1.4,
-            "description": "Higher throttle burns more fuel"
+            "description": "Burn up 40%"
           },
           {
             "type": "delta",
             "target": "engineTemp",
             "value": 0.1,
-            "description": "Engine runs hotter"
+            "description": "Engine runs hot"
           }
         ]
       },
       {
         "id": "descend_for_calmer_air",
-        "label": "Descend to find calmer air",
+        "label": "Get down under it",
         "consequences": [
           {
-            "type": "delta",
-            "target": "altitude",
-            "value": -22,
-            "description": "You drop to a lower layer"
+            "type": "action",
+            "target": "descend",
+            "value": -140,
+            "description": "Descending into calmer air"
+          },
+          {
+            "type": "action",
+            "target": "clear_weather",
+            "value": 0,
+            "description": "Out of the wind layer"
           }
         ]
       }

@@ -40,4 +40,27 @@ export type ConsequenceType =
   | 'set'        // set to exact value
   | 'add_cargo_damage'
   | 'add_money'
-  | 'add_reputation';
+  | 'add_reputation'
+  /**
+   * Something the FLIGHT actually does — see `FlightAction`.
+   *
+   * Everything above only pokes a number. That is why choices like "Divert to
+   * the nearest settlement" and "Detour around the storm" read as doing
+   * nothing: the label described a manoeuvre and the game quietly adjusted a
+   * stat and carried on exactly as before. A choice that names an action has
+   * to perform it.
+   */
+  | 'action';
+
+/** Actions a flight event choice can actually carry out. */
+export type FlightAction =
+  /** Break off and put down short: the report reads DIVERTED, contract stays. */
+  | 'divert'
+  /** You got above/around it — the current weather actually stops. */
+  | 'clear_weather'
+  /** Going around costs distance: the route really does get longer. */
+  | 'extend_route'
+  /** Firewall it — the throttle lever actually moves. */
+  | 'full_power'
+  /** Put it on the deck: a real, immediate descent. */
+  | 'descend';

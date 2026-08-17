@@ -15,6 +15,7 @@ import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
 import { clamp, distance, pixelsToKm } from '../utils/math';
+import type { ApproachKind, FlightAction } from '../../types';
 import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
 import { TouchInput } from '../utils/touchInput';
@@ -60,6 +61,9 @@ export class FlightScene extends Phaser.Scene {
   /** Usable runway at each end, metres — from the settlements' field profiles. */
   private originRunwayM = 600;
   private destRunwayM = 600;
+  /** Surface each field is paved with — drives how the runway is drawn. */
+  private originSurface: ApproachKind = 'open';
+  private destSurface: ApproachKind = 'open';
   private originBiome = biomeFor(undefined);
   private destBiome = biomeFor(undefined);
   private cargo!: CargoHold;
@@ -218,6 +222,8 @@ export class FlightScene extends Phaser.Scene {
         destinationName = dest.name;
         this.originRunwayM = origin.field?.runwayM ?? 600;
         this.destRunwayM = dest.field?.runwayM ?? 600;
+        this.originSurface = origin.field?.approach ?? 'open';
+        this.destSurface = dest.field?.approach ?? 'open';
       }
     }
     this.destinationName = destinationName;
@@ -300,6 +306,9 @@ export class FlightScene extends Phaser.Scene {
       EventBus.on('flight:apply-event-choice', ({ choiceId }) => {
         this.state = FlightEventService.applyChoice(choiceId, this.state);
       }),
+      // A choice that names a manoeuvre has to FLY it. Stat pokes alone are
+      // why "Divert to the nearest settlement" read as doing nothing at all.
+      EventBus.on('flight:event-action', ({ action, value }) => this.runEventAction(action, value)),
       EventBus.on('weather:changed', ({ state: weather }) => {
         this.world.setWeather(weather.condition);
         this.fx.setCondition(weather.condition);
@@ -328,7 +337,9 @@ export class FlightScene extends Phaser.Scene {
       scrollX: 0, altitude: 0, windX: 0,
       routeTotalKm: this.routeKm,
       originRunwayM: this.originRunwayM,
-      destRunwayM: this.destRunwayM, condition: this.weather.current.condition,
+      destRunwayM: this.destRunwayM,
+      originSurface: this.originSurface,
+      destSurface: this.destSurface, condition: this.weather.current.condition,
       minutesOfDay: this.baseTimestamp % 1440,
       visibility: this.weather.current.visibility,
       progress: 0,
@@ -605,6 +616,8 @@ export class FlightScene extends Phaser.Scene {
       routeTotalKm: this.routeKm,
       originRunwayM: this.originRunwayM,
       destRunwayM: this.destRunwayM,
+      originSurface: this.originSurface,
+      destSurface: this.destSurface,
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
@@ -677,6 +690,8 @@ export class FlightScene extends Phaser.Scene {
       routeTotalKm: this.routeKm,
       originRunwayM: this.originRunwayM,
       destRunwayM: this.destRunwayM,
+      originSurface: this.originSurface,
+      destSurface: this.destSurface,
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
@@ -1166,6 +1181,63 @@ export class FlightScene extends Phaser.Scene {
   }
 
   // ── Landing ───────────────────────────────────────────────────────────────
+
+  /**
+   * Carry out what a flight-event choice actually promised.
+   *
+   * Every one of these is visible from the cockpit within a second or two —
+   * that is the whole point. A choice whose only effect is a number in the
+   * save file is indistinguishable from closing the box.
+   */
+  private runEventAction(action: FlightAction, value: number): void {
+    switch (action) {
+      case 'divert': {
+        // Break off and put it down. `reachedDestination` is false this far
+        // out, so the report reads DIVERTED and the contract stays live.
+        EventBus.emit('ui:show-notification', {
+          message: 'Breaking off — putting her down short of the destination.',
+          type: 'warning',
+        });
+        this.finishFlight({
+          verticalSpeed: -1.4,
+          horizontalSpeed: this.state.speed,
+          gearDown: this.state.gearDown,
+          quality: 'good',
+          integrityDamage: 0,
+          cargoDamagePercent: 0,
+        });
+        break;
+      }
+      case 'clear_weather':
+        // You got above it / around it — so the weather genuinely stops.
+        this.weather.forceCondition('clear');
+        this.iceLoad = 0;
+        EventBus.emit('ui:show-notification', {
+          message: 'Clear air — you are above the worst of it.', type: 'success',
+        });
+        break;
+      case 'extend_route': {
+        // Going around is longer. The route strip and the distance readout
+        // both move, so the cost is on screen for the rest of the flight.
+        this.routeKm += value;
+        EventBus.emit('flight:route-info', {
+          routeKm: this.routeKm, destinationName: this.destinationName,
+        });
+        EventBus.emit('ui:show-notification', {
+          message: `Routing around it — ${value.toFixed(1)} km added to the leg.`,
+          type: 'warning',
+        });
+        break;
+      }
+      case 'full_power':
+        this.state.throttle = Math.min(1, this.state.throttle + value);
+        break;
+      case 'descend':
+        this.state.altitude = Math.max(12, this.state.altitude + value);
+        this.state.flightPathAngle = Math.min(this.state.flightPathAngle, -0.05);
+        break;
+    }
+  }
 
   private finishFlight(result: LandingResult): void {
     if (this.landed) return;
