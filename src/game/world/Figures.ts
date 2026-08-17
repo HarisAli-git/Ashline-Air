@@ -47,6 +47,13 @@ function rnd(i: number): number {
  * One armed figure standing on `groundY`.
  * `aim` is only used by the `aimUp` pose (radians, screen space, up = negative).
  */
+/** Blend two packed colours — used for shaded limbs and rim light. */
+function mix(a: number, b: number, t: number): number {
+  const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+  const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+  return ((ar + (br - ar) * t) << 16 | (ag + (bg - ag) * t) << 8 | (ab + (bb - ab) * t)) & 0xffffff;
+}
+
 export function drawFighter(
   g: Phaser.GameObjects.Graphics,
   x: number, groundY: number, t: number, seed: number,
@@ -72,18 +79,55 @@ export function drawFighter(
   // A patrolling sentry walks his beat instead of standing like furniture
   const stride = pose === 'patrol' ? Math.sin(t * 2.1 + seed) * 2.6 * s : 0;
 
-  // Legs — braced apart, not walking
-  g.lineStyle(1.9 * s, cloth, 1);
-  g.beginPath();
-  g.moveTo(x, hipY);
-  g.lineTo(x - face * 1.6 * s + stride * 0.4, hipY + legLen * 0.55);
-  g.lineTo(x - face * 3.4 * s + stride, groundY);
-  g.strokePath();
-  g.beginPath();
-  g.moveTo(x, hipY);
-  g.lineTo(x + face * 2.0 * s - stride * 0.4, hipY + legLen * 0.55);
-  g.lineTo(x + face * 3.2 * s - stride, groundY);
-  g.strokePath();
+  /**
+   * A limb with THICKNESS, tapering along its length.
+   *
+   * Every arm and leg here used to be a 1.9 px stroked polyline, which is the
+   * literal definition of a stick figure — no mass, no silhouette, and it read
+   * as a scratch on the background rather than a person standing in the
+   * world. A thigh is thicker than a calf and an upper arm than a forearm;
+   * that taper is most of what makes a limb look like a limb at this size.
+   */
+  const limb = (
+    ax: number, ay: number, bx: number, by: number,
+    cx: number, cy: number, w0: number, w1: number, col: number,
+  ): void => {
+    const seg = (px: number, py: number, qx: number, qy: number, pw: number, qw: number): void => {
+      const dx = qx - px, dy = qy - py;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len, ny = dx / len;
+      g.fillStyle(col, 1);
+      g.fillPoints([
+        new Phaser.Geom.Point(px + nx * pw, py + ny * pw),
+        new Phaser.Geom.Point(qx + nx * qw, qy + ny * qw),
+        new Phaser.Geom.Point(qx - nx * qw, qy - ny * qw),
+        new Phaser.Geom.Point(px - nx * pw, py - ny * pw),
+      ], true);
+    };
+    const wMid = (w0 + w1) * 0.5;
+    seg(ax, ay, bx, by, w0, wMid);
+    seg(bx, by, cx, cy, wMid, w1);
+    // Joint cap, so the knee/elbow does not show a notch
+    g.fillStyle(col, 1);
+    g.fillCircle(bx, by, wMid);
+  };
+
+  // Cast shadow — the same low sun everything else on the ground answers to.
+  g.fillStyle(0x000000, 0.30);
+  g.fillEllipse(x + face * 5 * s, groundY + 1, 20 * s, 3.6 * s);
+
+  // ── Legs: braced apart, with knees and boots ────────────────────────────
+  const kneeBack = { x: x - face * 1.6 * s + stride * 0.4, y: hipY + legLen * 0.55 };
+  const footBack = { x: x - face * 3.4 * s + stride, y: groundY };
+  const kneeFwd  = { x: x + face * 2.0 * s - stride * 0.4, y: hipY + legLen * 0.55 };
+  const footFwd  = { x: x + face * 3.2 * s - stride, y: groundY };
+  const legBack = mix(cloth, 0x000000, 0.30);   // far leg sits in its own shade
+  limb(x, hipY, kneeBack.x, kneeBack.y, footBack.x, footBack.y, 1.9 * s, 1.25 * s, legBack);
+  limb(x, hipY, kneeFwd.x, kneeFwd.y, footFwd.x, footFwd.y, 2.1 * s, 1.35 * s, cloth);
+  // Boots: a heavy foot is what plants a figure on the ground
+  g.fillStyle(mix(cloth, 0x000000, 0.55), 1);
+  g.fillRect(footBack.x - face * 2.4 * s, groundY - 1.6 * s, face * 4.2 * s, 1.8 * s);
+  g.fillRect(footFwd.x - face * 2.6 * s, groundY - 1.7 * s, face * 4.6 * s, 1.9 * s);
 
   // Torso: webbing and a plate carrier make a blockier shape than the dead
   g.fillStyle(cloth, 1);
@@ -117,27 +161,33 @@ export function drawFighter(
     g.fillRect(shX + face * 0.2 * s - 2.2 * s, hdY + 0.5 * s, 4.4 * s, 1.2 * s);
   }
 
+  // Rim light down the sunward edge. At this size a figure is mostly
+  // silhouette, and a single lit edge is what lifts it off the ground behind
+  // it — the same low sun the terrain and the scrub answer to.
+  g.lineStyle(1.1 * s, mix(pal.head, 0xffd9a0, 0.55), 0.55);
+  g.beginPath();
+  g.moveTo(shX + face * 3.0 * s, shY);
+  g.lineTo(x + face * 2.4 * s, hipY + 0.6 * s);
+  g.strokePath();
+  g.fillStyle(mix(cloth, 0xffd9a0, 0.35), 0.35);
+  g.fillRect(shX + face * 2.2 * s, shY, face * 0.9 * s, (hipY - shY) * 0.9);
+
   // Arms + weapon
   const a = pose === 'aimUp' ? aim
     : pose === 'aimSide' ? (face > 0 ? 0 : Math.PI)
     : 0.5;
   if (pose === 'work') {
     // Hauling an ammo can
-    g.lineStyle(1.6 * s, cloth, 1);
-    g.beginPath();
-    g.moveTo(shX, shY + 1 * s);
-    g.lineTo(shX + face * 2.6 * s, shY + 4 * s);
-    g.lineTo(shX + face * 3.4 * s, shY + 7 * s);
-    g.strokePath();
+    limb(shX, shY + 1 * s,
+      shX + face * 2.6 * s, shY + 4 * s,
+      shX + face * 3.4 * s, shY + 7 * s, 1.6 * s, 1.05 * s, cloth);
     g.fillStyle(0x2f3a24, 1);
     g.fillRect(shX + face * 2.2 * s, shY + 7 * s, 4.6 * s, 3.4 * s);
   } else if (pose === 'patrol' || pose === 'stand') {
     // Weapon slung across the chest, muzzle down
-    g.lineStyle(1.6 * s, cloth, 1);
-    g.beginPath();
-    g.moveTo(shX, shY + 1.4 * s);
-    g.lineTo(shX + face * 2.2 * s, shY + 4.2 * s);
-    g.strokePath();
+    limb(shX, shY + 1.4 * s,
+      shX + face * 1.3 * s, shY + 2.9 * s,
+      shX + face * 2.2 * s, shY + 4.2 * s, 1.6 * s, 1.05 * s, cloth);
     g.lineStyle(1.5 * s, metal, 1);
     g.lineBetween(shX + face * 3.4 * s, shY + 0.6 * s, shX - face * 1.2 * s, shY + 7.4 * s);
   } else {

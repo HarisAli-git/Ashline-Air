@@ -49,6 +49,16 @@ export interface FlightModifiers {
    * stops working at a speed that was comfortable a minute ago.
    */
   liftMult: number;
+  /**
+   * Multiplier on static stability, 1 = normal.
+   *
+   * Rough air does not just jostle an aeroplane, it takes away its manners:
+   * the tail is working in disturbed flow and the airframe stops holding an
+   * attitude for you. Turbulence used to be symmetric noise added to pitch
+   * rate, which reads as vibration — this is what makes a storm actually
+   * HARDER TO FLY rather than merely bumpy.
+   */
+  stabilityMult: number;
 }
 
 export interface LandingResult {

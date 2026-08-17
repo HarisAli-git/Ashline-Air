@@ -86,6 +86,8 @@ export class FlightScene extends Phaser.Scene {
   private smoothDt      = 1 / 60; // low-passed frame delta, kills scroll judder
   private shakeDuration = 0;
   private gustTimer     = 0;
+  /** Slow wave driving sustained gusts and downdraughts. */
+  private gustPhase = 0;
   private notifiedApproach = false;
   private notifiedArrival  = false;
 
@@ -482,6 +484,23 @@ export class FlightScene extends Phaser.Scene {
     // ── Turbulence: gusts nudge the aircraft, dt-scaled so a storm is rough
     //    but flyable (previously this was per-frame and slammed you down) ────
     const turbulence = this.weather.current.turbulenceIntensity;
+
+    // Rough air makes the aeroplane HARDER TO FLY, not merely bumpy: the tail
+    // is working in disturbed flow, so the airframe stops holding an attitude
+    // for you and the controls go vague.
+    this.state.modifiers.stabilityMult = clamp(1 - turbulence * 0.55, 0.35, 1);
+
+    // Sustained gusts and downdraughts, layered UNDER the white noise. A storm
+    // that only jitters reads as vibration; what actually catches a pilot out
+    // is air that pushes the aeroplane one way for several seconds — which is
+    // why this is a slow wave, not another random number.
+    if (turbulence > 0 && this.state.altitude > 8) {
+      this.gustPhase += sdt * (0.35 + turbulence * 0.5);
+      const shear = Math.sin(this.gustPhase) * Math.sin(this.gustPhase * 0.37 + 1.1);
+      this.state.verticalSpeed += shear * turbulence * 9 * sdt;
+      this.state.pitchRate += shear * turbulence * 14 * sdt;
+    }
+
     if (turbulence > 0 && this.state.altitude > 12) {
       this.state.verticalSpeed += (Math.random() - 0.5) * turbulence * 7 * sdt;
       // Gusts shove the airframe and its own stability rides it out — far more
@@ -920,11 +939,18 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Lightning ─────────────────────────────────────────────────────────
     if (rep.struck) {
+      // A bolt that hits YOUR AEROPLANE has to be drawn hitting your
+      // aeroplane. It used to be a white screen flash indistinguishable from
+      // the ambient storm flicker, which is why a strike read as scenery.
+      this.drawLightningStrike();
       this.cameras.main.flash(320, 255, 255, 255);
       this.cameras.main.shake(520, 0.013);
       SoundEngine.thunder();
       SoundEngine.impact();
       this.aircraft.notifyHit();
+      // …and it throws the aeroplane about. A strike is a physical event.
+      this.state.pitchRate += (Math.random() < 0.5 ? -1 : 1) * (30 + Math.random() * 26);
+      this.state.verticalSpeed -= 3 + Math.random() * 4;
       this.disengageWarp('lightning strike');
       EventBus.emit('ui:show-notification', {
         message: '⚡ LIGHTNING STRIKE — engine out, instruments gone. Hold E to restart.',
@@ -1025,6 +1051,62 @@ export class FlightScene extends Phaser.Scene {
     }).setDepth(7);
     debris.explode(count);
     this.time.delayedCall(1700, () => debris.destroy());
+  }
+
+  /**
+   * The bolt itself: a jagged discharge from the cloud base down onto the
+   * airframe, with a burnt-in afterimage and sparks off the skin. Drawn in
+   * screen space at the aircraft, held for a few frames.
+   */
+  private drawLightningStrike(): void {
+    const ax = AIRCRAFT_X + this.rig.offsetX;
+    const ay = this.world.altitudeToScreenY(this.state.altitude) + this.rig.offsetY;
+    const g = this.add.graphics().setDepth(9);
+
+    const bolt = (width: number, colour: number, alpha: number, jitter: number): void => {
+      g.lineStyle(width, colour, alpha);
+      g.beginPath();
+      let x = ax + (Math.random() - 0.5) * 40;
+      let y = -20;
+      g.moveTo(x, y);
+      while (y < ay) {
+        y += 16 + Math.random() * 22;
+        x += (Math.random() - 0.5) * jitter;
+        // Home in on the airframe as it gets close, so it clearly hits YOU
+        const pull = Phaser.Math.Clamp((y - ay * 0.4) / Math.max(1, ay * 0.6), 0, 1);
+        x = Phaser.Math.Linear(x, ax, pull * 0.55);
+        g.lineTo(x, Math.min(y, ay));
+      }
+      g.strokePath();
+    };
+
+    bolt(7, 0x9fd0ff, 0.30, 52);   // outer glow
+    bolt(3, 0xdcefff, 0.85, 44);   // core
+    bolt(1.4, 0xffffff, 1, 38);    // hot centre
+
+    // Discharge blooming off the airframe
+    g.fillStyle(0xdcefff, 0.5);
+    g.fillCircle(ax, ay, 16);
+    g.fillStyle(0xffffff, 0.85);
+    g.fillCircle(ax, ay, 7);
+
+    const sparks = this.add.particles(ax, ay, 'px_streak', {
+      lifespan: { min: 200, max: 700 },
+      speed: { min: 60, max: 300 },
+      angle: { min: 0, max: 360 },
+      scale: { start: 0.7, end: 0 },
+      alpha: { start: 1, end: 0 },
+      tint: [0xdcefff, 0x9fd0ff, 0xffffff],
+      gravityY: 120,
+      emitting: false,
+    }).setDepth(9);
+    sparks.explode(26);
+
+    // Two quick re-strikes, the way a real discharge flickers
+    this.time.delayedCall(60, () => { g.clear(); bolt(2.5, 0xdcefff, 0.7, 40); });
+    this.time.delayedCall(130, () => g.clear());
+    this.time.delayedCall(220, () => g.destroy());
+    this.time.delayedCall(900, () => sparks.destroy());
   }
 
   /** Two aircraft, one piece of sky. Neither of you is landing on a runway. */
@@ -1332,11 +1414,25 @@ export class FlightScene extends Phaser.Scene {
     let integrityDamage: number;
     let cargoDamage: number;
 
+    /**
+     * Touchdown speed is graded against THIS AIRCRAFT'S stall speed, not an
+     * absolute number.
+     *
+     * The old bar was a flat 25 m/s for a perfect landing. Stall speeds across
+     * the fleet run 60 → 130 km/h, so four of the six aircraft could not touch
+     * down that slowly without already being in a stall: a perfect landing was
+     * literally unreachable in anything bigger than the bush plane, and the
+     * player had no way to know why. Grading against 1.35× stall asks the same
+     * SKILL of every aeroplane — cross the fence slow and put it down gently —
+     * which is the thing the player is actually learning.
+     */
+    const vRef = this.controller.vStall;
+
     if (!this.state.gearDown) {
       quality = 'crash'; integrityDamage = 45; cargoDamage = 60;
-    } else if (vSpeed < 1.5 && hSpeed < 25) {
+    } else if (vSpeed < 1.4 && hSpeed < vRef * 1.35) {
       quality = 'perfect'; integrityDamage = 0; cargoDamage = 0;
-    } else if (vSpeed < 3.0 && hSpeed < 55) {
+    } else if (vSpeed < 2.8 && hSpeed < vRef * 1.75) {
       quality = 'good'; integrityDamage = 2; cargoDamage = 0;
     } else if (vSpeed < 5.5) {
       quality = 'hard'; integrityDamage = 12; cargoDamage = 20;

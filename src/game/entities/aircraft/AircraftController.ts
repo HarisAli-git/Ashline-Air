@@ -111,7 +111,24 @@ export const TUNING = {
    * the wing mushes into a stall and it falls, and you are a passenger until
    * the throttle goes back in (measured: ~4 s of full power to fly again).
    */
-  stabIdle: 0.10,
+  /**
+   * Fraction of static stability that survives at zero thrust.
+   *
+   * At 0.10 the airframe effectively stopped being an aeroplane below about
+   * half power, and the result was measurable and unflyable: on a flaps-and-
+   * gear-down approach the descent rate went −43 m/s at 20% throttle, −86 m/s
+   * at 40%, then snapped to −0.5 m/s at 50%. A cliff, with no window anywhere
+   * near a real approach setting. That is the whole of "landing is not
+   * natural and difficult" — you cannot fly an approach that does not exist.
+   *
+   * The physics was wrong too. Static stability comes from the TAILPLANE, not
+   * the engine; an aeroplane with a dead engine is still stable, it just
+   * glides. What the engine actually provides is propwash over the tail —
+   * elevator AUTHORITY — and the ability to hold height. So stability stays
+   * largely intact and "power off is a problem" is carried by `powerTrimShift`,
+   * `wallow` near the stall, and simply not being able to stay up.
+   */
+  stabIdle: 0.55,
   /**
    * Power is what keeps a propeller aeroplane civilised.
    *
@@ -129,7 +146,8 @@ export const TUNING = {
   powerAuthorityLow: 0.15,
   powerAuthorityHigh: 0.52,
   /** Nose-down pitching moment at zero power, deg/s². */
-  powerPitchDown: 34,
+  /** Degrees of nose-down TRIM shift as power is lost (not a pitch rate). */
+  powerTrimShift: 3.2,
   pitchDamping: 2.8,        // pitch-rate damping
   stallPitchDamp: 3.0,      // extra damping in the stall — stops porpoising
   stallNoseDown: 54,        // deg/s² nose-down once fully stalled
@@ -253,7 +271,7 @@ export class AircraftController {
       flapsDeployed: false,
       distanceTravelled: 0,
       elapsedSeconds: 0,
-      modifiers: { fuelBurnMult: 1, dragMult: 1, liftMult: 1 },
+      modifiers: { fuelBurnMult: 1, dragMult: 1, liftMult: 1, stabilityMult: 1 },
     };
   }
 
@@ -381,13 +399,37 @@ export class AircraftController {
     // between a slow setting at idle and cruise at full power gives 92 km/h at
     // idle and 128 at full, with level flight around half throttle.
     const vTrimLow = this.vStall * TUNING.trimLowFactor;
-    const vTrim = s.flapsDeployed
+    const vWanted = s.flapsDeployed
       ? vTrimLow                                   // configured for the approach
       : vTrimLow + (this.vCruise - vTrimLow) * effThrottle;
+
+    /**
+     * The aeroplane must never be trimmed to a speed its CURRENT POWER cannot
+     * come close to holding. That single omission is what turned a throttle
+     * reduction into a dive instead of a descent.
+     *
+     * Measured before this: at 30% power the military transport was trimmed to
+     * 254 km/h with 130 km/h of stall speed — a speed nothing but a steep dive
+     * could supply — so it went and got it, at −81 m/s. Across the fleet the
+     * approach window was a cliff: −43 to −86 m/s below half throttle, then
+     * −0.5 m/s at 50%. There was no setting anywhere that gave the 3–5 m/s of
+     * a real approach, which is the whole of "landing is not natural".
+     *
+     * Solving the speed the thrust can actually sustain and keeping the demand
+     * within reach of it makes the shortfall show up as a steady descent — and
+     * at idle it falls back to best glide, which is exactly right: engine dead,
+     * trimmed for the glide, coming down at a rate you can fly.
+     */
+    let cdTrim = TUNING.CD0 + TUNING.inducedK * 0.55
+      + TUNING.idleDragCD * Math.pow(1 - effThrottle, TUNING.idleDragCurve);
+    if (s.flapsDeployed) cdTrim += TUNING.flapsCD;
+    if (s.gearDown && !this.gearFixed) cdTrim += TUNING.gearCD;
+    const vSustain = Math.sqrt(Math.max(0, aT) / Math.max(1e-4, this.K * cdTrim));
+    const vTrim = clamp(vWanted, vTrimLow, Math.max(vTrimLow, vSustain * 1.12));
     const clForLevel = clamp(GRAVITY / (this.K * vTrim * vTrim), 0, clMax);
     const alphaTrim = clamp(
       (clForLevel - TUNING.CL0 - flapCL) / TUNING.CLalpha,
-      -6 * DEG, alphaCrit,
+      -2 * DEG, alphaCrit,
     );
 
     const command = (input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0);
@@ -411,7 +453,7 @@ export class AircraftController {
     // climbs, bleeding the speed off again. That exchange is the phugoid, and
     // it is exactly the "adjusts itself to gravity" behaviour that was missing:
     // it is emergent here, not scripted.
-    const alphaErrDeg = (alpha - alphaTrim) / DEG;
+
     // Propwash over the tail is much of a single's elevator authority, so
     // stability still fades with power — but it fades toward WALLOWING, not
     // toward a different tidy equilibrium. The curve is deliberately squared
@@ -422,7 +464,27 @@ export class AircraftController {
       (effThrottle - TUNING.powerAuthorityLow)
         / (TUNING.powerAuthorityHigh - TUNING.powerAuthorityLow), 0, 1,
     ) ** 2;
-    const stabPower = TUNING.stabIdle + (1 - TUNING.stabIdle) * powerAuthority;
+    // Rough air degrades the airframe's manners as well as shaking it.
+    const stabPower = (TUNING.stabIdle + (1 - TUNING.stabIdle) * powerAuthority)
+      * s.modifiers.stabilityMult;
+    /**
+     * Losing power drops the nose — but as a TRIM SHIFT, not as a raw pitch
+     * acceleration.
+     *
+     * As an unopposed `pitchRate -= 34 * (1 - powerAuthority)` this was a
+     * constant ~28 deg/s² nose-down at 30% throttle that nothing balanced, so
+     * the aeroplane simply drove itself into the ground: measured −81 m/s at
+     * 30% power and −0.5 m/s at 50%, a cliff with no approach anywhere in
+     * between. Stability could never win because the term did not act like a
+     * moment at all.
+     *
+     * A thrust line above the CG and the loss of propwash over the tail shift
+     * where the aeroplane TRIMS. Biasing the target angle of attack reproduces
+     * that: the nose drops, stability still balances it at a new attitude, and
+     * a throttle reduction becomes a steeper descent rather than a dive.
+     */
+    const alphaTrimEff = alphaTrim - TUNING.powerTrimShift * DEG * (1 - powerAuthority);
+    const alphaErrDeg = (alpha - alphaTrimEff) / DEG;
     const stabilityMoment = onGround
       ? -s.pitch * TUNING.pitchStability * qNorm          // hold the runway attitude
       : -alphaErrDeg * TUNING.pitchStability * stabPower * qNorm;
@@ -438,10 +500,6 @@ export class AircraftController {
       this.onBuffet?.(stallT);
     }
 
-    // Losing power drops the nose. Propwash off the tail and a thrust line
-    // above the centre of gravity both push this way, and it is what turns a
-    // throttle chop into a dive instead of a glide.
-    s.pitchRate -= TUNING.powerPitchDown * (1 - powerAuthority) * dt;
 
     // Below flying speed it wallows: the elevator has almost no dynamic
     // pressure to work with and the nose wanders on its own. You are a

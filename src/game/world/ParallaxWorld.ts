@@ -709,7 +709,19 @@ export class ParallaxWorld {
         const bx = cx + b * (46 + propRand(c * 7 + b) * 26);
         const bw = 26 + propRand(c + b * 3) * 18;
         const bh = 42 + propRand(c + b * 11) * 78;
-        const col = propRand(c + b) > 0.5 ? 0x171310 : 0x1d1813;
+        /**
+         * A dead city block, not a black rectangle.
+         *
+         * These were one of two flat fills, so a skyline was a paper cut-out
+         * pasted on the haze. Each block now gets a sunward face and a shade
+         * face, a grid of blown-out windows, and floor slabs showing through
+         * where the front has come off — which is what says "this was a
+         * building" rather than "this is a shape".
+         */
+        const base = propRand(c + b) > 0.5 ? 0x171310 : 0x1d1813;
+        const col = base;
+        const litFace = lerpColor(base, this.pal.glow, 0.16);
+        const darkFace = lerpColor(base, 0x000000, 0.45);
 
         if (b === 2 && propRand(c + 99) > 0.5) {
           // One tower leans, mid-collapse
@@ -737,15 +749,39 @@ export class ParallaxWorld {
           g.fillPath();
         }
 
-        // Dead windows, a couple of scorch streaks
-        g.fillStyle(0x000000, 0.5);
+        // Sunward face and shade face: two rectangles, and the block stops
+        // being a cut-out and starts being a solid with a side to it.
+        g.fillStyle(litFace, 0.85);
+        g.fillRect(bx, baseY - bh + 12, bw * 0.30, bh - 12);
+        g.fillStyle(darkFace, 0.75);
+        g.fillRect(bx + bw * 0.62, baseY - bh + 10, bw * 0.38, bh - 10);
+
+        // Floor slabs showing through where the frontage has come away —
+        // the detail that reads as a BUILDING rather than a shape.
+        g.fillStyle(0x0a0806, 0.55);
+        for (let fy = baseY - bh + 20; fy < baseY - 10; fy += 15) {
+          if (propRand(fy + c + b) < 0.45) continue;
+          g.fillRect(bx + bw * 0.22, fy, bw * 0.56, 2.2);
+        }
+
+        // Dead windows, brighter on the lit face, black on the shaded one
         for (let wy = baseY - bh + 14; wy < baseY - 8; wy += 12) {
           for (let wx = bx + 5; wx < bx + bw - 4; wx += 9) {
-            if (propRand(wx + wy + c) < 0.55) g.fillRect(wx, wy, 3.5, 5);
+            if (propRand(wx + wy + c) >= 0.55) continue;
+            const onLit = wx < bx + bw * 0.34;
+            g.fillStyle(onLit ? 0x2a221a : 0x000000, onLit ? 0.65 : 0.55);
+            g.fillRect(wx, wy, 3.5, 5);
           }
         }
+        // Scorch up the face from whatever burned inside
         g.fillStyle(0x0a0806, 0.6);
         g.fillRect(bx + bw * 0.3, baseY - bh + 8, 4, bh * 0.4);
+        // Rebar spraying from the broken roofline
+        g.lineStyle(1, 0x0d0b08, 0.7);
+        for (let k = 0; k < 4; k++) {
+          const rx = bx + bw * (0.3 + k * 0.16);
+          g.lineBetween(rx, baseY - bh + 2, rx + (k % 2 ? 3 : -3), baseY - bh - 5 - (k % 3) * 4);
+        }
       }
       // Rubble mounds at the feet
       g.fillStyle(0x14100b, 1);
