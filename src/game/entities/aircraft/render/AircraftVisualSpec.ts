@@ -119,13 +119,24 @@ export interface AircraftVisualSpec {
     wheelR: number;
     hingeY: number;          // strut hinge y (just inside the belly)
     /**
-     * Wheels on each main leg, in tandem on a bogie beam. A light aeroplane
-     * has one; a transport has two or more, and standing a 40-tonne freighter
-     * on a single wheel per side is the detail that makes it look like a toy.
+     * Wheels in TANDEM on each main leg — one behind the other, as on a C-130
+     * or a widebody body-gear. This is the only arrangement that shows as more
+     * than one wheel in a side view, so it is the only thing that should ever
+     * add a silhouette.
      */
     mainWheels?: number;
-    /** Wheels on the nose leg, side by side. Heavies carry two. */
-    noseWheels?: number;
+    /**
+     * The main axle carries a PAIR side by side.
+     *
+     * This is what most twins actually have, and in a side view a side-by-side
+     * pair is ONE wheel — you are looking straight down the axle. Drawing the
+     * pair fore-and-aft (which is what counting them did) put a row of wheels
+     * along the belly of every transport in the fleet, which is not something
+     * any of them have.
+     */
+    mainDual?: boolean;
+    /** The nose axle carries a pair side by side — again, one silhouette. */
+    noseDual?: boolean;
     /** Nose wheel radius, if smaller than the mains (it usually is). */
     noseWheelR?: number;
     /**
@@ -278,7 +289,7 @@ const RAW_SPECS: Record<string, RawSpec> = {
     // Late-war twin: the mains fold up into the engine nacelles, so they sit
     // directly under them, and it rests on its tailwheel.
     gear:  { fixed: false, mainX: 34, noseX: null, tailWheelX: -78, strutLen: 24, wheelR: 11,
-             hingeY: 14, mainWheels: 2 },
+             hingeY: 14, mainDual: true },
     flap:  { maxDeflectDeg: 35 },
     beacon: { x: -84, y: -52 },
     exhaust: { x: 22, y: 22 },
@@ -313,9 +324,9 @@ const RAW_SPECS: Record<string, RawSpec> = {
     // High wing, so the mains live in sponsons on the fuselage sides: twin
     // wheels on each leg, twin nose wheels, short legs close to the ground
     // for truck-bed loading.
-    gear:  { fixed: false, mainX: 10, noseX: 74, tailWheelX: null, strutLen: 18, wheelR: 8,
-             hingeY: 13, mainWheels: 2, noseWheels: 2, noseWheelR: 6,
-             sponson: { x: 10, w: 46, h: 13 } },
+    gear:  { fixed: false, mainX: 2, noseX: 82, tailWheelX: null, strutLen: 18, wheelR: 8,
+             hingeY: 13, mainDual: true, noseDual: true, noseWheelR: 6,
+             sponson: { x: 2, w: 46, h: 13 } },
     flap:  { maxDeflectDeg: 38 },
     beacon: { x: -94, y: -62 },
     exhaust: { x: 16, y: 6 },
@@ -342,8 +353,8 @@ const RAW_SPECS: Record<string, RawSpec> = {
     ],
     prop:  { r: 22, bladePairs: 2 },
     // Low wing: the mains retract into the nacelles behind the engines.
-    gear:  { fixed: false, mainX: 30, noseX: 74, tailWheelX: null, strutLen: 22, wheelR: 9,
-             hingeY: 13, mainWheels: 2, noseWheels: 2, noseWheelR: 7 },
+    gear:  { fixed: false, mainX: 18, noseX: 80, tailWheelX: null, strutLen: 22, wheelR: 9,
+             hingeY: 13, mainDual: true, noseDual: true, noseWheelR: 7 },
     flap:  { maxDeflectDeg: 40 },
     beacon: { x: -88, y: -54 },
     exhaust: { x: 14, y: 16 },
@@ -381,9 +392,12 @@ const RAW_SPECS: Record<string, RawSpec> = {
     // Four-engine heavy: the mains are a TANDEM PAIR each side, tucked into
     // fuselage sponsons, with twin nose wheels forward. A freighter this
     // size standing on one wheel per side is what made it look like a toy.
-    gear:  { fixed: false, mainX: 14, noseX: 84, tailWheelX: null, strutLen: 17, wheelR: 10,
-             hingeY: 15, mainWheels: 2, noseWheels: 2, noseWheelR: 7,
-             sponson: { x: 14, w: 62, h: 15 } },
+    // The one genuine TANDEM bogie in the fleet: two wheels one behind the
+    // other on each main leg, which is why it is the only aircraft here that
+    // shows more than one main wheel from the side.
+    gear:  { fixed: false, mainX: 6, noseX: 90, tailWheelX: null, strutLen: 17, wheelR: 10,
+             hingeY: 15, mainWheels: 2, noseDual: true, noseWheelR: 7,
+             sponson: { x: 6, w: 62, h: 15 } },
     flap:  { maxDeflectDeg: 40 },
     beacon: { x: -98, y: -78 },
     exhaust: { x: 34, y: -4 },

@@ -50,22 +50,30 @@ export const TUNING = {
   inducedK: 0.07,           // induced-drag factor (k·CL²)
   CD0: 0.105,               // parasitic drag — also sets max-speed thrust
   /**
-   * A closed throttle is a huge speed brake, not a gentle one — a windmilling
-   * propeller is a disc of drag roughly the size of the aeroplane.
+   * Drag added by a windmilling propeller, on top of CD0.
    *
-   * At 0.055 the model settled into a comfortable, permanent glide with the
-   * engine dead: 93 km/h and −7.8 m/s, held for ever, with the wing still
-   * carrying 95% of the aircraft's weight. That is why gravity read as
-   * fictional. At 0.42 the aeroplane cannot hold itself up at all without
-   * power: 130 → 56 km/h in six seconds, then it stalls and falls.
+   * This was 0.42 — five times the airframe's own CD0 — and it made GRAVITY
+   * IRRELEVANT. Measured: a crop duster held in a 42° idle dive *lost* speed,
+   * 113 → 80 km/h, with a peak acceleration of 0.00 m/s². An aeroplane
+   * pointed at the ground was slowing down. That is the "no physics, gravity
+   * is nonexistent" complaint exactly, and no camera or tuning fixes it,
+   * because the brake simply outran g·sin γ at every angle.
    *
-   * The cubic falloff matters as much as the number. Scaled linearly, half
-   * throttle still carried more braking drag than the airframe's own CD0 and
-   * dragged the whole envelope down — level flight needed 85% power. Cubed,
-   * the brake is savage at idle and gone by cruise, which is also the honest
-   * reading: a prop under power makes thrust, not drag.
+   * The reason it was ever set that high — "power off must not be a happy
+   * glide" — no longer applies: the AoA stability and `powerAuthority` do that
+   * job now. Sweeping it proves the old trade-off was backwards. Lower idle
+   * drag makes an unpowered descent WORSE, not gentler, because the aeroplane
+   * accelerates and the path steepens:
+   *
+   *     CD     dive 12 s        peak accel    power-off 20 s
+   *     0.42   113 → 80 km/h    -0.04 m/s²    -14.9 m/s, 261 m lost
+   *     0.16   113 → 110        +1.56         -19.2 m/s, 317 m
+   *     0.09   113 → 127        +2.39         -21.7 m/s, 349 m
+   *
+   * The cubic falloff still matters: savage at idle, gone by cruise, which is
+   * the honest reading — a prop under power makes thrust, not drag.
    */
-  idleDragCD: 0.42,
+  idleDragCD: 0.09,
   idleDragCurve: 3,
   flapsCL: 0.45,            // extra lift from flaps
   flapsCD: 0.028,           // and the drag that comes with it
@@ -126,7 +134,15 @@ export const TUNING = {
   stallPitchDamp: 3.0,      // extra damping in the stall — stops porpoising
   stallNoseDown: 54,        // deg/s² nose-down once fully stalled
   maxPitchRate: 65,         // deg/s clamp
-  pitchMin: -38,            // airborne nose-down limit; a stall break needs room
+  /**
+   * How far the nose can go down.
+   *
+   * At −38° this quietly CAPPED every dive: the aeroplane could not be pointed
+   * steeply enough for gravity to do much, so a dive plateaued at 127 km/h
+   * with a never-exceed speed of 189. "Out of control" has to mean the nose
+   * can actually drop, and that recovery is then a real problem.
+   */
+  pitchMin: -72,            // airborne nose-down limit; a stall break needs room
   /**
    * Pitch disturbance that grows as the aircraft slows below flying speed.
    * Down there it stops flying and starts wallowing: the controls go soft
@@ -398,22 +414,18 @@ export class AircraftController {
     const alphaErrDeg = (alpha - alphaTrim) / DEG;
     // Propwash over the tail is much of a single's elevator authority, so
     // stability still fades with power — but it fades toward WALLOWING, not
-    // toward a different tidy equilibrium.
-    const stabPower = TUNING.stabIdle + (1 - TUNING.stabIdle) * effThrottle;
-    const stabilityMoment = onGround
-      ? -s.pitch * TUNING.pitchStability * qNorm          // hold the runway attitude
-      : -alphaErrDeg * TUNING.pitchStability * stabPower * qNorm;
-    // Stability fades with power, and it fades FAST. Scaled linearly with the
-    // lever, a third of throttle still left the aeroplane 37% stabilised —
-    // measured as a trimmed, perfectly controllable 104 km/h glide, which is
-    // the opposite of losing an engine. Squared between 15% and 52% it is all
-    // but gone by a third power, while an approach at half throttle keeps it.
+    // toward a different tidy equilibrium. The curve is deliberately squared
+    // between 15% and 52%: scaled linearly, a third of throttle still left the
+    // aeroplane 37% stabilised, which measured as a trimmed, perfectly
+    // controllable glide — the opposite of losing an engine.
     const powerAuthority = clamp(
       (effThrottle - TUNING.powerAuthorityLow)
         / (TUNING.powerAuthorityHigh - TUNING.powerAuthorityLow), 0, 1,
     ) ** 2;
     const stabPower = TUNING.stabIdle + (1 - TUNING.stabIdle) * powerAuthority;
-    const stabilityMoment = (pitchTrimDeg - s.pitch) * TUNING.pitchStability * stabPower * qNorm;
+    const stabilityMoment = onGround
+      ? -s.pitch * TUNING.pitchStability * qNorm          // hold the runway attitude
+      : -alphaErrDeg * TUNING.pitchStability * stabPower * qNorm;
 
     s.pitchRate += (controlMoment + stabilityMoment) * dt;
     // Extra damping while stalled: without it the aircraft porpoises between
