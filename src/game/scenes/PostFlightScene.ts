@@ -16,6 +16,8 @@ interface PostFlightData {
   cargoSlots: CargoSlot[];
   reachedDestination: boolean;
   landedOnRunway: boolean;
+  /** Traffic threaded inside 30 m without hitting it. Pays a bonus. */
+  closeCalls?: number;
 }
 
 type Outcome = 'delivered' | 'cargo_ruined' | 'diverted' | 'crashed' | 'ferry';
@@ -28,6 +30,7 @@ export class PostFlightScene extends Phaser.Scene {
   create(data: PostFlightData): void {
     const { result, contractId, finalState, cargoSlots, reachedDestination } = data;
     const landedOnRunway = data.landedOnRunway ?? true;
+    const closeCalls = data.closeCalls ?? 0;
     const { width, height } = this.cameras.main;
     const cx = width / 2;
 
@@ -64,6 +67,7 @@ export class PostFlightScene extends Phaser.Scene {
     else outcome = 'delivered';
 
     let payout = 0;
+    let airmanship = 0;
     let bonusEarned = 0;
     let repGain = 0;
     let penalty = 0;
@@ -84,6 +88,15 @@ export class PostFlightScene extends Phaser.Scene {
           if (isPassenger) { payout = Math.round(payout * 0.5); repGain = 0; }
         }
         payout += bonusEarned;
+
+        // ── Airmanship ─────────────────────────────────────────────────────
+        // Threading traffic instead of blundering through it is the most
+        // satisfying thing you can do in the air, so it is worth money. It is
+        // the one bonus you cannot earn by flying carefully and slowly.
+        if (closeCalls > 0) {
+          airmanship = closeCalls * 120;
+          payout += airmanship;
+        }
 
         // Condition scaling: half the pay rides on cargo state
         payout = Math.round(payout * (0.5 + 0.5 * (avgCondition / 100)));
@@ -203,7 +216,13 @@ export class PostFlightScene extends Phaser.Scene {
           fontSize: '17px', color: '#00ff88', fontFamily: 'monospace',
         }).setOrigin(0.5);
       }
-      this.add.text(cx, payY + 58, `TOTAL:  ₢ ${payout.toLocaleString()}`, {
+      if (airmanship > 0) {
+        this.add.text(cx, payY + (bonusEarned > 0 ? 46 : 26),
+          `AIRMANSHIP: ₢ ${airmanship.toLocaleString()}   (${closeCalls} close call${closeCalls > 1 ? 's' : ''})`, {
+            fontSize: '15px', color: '#88ccff', fontFamily: 'monospace',
+          }).setOrigin(0.5);
+      }
+      this.add.text(cx, payY + (airmanship > 0 ? 76 : 58), `TOTAL:  ₢ ${payout.toLocaleString()}`, {
         fontSize: '23px', color: '#ffd080', fontFamily: 'monospace', fontStyle: 'bold',
       }).setOrigin(0.5);
       if (repGain > 0) {

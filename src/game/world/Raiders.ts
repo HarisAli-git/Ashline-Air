@@ -171,6 +171,41 @@ export class Raiders {
   private pendingDamage = 0;
   private pendingHits = 0;
 
+  // ── Reading the pilot ─────────────────────────────────────────────────────
+  /**
+   * They watch how you fly and get better at hitting you for it.
+   *
+   * Accuracy used to depend only on your CURRENT height, so the optimal play
+   * was to pick one safe altitude on the first pass and hold it for the whole
+   * route — the gunners never learned anything and the decision was made once.
+   * Tracking the mean and spread of the altitude you actually fly turns that
+   * around: hold a line and they range you; jink and they cannot.
+   *
+   * The counterplay is legible, which is the point — the HUD tells you when
+   * they have your number, and changing height fixes it.
+   */
+  private altMean = 0;
+  private altVar = 4000;
+  private observed = 0;
+  /** 0 = you are unreadable, 1 = they have your number. */
+  private predictability = 0;
+
+  /** Watch the aircraft. Called every frame it is inside a hostile stretch. */
+  private observe(altM: number, dt: number): void {
+    // Exponential moving mean and variance — no history buffer needed.
+    const k = Math.min(1, dt / 3.5);
+    const d = altM - this.altMean;
+    this.altMean += d * k;
+    this.altVar += (d * d - this.altVar) * k;
+    this.observed = Math.min(1, this.observed + dt / 6);
+    // 45 m of scatter in your flying is enough to keep them guessing.
+    const sd = Math.sqrt(Math.max(0, this.altVar));
+    this.predictability = this.observed * Phaser.Math.Clamp(1 - sd / 45, 0, 1);
+  }
+
+  /** How well the gunners have you worked out, 0–1. Surfaced on the HUD. */
+  get rangedOn(): number { return this.predictability; }
+
   /**
    * Swept test of one round's step against the aircraft's box. Sampled along
    * the segment because a round covers ~25 px per frame and would otherwise
@@ -197,6 +232,10 @@ export class Raiders {
     this.impacts = [];
     this.pendingDamage = 0;
     this.pendingHits = 0;
+    this.altMean = 0;
+    this.altVar = 4000;
+    this.observed = 0;
+    this.predictability = 0;
 
     for (let z = 0; z < zones.length; z++) {
       const [a, b] = zones[z];
@@ -353,7 +392,16 @@ export class Raiders {
       if (!worst || w.ceilingM > worst.ceilingM) worst = w;
       inPlay.push({ e, w, d });
     }
-    inPlay.sort((a, b) => a.d - b.d);
+    // ── Zone fire control ────────────────────────────────────────────────
+    // Nearest-first meant the best-placed gun often sat watching while a
+    // closer one with no angle wasted its burst. Score each by how good a
+    // shot it actually has: how far inside its own reach you are, and how far
+    // below its ceiling. The zone now shoots with the weapon that can hurt you.
+    const utility = (x: { w: WeaponProfile; d: number }): number =>
+      (1 - x.d / x.w.rangePx) * 0.6 + (1 - target.altM / x.w.ceilingM) * 0.4;
+    inPlay.sort((a, b) => utility(b) - utility(a));
+
+    if (engaged) this.observe(target.altM, dt);
 
     for (const { e, w } of inPlay.slice(0, MAX_SIMULTANEOUS)) {
       e.cool -= dt;
@@ -365,7 +413,10 @@ export class Raiders {
       // scatter. No hit roll — whether it connects is settled in update() by
       // where the round actually goes.
       const exposure = 1 - target.altM / w.ceilingM;
-      const scatter = w.spread * (1 + (1 - exposure) * 3.2);
+      // …and a pilot who flies the same line every time gets ranged. Holding
+      // one altitude tightens their group by nearly half; jinking undoes it.
+      const ranged = 1 - this.predictability * 0.45;
+      const scatter = w.spread * (1 + (1 - exposure) * 3.2) * ranged;
       shots++;
       this.fire(e, w, baseY, target, scatter);
     }

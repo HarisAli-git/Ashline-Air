@@ -37,6 +37,8 @@ export interface FlightStatus {
   engineFailed: boolean;
   underFire: boolean;
   groundThreat: { label: string; clearM: number } | null;
+  /** How well the gunners have read your flying, 0–1. */
+  rangedOn: number;
   stall: boolean;
   overspeed: boolean;
   obstacleAheadM: number | null;

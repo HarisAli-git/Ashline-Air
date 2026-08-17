@@ -122,6 +122,14 @@ export function FlightHUD(): React.ReactElement | null {
               tone={status.groundThreat && status.groundThreat.clearM > 200 ? '#ff4444' : '#ff8844'}
             />
           )}
+          {/* They only get accurate if you let them. Say so, and say the fix. */}
+          {status.underFire && status.rangedOn > 0.45 && (
+            <Caution
+              styles={styles}
+              label={status.rangedOn > 0.75 ? 'THEY HAVE YOUR NUMBER — CHANGE ALTITUDE' : 'GUNNERS RANGING YOU — JINK'}
+              tone={status.rangedOn > 0.75 ? '#ff4444' : '#ff8844'}
+            />
+          )}
           {status.obstacleAheadM !== null && (
             <Caution styles={styles} label={`OBSTACLE ${Math.round(status.obstacleAheadM)} m`} tone="#ffd080" />
           )}

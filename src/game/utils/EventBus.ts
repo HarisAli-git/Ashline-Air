@@ -37,6 +37,14 @@ export interface GameEvents {
     underFire: boolean;
     /** What is shooting, and the altitude that puts you out of its reach. */
     groundThreat: { label: string; clearM: number } | null;
+    /**
+     * How well the gunners have read your flying, 0–1.
+     *
+     * Surfaced because the counterplay has to be legible: they get more
+     * accurate the longer you hold one altitude, and the answer is to change
+     * it. A hidden accuracy modifier would just feel like bad luck.
+     */
+    rangedOn: number;
     stall: boolean;
     overspeed: boolean;
     obstacleAheadM: number | null;

@@ -88,6 +88,8 @@ export class FlightScene extends Phaser.Scene {
   private gustTimer     = 0;
   /** Slow wave driving sustained gusts and downdraughts. */
   private gustPhase = 0;
+  /** Traffic passed inside 30 m without hitting it — paid out on delivery. */
+  private closeCalls = 0;
   private notifiedApproach = false;
   private notifiedArrival  = false;
 
@@ -243,6 +245,28 @@ export class FlightScene extends Phaser.Scene {
     // Obstacles and raider ground are deterministic per contract, so a route
     // you have flown before hands you the same threats.
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+
+    // ── The frequency is not empty ────────────────────────────────────────
+    // Other pilots call their intentions before they fly them, so a conflict
+    // has a voice attached to it rather than being a silent number on the HUD.
+    this.world.traffic.onRadio = msg => {
+      EventBus.emit('ui:show-notification', { message: `📻 ${msg}`, type: 'info' });
+      SoundEngine.click();
+    };
+    // Threading a needle is the most satisfying thing in the flight, so it is
+    // recognised and paid for. Anything under 30 m counts; under 12 m is a
+    // genuinely fine piece of flying.
+    this.world.traffic.onNearMiss = (sep) => {
+      this.closeCalls++;
+      const tight = sep < 12;
+      EventBus.emit('ui:show-notification', {
+        message: tight
+          ? `⚡ THREADED IT — ${Math.round(sep)} m separation. That was flying.`
+          : `✈ Close call — ${Math.round(sep)} m. Both of you saw it coming.`,
+        type: tight ? 'success' : 'info',
+      });
+      SoundEngine.chime();
+    };
     // The land itself changes between the two settlements
     this.world.setBiomes(this.originBiome, this.destBiome);
     // The garrison at both fields flies the destination faction's colours
@@ -909,6 +933,7 @@ export class FlightScene extends Phaser.Scene {
       engineFailed: this.engineFailed,
       underFire: this.underFire,
       groundThreat: this.groundThreat,
+      rangedOn: this.world.raiders.rangedOn,
       weatherCaution: this.weatherCaution,
       iceLoad: this.iceLoad,
       avionicsOut: this.avionicsOut,
@@ -1362,6 +1387,7 @@ export class FlightScene extends Phaser.Scene {
       cargoSlots: this.cargo.slots,
       reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
       landedOnRunway: this.isOnRunway(this.scrollX + AIRCRAFT_X),
+      closeCalls: this.closeCalls,
     };
     if (result.quality !== 'crash') {
       SoundEngine.chime();
@@ -1387,7 +1413,7 @@ export class FlightScene extends Phaser.Scene {
     this.groundThreat = null;
     this.trafficAdvisory = null;
     EventBus.emit('flight:status', {
-      engineFailed: false, underFire: false, groundThreat: null, stall: false,
+      engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, stall: false,
       overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false,
     });

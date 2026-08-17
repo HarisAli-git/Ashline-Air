@@ -35,6 +35,27 @@ export interface TrafficPlane {
   /** Smoke/fire trail left behind once it is going down. */
   trail: Array<{ wx: number; alt: number; age: number }>;
   warned: boolean;
+
+  // ── The pilot in the other seat ──────────────────────────────────────────
+  /**
+   * How good they are, 0–1. Drives how early they spot you and how hard they
+   * break. This is the whole reason other traffic is dangerous: a sharp pilot
+   * clears out with room to spare, a poor one leaves it far too late, and you
+   * cannot tell which you have got until you watch what they do.
+   */
+  skill: number;
+  /** Seconds left before they notice you. Counts down once you are a threat. */
+  reactIn: number;
+  /** The avoidance they are flying: +1 climbing, −1 descending, 0 nothing. */
+  evading: 0 | 1 | -1;
+  /** Their original cruise altitude, to settle back onto afterwards. */
+  cruiseAlt: number;
+  /** True once they have called the break on the radio, so they call it once. */
+  calledBreak: boolean;
+  /** Closest we have come to them this encounter, metres — for near-miss credit. */
+  closestM: number;
+  /** True once this encounter has been scored, so one pass scores once. */
+  scored: boolean;
 }
 
 interface Wreck { wx: number; age: number; }
@@ -48,6 +69,14 @@ const ADVISORY_SECONDS = 9;
 const ADVISORY_ALT_M = 26;
 
 const MAX_CONCURRENT = 2;
+
+/** Who is on the other end of the radio. */
+const CALLSIGN: Record<TrafficKind, string> = {
+  ultralight: 'Light aircraft',
+  courier:    'Courier flight',
+  gunship:    'Militia patrol',
+  hauler:     'Heavy hauler',
+};
 
 function rnd(i: number): number {
   const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
@@ -64,6 +93,17 @@ export interface TrafficAdvisory {
 }
 
 export class AirTraffic {
+  /**
+   * Radio chatter from the other aeroplane. Wired up by FlightScene.
+   *
+   * Empty sky with silent traffic is scenery; a voice on the frequency is the
+   * cheapest way to make the airspace feel occupied by people rather than
+   * obstacles, and it tells you what they are about to do before they do it.
+   */
+  onRadio?: (msg: string) => void;
+  /** Fired once per encounter, after they have passed, with the separation. */
+  onNearMiss?: (separationM: number, kind: TrafficKind) => void;
+
   private list: TrafficPlane[] = [];
   private wrecks: Wreck[] = [];
   private cooldown = 16;
@@ -99,11 +139,22 @@ export class AirTraffic {
 
     for (const p of this.list) {
       if (p.doom === null) {
+        // ── See and avoid ────────────────────────────────────────────────
+        //
+        // The conflict geometry was already being computed for the HUD
+        // advisory and then thrown away: `avoid` was worked out, handed to
+        // the player, and the other aeroplane flew straight on into it. So
+        // every encounter was identical and the only actor in the airspace
+        // was you. Now they look out of the window too.
+        this.think(p, dt, ctx);
+
         p.wx += p.vx * dt;
         p.alt = Math.max(0, p.alt + p.vAlt * dt);
         // A lazy wander so they never look like they are on rails
-        p.bank = Math.sin(this.elapsed * 0.6 + p.seed) * 0.05;
-        p.vAlt += (Math.sin(this.elapsed * 0.31 + p.seed * 2) * 0.5 - p.vAlt) * dt * 0.5;
+        p.bank = Math.sin(this.elapsed * 0.6 + p.seed) * 0.05 + p.evading * 0.22;
+        if (p.evading === 0) {
+          p.vAlt += (Math.sin(this.elapsed * 0.31 + p.seed * 2) * 0.5 - p.vAlt) * dt * 0.5;
+        }
       } else {
         // Going down: roll off, nose drops, speed bleeds into the descent
         p.doom += dt;
@@ -174,9 +225,20 @@ export class AirTraffic {
       dir = 1;
     }
 
+    // Pilot quality is rolled per aeroplane and never shown. You find out
+    // what you are sharing the sky with by watching what it does.
+    const skill = rnd(id + 41);
     this.list.push({
       wx, alt, vx, vAlt: (rnd(id + 37) - 0.5) * 0.7,
       kind, seed: id, dir, bank: 0, doom: null, trail: [], warned: false,
+      skill,
+      // A sharp pilot reacts in well under a second; a poor one takes four.
+      reactIn: 0.4 + (1 - skill) * 3.6,
+      evading: 0,
+      cruiseAlt: alt,
+      calledBreak: false,
+      closestM: 999,
+      scored: false,
     });
   }
 
@@ -192,6 +254,65 @@ export class AirTraffic {
   }
 
   /** Closest conflicting traffic, for the HUD advisory. */
+  /**
+   * One other pilot's decision, once per frame.
+   *
+   * Deliberately NOT a guaranteed escape. They react on a delay set by their
+   * skill, they can only climb or descend so fast, and a bad one may simply
+   * leave it too late — which is what keeps the advisory on your HUD worth
+   * reading rather than a formality.
+   */
+  private think(
+    p: TrafficPlane, dt: number,
+    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; airborne: boolean },
+  ): void {
+    if (!ctx.airborne) return;
+
+    const dx = p.wx - ctx.planeWorldX;
+    const closure = ctx.planeSpeedPx - p.vx;
+    const dAlt = p.alt - ctx.planeAlt;
+    const converging = closure > 20 && dx > 0;
+    const seconds = converging ? dx / closure : Infinity;
+
+    // Track how close this encounter got, for near-miss credit later
+    if (Math.abs(dx) < 700) p.closestM = Math.min(p.closestM, Math.abs(dAlt));
+    // Once they are behind you the encounter is over — settle up.
+    if (!p.scored && dx < -260 && p.closestM < 999) {
+      p.scored = true;
+      if (p.closestM < 30) this.onNearMiss?.(p.closestM, p.kind);
+    }
+
+    const threat = converging && seconds < 11 && Math.abs(dAlt) < 34;
+
+    if (threat) {
+      // A better pilot notices sooner. A poor one is still reading his map.
+      if (p.reactIn > 0) { p.reactIn -= dt; }
+      else if (p.evading === 0) {
+        // Break AWAY from the player: if they are above you they go up.
+        p.evading = dAlt >= 0 ? 1 : -1;
+        if (!p.calledBreak) {
+          p.calledBreak = true;
+          this.onRadio?.(p.evading > 0
+            ? `${CALLSIGN[p.kind]}: traffic below me — climbing, climbing.`
+            : `${CALLSIGN[p.kind]}: got you above me — going down, going down.`);
+        }
+      }
+    } else if (p.evading !== 0 && (!converging || Math.abs(dAlt) > 46)) {
+      // Clear of you — rejoin the cruise level
+      p.evading = 0;
+    }
+
+    if (p.evading !== 0) {
+      // Climb/descent rate scales with skill: a sharp pilot hauls it round.
+      const rate = 7 + p.skill * 13;
+      p.vAlt += (p.evading * rate - p.vAlt) * Math.min(1, dt * 2.2);
+    } else {
+      // Settle back toward the level they were cruising at
+      const err = p.cruiseAlt - p.alt;
+      p.vAlt += (Phaser.Math.Clamp(err * 0.08, -7, 7) - p.vAlt) * Math.min(1, dt * 0.9);
+    }
+  }
+
   advisory(planeWorldX: number, planeAlt: number, planeSpeedPx: number): TrafficAdvisory | null {
     let best: TrafficAdvisory | null = null;
     for (const p of this.list) {
