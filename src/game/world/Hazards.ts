@@ -22,6 +22,18 @@ export interface Hazard {
   heightM: number;    // metres — compared directly against aircraft altitude
   halfWidth: number;  // world px, collision half-width
   seed: number;
+  /**
+   * How badly this structure has been hit, 0–1.
+   *
+   * Flying a mast off its guys used to leave the mast standing there
+   * untouched while the aeroplane took 45 points of damage — the collision
+   * was entirely one-sided, which makes the world feel like scenery rather
+   * than something you are moving through. A struck obstacle now buckles,
+   * loses its top and burns.
+   */
+  damage?: number;
+  /** Seconds since it was struck, for the fire and the smoke column. */
+  hitAge?: number;
 }
 
 /*
@@ -92,6 +104,25 @@ export class Hazards {
   }
 
   /** The obstacle the aircraft is currently inside, if any. */
+  /** Structures within reach of a point — used to wreck whatever a crash lands on. */
+  near(worldX: number, extraPx: number): Hazard[] {
+    return this.list.filter(h => Math.abs(h.x - worldX) <= h.halfWidth + extraPx);
+  }
+
+  /** Mark a structure as struck; the renderer takes it from there. */
+  damageAt(h: Hazard, amount: number): void {
+    h.damage = Math.min(1, (h.damage ?? 0) + amount);
+    h.hitAge = 0;
+    // Taking the top off a tall structure lowers what you can then hit — the
+    // hole you punched through it is a real hole.
+    h.heightM *= 1 - 0.34 * amount;
+  }
+
+  /** Advance the burn on anything that has been hit. */
+  tickDamage(dt: number): void {
+    for (const h of this.list) if (h.damage) h.hitAge = (h.hitAge ?? 0) + dt;
+  }
+
   collisionAt(worldX: number, altitudeM: number): Hazard | null {
     for (const h of this.list) {
       if (Math.abs(worldX - h.x) <= h.halfWidth && altitudeM <= h.heightM) return h;
@@ -162,7 +193,56 @@ export class Hazards {
       if (sx < -140 || sx > width + 140) continue;
       const topY = baseY - h.heightM * pxPerM;
       drawObstacle(g, h.kind, sx, baseY, topY, h.halfWidth, h.seed, t, style);
+      if (h.damage) this.drawStruck(g, h, sx, baseY, topY, t);
     }
   }
 
+  /**
+   * What a structure looks like after an aeroplane went through it: the top
+   * sheared away, torn metal at the break, fire in the wound and a smoke
+   * column climbing off it.
+   */
+  private drawStruck(
+    g: Phaser.GameObjects.Graphics,
+    h: Hazard, sx: number, baseY: number, topY: number, t: number,
+  ): void {
+    const d = h.damage ?? 0;
+    const age = h.hitAge ?? 0;
+    const w = h.halfWidth;
+
+    // Sheared, blackened stub where the aircraft came through
+    g.fillStyle(0x14100c, 0.85 * d);
+    g.fillRect(sx - w * 0.9, topY - 4, w * 1.8, 10);
+    g.lineStyle(2, 0x0a0806, 0.9 * d);
+    for (let i = -2; i <= 2; i++) {
+      const jx = sx + i * w * 0.34;
+      g.lineBetween(jx, topY + 4, jx + (i % 2 ? 4 : -5), topY - 9 - ((i * 7) % 9));
+    }
+
+    // Fire in the wound, dying back over about twelve seconds
+    const fire = Math.max(0, 1 - age / 12) * d;
+    if (fire > 0.02) {
+      const fl = 0.55 + Math.sin(t * 9 + h.seed) * 0.45;
+      g.fillStyle(0xff6a20, 0.5 * fire * fl);
+      g.fillEllipse(sx, topY + 2, w * 1.5, 20);
+      g.fillStyle(0xffc250, 0.55 * fire * fl);
+      g.fillEllipse(sx, topY, w * 0.8, 12);
+    }
+
+    // Smoke climbing off it — this is what you see from a distance
+    const smoke = Math.max(0, 1 - age / 26) * d;
+    for (let k = 0; k < 7; k++) {
+      const drift = (t * 16 + k * 34 + h.seed * 7) % 190;
+      g.fillStyle(0x191512, 0.26 * smoke * (1 - k / 8));
+      g.fillEllipse(sx + Math.sin(t * 0.5 + k) * (5 + k * 5) + drift * 0.22,
+        topY - 12 - drift, 16 + k * 9, 12 + k * 6);
+    }
+
+    // Debris scattered at the foot of it
+    g.fillStyle(0x120f0b, 0.7 * d);
+    for (let k = 0; k < 5; k++) {
+      const dx = sx + ((k * 37) % 90) - 45;
+      g.fillRect(dx, baseY - 3 - (k % 2), 7 + (k % 3) * 4, 3);
+    }
+  }
 }

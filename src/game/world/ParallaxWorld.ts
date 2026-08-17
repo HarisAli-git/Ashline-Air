@@ -431,6 +431,23 @@ export class ParallaxWorld {
       }
     }
 
+    // A dark, out-of-focus lip across the very bottom of the frame. It frames
+    // the shot and gives the near ground somewhere to end, instead of the
+    // speckle simply running off the edge of the screen.
+    {
+      const lipTop = this.height - 26;
+      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.78), 1);
+      g.beginPath();
+      g.moveTo(0, this.height + 4);
+      for (let x = 0; x <= this.width; x += 22) {
+        const w = x + scroll * 0.35;
+        g.lineTo(x, lipTop - Math.abs(Math.sin(w * 0.006)) * 12 - propRand(Math.floor(w / 22)) * 7);
+      }
+      g.lineTo(this.width, this.height + 4);
+      g.closePath();
+      g.fillPath();
+    }
+
     // Motion streaks along the very bottom once genuinely quick
     if (speedFrac > 0.35) {
       const a = (speedFrac - 0.35) / 0.65;
@@ -921,6 +938,13 @@ export class ParallaxWorld {
       if (sx < -60 || sx > this.width + 60) continue;
       const kind = Math.floor(propRand(i + 50) * 6);
       const s = 0.7 + propRand(i + 90) * 0.7;
+
+      // Cast shadow first, stretched away from the low sun. Without one the
+      // rocks and snags read as stickers laid over the ground rather than
+      // things standing on it — the cheapest depth cue there is.
+      g.fillStyle(0x000000, 0.26);
+      g.fillEllipse(sx + 9 * s, baseY + 1.5, 30 * s, 5.5 * s);
+
       g.fillStyle(this.pal.scrub, 1);
       g.lineStyle(2 * s, this.pal.scrub, 1);
       switch (kind) {
@@ -967,40 +991,85 @@ export class ParallaxWorld {
     const gy = this.groundY + sink;
     if (gy > this.height + 10) return;
 
-    // Ground body with a subtle depth gradient
-    g.fillStyle(this.pal.ground, 1);
-    g.fillRect(0, gy, this.width, this.height - gy + 10);
-    g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.35), 1);
-    g.fillRect(0, gy + 60, this.width, this.height - gy - 50);
-    g.fillStyle(this.pal.groundTop, 1);
-    g.fillRect(0, gy, this.width, 18);
+    /**
+     * The ground is a lit SURFACE receding from the camera, not a stack of
+     * bands. It used to be a flat fill, four hard strata and two ruled lines,
+     * which is the same mistake the chart and the cutscene had: no light
+     * source, so no depth.
+     *
+     * Two things do the work. The gradient runs from a hazy, sun-warmed
+     * horizon down to cold shadow right under the camera — that is distance.
+     * And everything that sits on the ground now throws a shadow away from
+     * the sun, which is what makes objects sit ON the dirt rather than float
+     * in front of it.
+     */
+    const depth = Math.max(1, this.height - gy);
+    const BANDS = 18;
+    const lit = lerpColor(this.pal.groundTop, this.pal.glow, 0.28);
+    const deep = lerpColor(this.pal.ground, 0x05060a, 0.62);
+    for (let i = 0; i < BANDS; i++) {
+      const t = i / (BANDS - 1);
+      // Eased so most of the change happens near the horizon, the way real
+      // aerial perspective falls off.
+      const e = Math.pow(t, 0.62);
+      g.fillStyle(lerpColor(lit, deep, e), 1);
+      g.fillRect(0, gy + depth * t, this.width, depth / BANDS + 1.5);
+    }
+    // Haze pooling along the horizon line, so the ground meets the sky in air
+    for (let i = 6; i >= 1; i--) {
+      g.fillStyle(this.pal.glow, 0.035);
+      g.fillRect(0, gy - i * 1.5, this.width, i * 5);
+    }
     g.lineStyle(2, this.pal.groundLine, 1);
     g.lineBetween(0, gy, this.width, gy);
 
-    // Layered strata so the near ground reads as dirt, not a flat fill
-    for (let i = 0; i < 4; i++) {
-      const y0 = gy + 16 + i * 22;
-      if (y0 > this.height) break;
-      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.12 + i * 0.13), 1);
-      g.fillRect(0, y0, this.width, 22);
-    }
-    // Wheel ruts running the length of the strip
-    g.lineStyle(2, lerpColor(this.pal.ground, 0x000000, 0.45), 0.5);
-    g.lineBetween(0, gy + 30, this.width, gy + 30);
-    g.lineBetween(0, gy + 52, this.width, gy + 52);
-
-    // Texture lines + scrolling dirt speckle so the ground itself shows motion
-    g.lineStyle(1, lerpColor(this.pal.ground, 0xffffff, 0.08), 0.3);
-    for (let i = 1; i <= 3; i++) g.lineBetween(0, gy + i * 22, this.width, gy + i * 22);
+    // ── Undulating dirt shoulder: the ground line is dead straight because
+    // the aircraft has to land on it, so the RELIEF goes just underneath it.
     {
-      const sp = 26;
+      const step = 26;
+      const first = Math.floor((scrollX - 60) / step);
+      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.22), 0.75);
+      g.beginPath();
+      g.moveTo(-60, gy + 2);
+      for (let i = first; i < first + Math.ceil(this.width / step) + 4; i++) {
+        const wx = i * step;
+        const h = 5 + Math.sin(wx * 0.0031) * 4 + Math.sin(wx * 0.011) * 2.5 + propRand(i) * 3;
+        g.lineTo(wx - scrollX, gy + 2 + h);
+      }
+      g.lineTo(this.width + 60, gy + 26);
+      g.lineTo(-60, gy + 26);
+      g.closePath();
+      g.fillPath();
+    }
+
+    // Wheel ruts, spreading apart as they come toward the camera
+    for (const [off, a] of [[30, 0.45], [56, 0.35], [92, 0.25]] as const) {
+      if (gy + off > this.height) break;
+      g.lineStyle(2 + off / 46, lerpColor(this.pal.ground, 0x000000, 0.5), a);
+      g.lineBetween(0, gy + off, this.width, gy + off);
+    }
+
+    // Scrolling grit: finer and denser far away, coarser near the camera, so
+    // the speckle itself carries the perspective instead of fighting it.
+    {
+      const sp = 18;
       const first = Math.floor((scrollX - 20) / sp);
       for (let i = first; i < first + Math.ceil(this.width / sp) + 2; i++) {
-        const sx = i * sp + propRand(i) * 20 - scrollX;
-        if (sx < -4 || sx > this.width + 4) continue;
-        const dy = 8 + propRand(i + 3) * 52;
-        g.fillStyle(propRand(i + 9) > 0.5 ? 0x000000 : 0xffffff, 0.06);
-        g.fillRect(sx, gy + dy, 2.5, 1.6);
+        for (let k = 0; k < 3; k++) {
+          const r = propRand(i * 3 + k * 17);
+          const sx = i * sp + r * 16 - scrollX;
+          if (sx < -6 || sx > this.width + 6) continue;
+          const dt = propRand(i + k * 7 + 3);
+          const dy = 6 + dt * Math.min(depth - 10, 120);
+          const sz = 1.4 + dt * 3.2;
+          g.fillStyle(propRand(i + k + 9) > 0.5 ? 0x000000 : 0xffffff, 0.05 + dt * 0.05);
+          g.fillRect(sx, gy + dy, sz, sz * 0.6);
+          // Its own little shadow, cast away from the sun
+          if (dt > 0.45) {
+            g.fillStyle(0x000000, 0.10);
+            g.fillRect(sx + sz * 0.7, gy + dy + sz * 0.5, sz * 0.9, sz * 0.35);
+          }
+        }
       }
     }
 

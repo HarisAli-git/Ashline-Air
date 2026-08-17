@@ -734,8 +734,14 @@ export class FlightScene extends Phaser.Scene {
     const alt = this.state.altitude;
 
     // ── Solid obstacles ───────────────────────────────────────────────────
+    hz.tickDamage(sdt);
     const hit = hz.collisionAt(worldX, alt);
     if (hit && this.hasBeenAirborne) {
+      // The structure takes it too. A one-sided collision — 45 points off the
+      // airframe and the mast standing there untouched — is what makes the
+      // world read as scenery instead of something you are moving through.
+      hz.damageAt(hit, 0.75);
+      this.spawnImpactDebris(AIRCRAFT_X, this.world.altitudeToScreenY(alt), 30);
       SoundEngine.impact();
       this.cameras.main.shake(500, 0.012);
       this.state.integrity = clamp(this.state.integrity - 45, 0, 100);
@@ -993,7 +999,32 @@ export class FlightScene extends Phaser.Scene {
     const other = traffic.collision(worldX, this.state.altitude);
     if (!other || !this.hasBeenAirborne) return;
     traffic.doom(other);
+    // Debris at THEIR airframe as well, not only off your wing. Without it the
+    // other aeroplane simply starts descending and the collision looks like it
+    // only happened to one of you.
+    const theirY = this.world.altitudeToScreenY(other.alt);
+    this.spawnImpactDebris(other.wx - this.scrollX, theirY, 40);
     this.midair();
+  }
+
+  /**
+   * A burst of torn structure at a point on screen. Used for both halves of a
+   * collision, so whatever you hit is visibly damaged by hitting you.
+   */
+  private spawnImpactDebris(sx: number, sy: number, count: number): void {
+    const debris = this.add.particles(sx, sy, 'px_streak', {
+      lifespan: { min: 450, max: 1500 },
+      speed: { min: 80, max: 400 },
+      angle: { min: 0, max: 360 },
+      rotate: { min: 0, max: 360 },
+      scale: { start: 0.9, end: 0.15 },
+      alpha: { start: 1, end: 0 },
+      tint: [0xd8c8a0, 0x8a6a4a, 0x3a3128, 0xff9a40],
+      gravityY: 300,
+      emitting: false,
+    }).setDepth(7);
+    debris.explode(count);
+    this.time.delayedCall(1700, () => debris.destroy());
   }
 
   /** Two aircraft, one piece of sky. Neither of you is landing on a runway. */
@@ -1257,10 +1288,17 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // A crash is the one moment of the flight worth watching. Play it out —
-    // impact, break-up, cartwheel, burning wreck — and only then show the
-    // report. `crashing` keeps update() alive so the world still scrolls to a
-    // stop underneath the wreckage instead of freezing mid-slide.
+    // impact, break-up, the gouging slide, burning wreck — and only then show
+    // the report. `crashing` keeps update() alive so the world still scrolls
+    // to a stop underneath the wreckage instead of freezing mid-slide.
     this.crashing = true;
+
+    // Whatever it comes down on gets wrecked too. Sixty tonnes of aeroplane
+    // arriving at a lattice mast is not something the mast walks away from.
+    const crashX = this.scrollX + AIRCRAFT_X;
+    for (const h of this.world.hazards.near(crashX, 70)) {
+      this.world.hazards.damageAt(h, 0.9);
+    }
     SoundEngine.stopFlightLoop();
     // Silence the panel: nothing is overspeeding or being shot at any more,
     // and leaving "CLIMB 340 m" flashing over a burning wreck is absurd.
