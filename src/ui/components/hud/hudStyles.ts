@@ -161,47 +161,94 @@ export function hudStyles(uiScale: number, compact: boolean): HudStyles {
       pointerEvents: 'auto',
     },
     modal: {
-      background: '#1a1208',
-      border: '1px solid #5a4a20',
+      background: 'linear-gradient(180deg, #1d1509 0%, #140f07 100%)',
+      border: '1px solid #6b5624',
       borderWidth: compact ? '1px 0 0' : 1,
+      // Instrument-panel bezel: a lit top edge and a deep drop shadow
+      boxShadow: 'inset 0 1px 0 rgba(255,214,140,0.18), 0 14px 40px rgba(0,0,0,0.7)',
       padding: compact
-        ? `${n(10)}px ${n(14)}px calc(${n(10)}px + env(safe-area-inset-bottom, 0px))`
-        : `${n(28)}px ${n(36)}px`,
-      maxWidth: compact ? '100%' : n(520),
+        ? `${n(9)}px ${n(13)}px calc(${n(10)}px + env(safe-area-inset-bottom, 0px))`
+        : `${n(20)}px ${n(26)}px ${n(22)}px`,
+      maxWidth: compact ? '100%' : n(560),
       width: compact ? '100%' : '92%',
-      // Never more than half the screen: the player still has to be able to
-      // see the aeroplane they are deciding about.
       maxHeight: compact ? '58%' : '86%',
       overflowY: 'auto',
       fontFamily: 'monospace',
-      borderRadius: compact ? '10px 10px 0 0' : 4,
+      borderRadius: compact ? '10px 10px 0 0' : 3,
     },
+    // ── Channel strip: this came in over the radio, so it says so ────────
+    modalChannel: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: n(7),
+      marginBottom: n(compact ? 6 : 10),
+    },
+    modalLive: {
+      width: n(6), height: n(6), borderRadius: '50%',
+      background: '#ff4a3a', boxShadow: '0 0 6px #ff4a3a',
+      flexShrink: 0,
+      animation: 'aa-live 1.6s steps(1, end) infinite',
+    },
+    modalChannelText: {
+      fontSize: n(compact ? 8 : 9),
+      letterSpacing: 2,
+      color: '#8a7a5a',
+      whiteSpace: 'nowrap',
+    },
+    modalChannelRule: { flex: 1, height: 1, background: 'linear-gradient(90deg,#5a4a20,transparent)' },
     modalTitle: {
       color: '#ffd080',
-      fontSize: n(compact ? 14 : 22),
-      lineHeight: 1.25,
-      marginBottom: n(compact ? 5 : 10),
+      fontSize: n(compact ? 15 : 21),
+      letterSpacing: compact ? 0.5 : 1.5,
+      textTransform: 'uppercase',
+      lineHeight: 1.2,
+      marginBottom: n(compact ? 5 : 9),
+      textShadow: '0 0 14px rgba(255,208,128,0.25)',
     },
     modalDesc: {
-      color: '#c8b888',
-      fontSize: n(compact ? 11 : 15),
-      lineHeight: compact ? 1.4 : 1.55,
-      marginBottom: n(compact ? 9 : 22),
+      color: '#bdae8c',
+      fontSize: n(compact ? 11 : 14),
+      lineHeight: compact ? 1.45 : 1.6,
+      marginBottom: n(compact ? 10 : 18),
     },
     choices: { display: 'flex', flexDirection: 'column', gap: n(compact ? 6 : 9) },
     choiceBtn: {
-      background: 'transparent',
-      border: '1px solid #5a4a20',
+      // A switch on the panel, not a web button: a numbered key plate, the
+      // action, and underneath it exactly what throwing it will cost.
+      display: 'flex',
+      alignItems: 'stretch',
+      gap: n(10),
+      background: 'rgba(255,214,140,0.035)',
+      border: '1px solid #4a3c1a',
+      borderLeft: '3px solid #8a6a2a',
       color: '#e8d5b7',
       fontFamily: 'monospace',
-      fontSize: n(compact ? 12 : 14),
-      lineHeight: 1.3,
-      // 44 px is the smallest reliably tappable target on a touchscreen.
       minHeight: 44,
-      padding: `${n(compact ? 6 : 9)}px ${n(12)}px`,
+      padding: `${n(compact ? 7 : 9)}px ${n(11)}px`,
       cursor: 'pointer',
       textAlign: 'left',
       borderRadius: 2,
+    },
+    choiceKey: {
+      flexShrink: 0,
+      width: n(18), height: n(18),
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      border: '1px solid #6b5624',
+      borderRadius: 2,
+      color: '#ffd080',
+      fontSize: n(compact ? 9 : 11),
+      alignSelf: 'center',
+    },
+    choiceBody: { display: 'flex', flexDirection: 'column', gap: n(2), minWidth: 0 },
+    choiceLabel: {
+      fontSize: n(compact ? 12 : 14),
+      lineHeight: 1.3,
+      color: '#f0e2c4',
+    },
+    choiceCost: {
+      fontSize: n(compact ? 9 : 10.5),
+      lineHeight: 1.35,
+      color: '#8a7a5a',
     },
   };
 }

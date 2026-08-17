@@ -127,6 +127,26 @@ function rustStreaks(
  * collision test derives from `heightM`, so the drawing can never disagree
  * with what the aircraft actually hits.
  */
+/**
+ * Vertical light/shade split over a structure that has already been drawn.
+ *
+ * Every kind here was painted in flat steel or flat concrete, so a 78 m mast
+ * and a chimney were the same grey regardless of where the sun was. One lit
+ * face and one shaded face is the cheapest way to give a silhouette volume,
+ * and it costs two rectangles.
+ */
+function shadeMass(
+  g: Phaser.GameObjects.Graphics,
+  sx: number, topY: number, baseY: number, halfWidth: number, style: ObstacleStyle,
+): void {
+  const w = halfWidth;
+  // Sunward face picks up the sky; the far face falls away into its own shade
+  g.fillStyle(style.rim, 0.13 + style.daylight * 0.10);
+  g.fillRect(sx - w, topY, w * 0.62, baseY - topY);
+  g.fillStyle(0x000000, 0.24);
+  g.fillRect(sx + w * 0.18, topY, w * 0.82, baseY - topY);
+}
+
 export function drawObstacle(
   g: Phaser.GameObjects.Graphics,
   kind: ObstacleKind,
@@ -144,6 +164,17 @@ export function drawObstacle(
   // Distant structures pick up the sky along their lit edge; without it they
   // are flat black cut-outs pasted over the terrain.
   const rim = mix(STEEL, style.rim, 0.45);
+
+  /**
+   * Cast shadow, then ground haze.
+   *
+   * A structure with no shadow is a decal on the background. The shadow is
+   * thrown AWAY from the same low sun the terrain, the scrub and the figures
+   * all answer to, and it lengthens with the structure's height, which is the
+   * cue that tells you how tall the thing is before you read its top.
+   */
+  g.fillStyle(0x000000, 0.24 + dl * 0.10);
+  g.fillEllipse(sx + h * 0.30, baseY + 1, halfWidth * 2.2 + h * 0.55, 9 + halfWidth * 0.25);
 
   // A little haze pooled at the foot ties it to the ground plane
   g.fillStyle(style.rim, 0.05 + dl * 0.05);
@@ -178,6 +209,7 @@ export function drawObstacle(
     // ── Ruined concrete tower ────────────────────────────────────────────
     case 'tower': {
       const w = halfWidth;
+      shadeMass(g, sx, topY, baseY, w, style);
       const lean = (hash(seed) - 0.5) * 0.12;      // a few degrees off vertical
       const tx = (y: number): number => sx + (baseY - y) * lean;
 

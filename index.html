@@ -49,6 +49,12 @@
       button { font: inherit; -webkit-tap-highlight-color: transparent; }
       button:focus { outline: none; }
 
+      /* Live-channel blink on the flight-event dialog. */
+      @keyframes aa-live { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0.15; } }
+      @media (prefers-reduced-motion: reduce) {
+        @keyframes aa-live { 0%, 100% { opacity: 1; } }
+      }
+
       /* Thin, dark scrollbars for the panels that do scroll. */
       .aa-scroll {
         overflow-y: auto;

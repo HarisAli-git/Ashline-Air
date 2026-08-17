@@ -133,17 +133,36 @@ export function FlightHUD(): React.ReactElement | null {
       {/* Flight event modal */}
       {event && (
         <div style={styles.modalBackdrop}>
+          {/*
+            The dialog is a RADIO CALL, so it is dressed as one. Everything in
+            here — weather, a distress signal, a warning light — reaches the
+            pilot down a channel, and a generic bordered panel said nothing
+            about that. The header is a live channel strip; the choices are
+            the switches you actually throw, each showing what it will cost.
+          */}
           <div style={styles.modal}>
+            <div style={styles.modalChannel}>
+              <span style={styles.modalLive} />
+              <span style={styles.modalChannelText}>CABIN INTERCOM · 121.5</span>
+              <span style={styles.modalChannelRule} />
+            </div>
             <h2 style={styles.modalTitle}>{event.title}</h2>
             <p style={styles.modalDesc}>{event.description}</p>
             <div style={styles.choices}>
-              {event.choices.map(choice => (
+              {event.choices.map((choice, i) => (
                 <button
                   key={choice.id}
                   style={styles.choiceBtn}
                   onClick={() => EventBus.emit('flight:apply-event-choice', { choiceId: choice.id })}
                 >
-                  {choice.label}
+                  <span style={styles.choiceKey}>{i + 1}</span>
+                  <span style={styles.choiceBody}>
+                    <span style={styles.choiceLabel}>{choice.label}</span>
+                    {/* What it costs, in the player's terms, before they commit */}
+                    <span style={styles.choiceCost}>
+                      {choice.consequences.map(c => c.description).filter(Boolean).join('  ·  ')}
+                    </span>
+                  </span>
                 </button>
               ))}
             </div>
