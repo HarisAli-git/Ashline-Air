@@ -18,6 +18,12 @@ import type { AircraftSprite } from './AircraftSprite';
  * or on its back — never level.
  */
 
+/**
+ * How far the wreck may rotate from its resting pose — about 115°, which is
+ * far enough to end up on its back and no further. Unbounded, it spun.
+ */
+const MAX_TUMBLE_RAD = 2.0;
+
 interface CrashOptions {
   /** Horizontal speed at impact, m/s. */
   speed: number;
@@ -38,6 +44,8 @@ interface Wreck {
   vx: number; vy: number;
   rot: number; spin: number;
   bounces: number;
+  /** True once the nose is in the dirt — the initial impact only fires once. */
+  dug?: boolean;
   settled: boolean;
   restPose: number;
 }
@@ -117,7 +125,8 @@ export class CrashSequence {
       vx: 40 + opts.speed * 1.1,
       vy: -(120 + 190 * sev) * (opts.gearUp ? 0.45 : 1),
       rot: c.rotation,
-      spin: (Math.random() < 0.5 ? -1 : 1) * (3.2 + sev * 4.5),
+      // Nose-over, not a flywheel: enough to put it on its nose or its back.
+      spin: (Math.random() < 0.35 ? -1 : 1) * (0.9 + sev * 1.9),
       bounces: 0,
       settled: false,
       // Comes to rest broken: nose buried, or over onto its back
@@ -217,30 +226,55 @@ export class CrashSequence {
       w.x += w.vx * dt;
       w.y += w.vy * dt;
       w.rot += w.spin * dt;
-      // Air/ground drag on the tumble
+      // The tumble is damped and BOUNDED. A wrecked airframe pitches over —
+      // sometimes right onto its back — but it does not keep rotating; there
+      // is nothing left to carry the momentum through.
+      w.spin *= Math.exp(-dt * 1.6);
+      w.rot = Phaser.Math.Clamp(w.rot, w.restPose - MAX_TUMBLE_RAD, w.restPose + MAX_TUMBLE_RAD);
       w.vx *= Math.exp(-dt * 1.1);
 
       if (w.y >= this.groundY) {
         w.y = this.groundY;
-        w.bounces++;
         const impact = Math.abs(w.vy);
-        if (impact > 90 && w.bounces < 4) {
-          // Another cartwheel out of it
-          w.vy = -impact * 0.42;
-          w.vx *= 0.62;
-          w.spin *= -0.72;
+
+        // An airframe hitting dirt DIGS IN. It does not cartwheel: the old
+        // sequence threw it through up to four full rotations at 7 rad/s,
+        // which reads as an arcade prop, not an aeroplane coming apart. What
+        // actually happens is one violent deceleration, a slew, and a long
+        // gouging slide — so ground contact is friction, not a trampoline.
+        if (impact > 260 && w.bounces === 0) {
+          // Fast enough to skip once off the surface. Once.
+          w.bounces++;
+          w.vy = -impact * 0.20;
+          w.vx *= 0.74;
+          w.spin *= 0.5;
           this.burstAt(w.x, this.groundY, this.severity * 0.55, true);
           this.scene.cameras.main.shake(220, 0.007);
           SoundEngine.impact();
         } else {
-          // Out of energy — it drops onto whatever is left of it
-          w.vy = 0; w.vx = 0; w.spin = 0;
-          w.settled = true;
-          this.scene.tweens.add({
-            targets: w, rot: w.restPose, duration: 620, ease: 'Bounce.easeOut',
-          });
-          this.burstAt(w.x, this.groundY, this.severity * 0.4, true);
-          this.ignite(w.x);
+          w.vy = 0;
+          // Ploughing: the nose is in the dirt, so it sheds speed fast and
+          // the rotation is arrested by the ground rather than continuing.
+          w.vx *= Math.exp(-dt * 3.4);
+          w.spin *= Math.exp(-dt * 6.5);
+          if (!w.dug) {
+            w.dug = true;
+            this.burstAt(w.x, this.groundY, this.severity * 0.7, true);
+            this.scene.cameras.main.shake(260, 0.009);
+            SoundEngine.impact();
+          }
+          // Dirt thrown up along the furrow while it is still moving
+          if (Math.abs(w.vx) > 40 && Math.random() < 0.5) {
+            this.burstAt(w.x - 10, this.groundY, this.severity * 0.10, true);
+          }
+          if (Math.abs(w.vx) < 22) {
+            w.vx = 0; w.spin = 0;
+            w.settled = true;
+            this.scene.tweens.add({
+              targets: w, rot: w.restPose, duration: 520, ease: 'Sine.easeOut',
+            });
+            this.ignite(w.x);
+          }
         }
       }
       // A wreck cannot be below the deck

@@ -1,4 +1,4 @@
-import type { FlightState, LandingResult, Contract, FlightEventDefinition, WeatherState } from '../../types';
+import type { FlightState, LandingResult, Contract, FlightEventDefinition, WeatherState, FlightAction } from '../../types';
 
 /**
  * Typed event map for all cross-system communication.
@@ -16,6 +16,8 @@ export interface GameEvents {
   'flight:event-triggered': { event: FlightEventDefinition };
   'flight:event-choice': { eventId: string; choiceId: string };
   'flight:apply-event-choice': { choiceId: string };
+  /** A choice that DOES something; FlightScene carries it out. */
+  'flight:event-action': { action: FlightAction; value: number };
   'flight:fuel-critical': { fuelRemaining: number };
   'flight:gear-toggled': { down: boolean };
   'flight:flaps-toggled': { deployed: boolean };

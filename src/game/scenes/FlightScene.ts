@@ -15,6 +15,7 @@ import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
 import { clamp, distance, pixelsToKm } from '../utils/math';
+import type { ApproachKind, FlightAction } from '../../types';
 import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
 import { TouchInput } from '../utils/touchInput';
@@ -60,6 +61,9 @@ export class FlightScene extends Phaser.Scene {
   /** Usable runway at each end, metres — from the settlements' field profiles. */
   private originRunwayM = 600;
   private destRunwayM = 600;
+  /** Surface each field is paved with — drives how the runway is drawn. */
+  private originSurface: ApproachKind = 'open';
+  private destSurface: ApproachKind = 'open';
   private originBiome = biomeFor(undefined);
   private destBiome = biomeFor(undefined);
   private cargo!: CargoHold;
@@ -218,6 +222,8 @@ export class FlightScene extends Phaser.Scene {
         destinationName = dest.name;
         this.originRunwayM = origin.field?.runwayM ?? 600;
         this.destRunwayM = dest.field?.runwayM ?? 600;
+        this.originSurface = origin.field?.approach ?? 'open';
+        this.destSurface = dest.field?.approach ?? 'open';
       }
     }
     this.destinationName = destinationName;
@@ -300,6 +306,9 @@ export class FlightScene extends Phaser.Scene {
       EventBus.on('flight:apply-event-choice', ({ choiceId }) => {
         this.state = FlightEventService.applyChoice(choiceId, this.state);
       }),
+      // A choice that names a manoeuvre has to FLY it. Stat pokes alone are
+      // why "Divert to the nearest settlement" read as doing nothing at all.
+      EventBus.on('flight:event-action', ({ action, value }) => this.runEventAction(action, value)),
       EventBus.on('weather:changed', ({ state: weather }) => {
         this.world.setWeather(weather.condition);
         this.fx.setCondition(weather.condition);
@@ -328,7 +337,9 @@ export class FlightScene extends Phaser.Scene {
       scrollX: 0, altitude: 0, windX: 0,
       routeTotalKm: this.routeKm,
       originRunwayM: this.originRunwayM,
-      destRunwayM: this.destRunwayM, condition: this.weather.current.condition,
+      destRunwayM: this.destRunwayM,
+      originSurface: this.originSurface,
+      destSurface: this.destSurface, condition: this.weather.current.condition,
       minutesOfDay: this.baseTimestamp % 1440,
       visibility: this.weather.current.visibility,
       progress: 0,
@@ -605,6 +616,8 @@ export class FlightScene extends Phaser.Scene {
       routeTotalKm: this.routeKm,
       originRunwayM: this.originRunwayM,
       destRunwayM: this.destRunwayM,
+      originSurface: this.originSurface,
+      destSurface: this.destSurface,
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
@@ -677,6 +690,8 @@ export class FlightScene extends Phaser.Scene {
       routeTotalKm: this.routeKm,
       originRunwayM: this.originRunwayM,
       destRunwayM: this.destRunwayM,
+      originSurface: this.originSurface,
+      destSurface: this.destSurface,
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
@@ -719,8 +734,14 @@ export class FlightScene extends Phaser.Scene {
     const alt = this.state.altitude;
 
     // ── Solid obstacles ───────────────────────────────────────────────────
+    hz.tickDamage(sdt);
     const hit = hz.collisionAt(worldX, alt);
     if (hit && this.hasBeenAirborne) {
+      // The structure takes it too. A one-sided collision — 45 points off the
+      // airframe and the mast standing there untouched — is what makes the
+      // world read as scenery instead of something you are moving through.
+      hz.damageAt(hit, 0.75);
+      this.spawnImpactDebris(AIRCRAFT_X, this.world.altitudeToScreenY(alt), 30);
       SoundEngine.impact();
       this.cameras.main.shake(500, 0.012);
       this.state.integrity = clamp(this.state.integrity - 45, 0, 100);
@@ -978,7 +999,32 @@ export class FlightScene extends Phaser.Scene {
     const other = traffic.collision(worldX, this.state.altitude);
     if (!other || !this.hasBeenAirborne) return;
     traffic.doom(other);
+    // Debris at THEIR airframe as well, not only off your wing. Without it the
+    // other aeroplane simply starts descending and the collision looks like it
+    // only happened to one of you.
+    const theirY = this.world.altitudeToScreenY(other.alt);
+    this.spawnImpactDebris(other.wx - this.scrollX, theirY, 40);
     this.midair();
+  }
+
+  /**
+   * A burst of torn structure at a point on screen. Used for both halves of a
+   * collision, so whatever you hit is visibly damaged by hitting you.
+   */
+  private spawnImpactDebris(sx: number, sy: number, count: number): void {
+    const debris = this.add.particles(sx, sy, 'px_streak', {
+      lifespan: { min: 450, max: 1500 },
+      speed: { min: 80, max: 400 },
+      angle: { min: 0, max: 360 },
+      rotate: { min: 0, max: 360 },
+      scale: { start: 0.9, end: 0.15 },
+      alpha: { start: 1, end: 0 },
+      tint: [0xd8c8a0, 0x8a6a4a, 0x3a3128, 0xff9a40],
+      gravityY: 300,
+      emitting: false,
+    }).setDepth(7);
+    debris.explode(count);
+    this.time.delayedCall(1700, () => debris.destroy());
   }
 
   /** Two aircraft, one piece of sky. Neither of you is landing on a runway. */
@@ -1167,6 +1213,63 @@ export class FlightScene extends Phaser.Scene {
 
   // ── Landing ───────────────────────────────────────────────────────────────
 
+  /**
+   * Carry out what a flight-event choice actually promised.
+   *
+   * Every one of these is visible from the cockpit within a second or two —
+   * that is the whole point. A choice whose only effect is a number in the
+   * save file is indistinguishable from closing the box.
+   */
+  private runEventAction(action: FlightAction, value: number): void {
+    switch (action) {
+      case 'divert': {
+        // Break off and put it down. `reachedDestination` is false this far
+        // out, so the report reads DIVERTED and the contract stays live.
+        EventBus.emit('ui:show-notification', {
+          message: 'Breaking off — putting her down short of the destination.',
+          type: 'warning',
+        });
+        this.finishFlight({
+          verticalSpeed: -1.4,
+          horizontalSpeed: this.state.speed,
+          gearDown: this.state.gearDown,
+          quality: 'good',
+          integrityDamage: 0,
+          cargoDamagePercent: 0,
+        });
+        break;
+      }
+      case 'clear_weather':
+        // You got above it / around it — so the weather genuinely stops.
+        this.weather.forceCondition('clear');
+        this.iceLoad = 0;
+        EventBus.emit('ui:show-notification', {
+          message: 'Clear air — you are above the worst of it.', type: 'success',
+        });
+        break;
+      case 'extend_route': {
+        // Going around is longer. The route strip and the distance readout
+        // both move, so the cost is on screen for the rest of the flight.
+        this.routeKm += value;
+        EventBus.emit('flight:route-info', {
+          routeKm: this.routeKm, destinationName: this.destinationName,
+        });
+        EventBus.emit('ui:show-notification', {
+          message: `Routing around it — ${value.toFixed(1)} km added to the leg.`,
+          type: 'warning',
+        });
+        break;
+      }
+      case 'full_power':
+        this.state.throttle = Math.min(1, this.state.throttle + value);
+        break;
+      case 'descend':
+        this.state.altitude = Math.max(12, this.state.altitude + value);
+        this.state.flightPathAngle = Math.min(this.state.flightPathAngle, -0.05);
+        break;
+    }
+  }
+
   private finishFlight(result: LandingResult): void {
     if (this.landed) return;
     this.landed = true;
@@ -1185,10 +1288,17 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // A crash is the one moment of the flight worth watching. Play it out —
-    // impact, break-up, cartwheel, burning wreck — and only then show the
-    // report. `crashing` keeps update() alive so the world still scrolls to a
-    // stop underneath the wreckage instead of freezing mid-slide.
+    // impact, break-up, the gouging slide, burning wreck — and only then show
+    // the report. `crashing` keeps update() alive so the world still scrolls
+    // to a stop underneath the wreckage instead of freezing mid-slide.
     this.crashing = true;
+
+    // Whatever it comes down on gets wrecked too. Sixty tonnes of aeroplane
+    // arriving at a lattice mast is not something the mast walks away from.
+    const crashX = this.scrollX + AIRCRAFT_X;
+    for (const h of this.world.hazards.near(crashX, 70)) {
+      this.world.hazards.damageAt(h, 0.9);
+    }
     SoundEngine.stopFlightLoop();
     // Silence the panel: nothing is overspeeding or being shot at any more,
     // and leaving "CLIMB 340 m" flashing over a burning wreck is absurd.

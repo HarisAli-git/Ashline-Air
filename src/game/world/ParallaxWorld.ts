@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import type { WeatherCondition } from '../../types';
+import type { ApproachKind, WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
 import { Raiders, MAX_ENGAGEMENT_M, type RaiderFireReport } from './Raiders';
 import { AirTraffic } from './AirTraffic';
@@ -120,6 +120,9 @@ export interface WorldFrame {
   /** Usable runway at each end, in metres — from the settlements' profiles. */
   originRunwayM?: number;
   destRunwayM?: number;
+  /** What each field is PAVED with, from its approach type. */
+  originSurface?: ApproachKind;
+  destSurface?: ApproachKind;
   condition: WeatherCondition;
   minutesOfDay: number; // world-clock minutes 0–1439, drives the day/night cycle
   visibility: number;   // 0–1 from weather, dims the sun/moon
@@ -426,6 +429,23 @@ export class ParallaxWorld {
       } else {
         g.fillRect(sx - 4 * s, y - 1.6 * s, 8 * s, 1.8 * s);
       }
+    }
+
+    // A dark, out-of-focus lip across the very bottom of the frame. It frames
+    // the shot and gives the near ground somewhere to end, instead of the
+    // speckle simply running off the edge of the screen.
+    {
+      const lipTop = this.height - 26;
+      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.78), 1);
+      g.beginPath();
+      g.moveTo(0, this.height + 4);
+      for (let x = 0; x <= this.width; x += 22) {
+        const w = x + scroll * 0.35;
+        g.lineTo(x, lipTop - Math.abs(Math.sin(w * 0.006)) * 12 - propRand(Math.floor(w / 22)) * 7);
+      }
+      g.lineTo(this.width, this.height + 4);
+      g.closePath();
+      g.fillPath();
     }
 
     // Motion streaks along the very bottom once genuinely quick
@@ -918,6 +938,13 @@ export class ParallaxWorld {
       if (sx < -60 || sx > this.width + 60) continue;
       const kind = Math.floor(propRand(i + 50) * 6);
       const s = 0.7 + propRand(i + 90) * 0.7;
+
+      // Cast shadow first, stretched away from the low sun. Without one the
+      // rocks and snags read as stickers laid over the ground rather than
+      // things standing on it — the cheapest depth cue there is.
+      g.fillStyle(0x000000, 0.26);
+      g.fillEllipse(sx + 9 * s, baseY + 1.5, 30 * s, 5.5 * s);
+
       g.fillStyle(this.pal.scrub, 1);
       g.lineStyle(2 * s, this.pal.scrub, 1);
       switch (kind) {
@@ -964,40 +991,85 @@ export class ParallaxWorld {
     const gy = this.groundY + sink;
     if (gy > this.height + 10) return;
 
-    // Ground body with a subtle depth gradient
-    g.fillStyle(this.pal.ground, 1);
-    g.fillRect(0, gy, this.width, this.height - gy + 10);
-    g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.35), 1);
-    g.fillRect(0, gy + 60, this.width, this.height - gy - 50);
-    g.fillStyle(this.pal.groundTop, 1);
-    g.fillRect(0, gy, this.width, 18);
+    /**
+     * The ground is a lit SURFACE receding from the camera, not a stack of
+     * bands. It used to be a flat fill, four hard strata and two ruled lines,
+     * which is the same mistake the chart and the cutscene had: no light
+     * source, so no depth.
+     *
+     * Two things do the work. The gradient runs from a hazy, sun-warmed
+     * horizon down to cold shadow right under the camera — that is distance.
+     * And everything that sits on the ground now throws a shadow away from
+     * the sun, which is what makes objects sit ON the dirt rather than float
+     * in front of it.
+     */
+    const depth = Math.max(1, this.height - gy);
+    const BANDS = 18;
+    const lit = lerpColor(this.pal.groundTop, this.pal.glow, 0.28);
+    const deep = lerpColor(this.pal.ground, 0x05060a, 0.62);
+    for (let i = 0; i < BANDS; i++) {
+      const t = i / (BANDS - 1);
+      // Eased so most of the change happens near the horizon, the way real
+      // aerial perspective falls off.
+      const e = Math.pow(t, 0.62);
+      g.fillStyle(lerpColor(lit, deep, e), 1);
+      g.fillRect(0, gy + depth * t, this.width, depth / BANDS + 1.5);
+    }
+    // Haze pooling along the horizon line, so the ground meets the sky in air
+    for (let i = 6; i >= 1; i--) {
+      g.fillStyle(this.pal.glow, 0.035);
+      g.fillRect(0, gy - i * 1.5, this.width, i * 5);
+    }
     g.lineStyle(2, this.pal.groundLine, 1);
     g.lineBetween(0, gy, this.width, gy);
 
-    // Layered strata so the near ground reads as dirt, not a flat fill
-    for (let i = 0; i < 4; i++) {
-      const y0 = gy + 16 + i * 22;
-      if (y0 > this.height) break;
-      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.12 + i * 0.13), 1);
-      g.fillRect(0, y0, this.width, 22);
-    }
-    // Wheel ruts running the length of the strip
-    g.lineStyle(2, lerpColor(this.pal.ground, 0x000000, 0.45), 0.5);
-    g.lineBetween(0, gy + 30, this.width, gy + 30);
-    g.lineBetween(0, gy + 52, this.width, gy + 52);
-
-    // Texture lines + scrolling dirt speckle so the ground itself shows motion
-    g.lineStyle(1, lerpColor(this.pal.ground, 0xffffff, 0.08), 0.3);
-    for (let i = 1; i <= 3; i++) g.lineBetween(0, gy + i * 22, this.width, gy + i * 22);
+    // ── Undulating dirt shoulder: the ground line is dead straight because
+    // the aircraft has to land on it, so the RELIEF goes just underneath it.
     {
-      const sp = 26;
+      const step = 26;
+      const first = Math.floor((scrollX - 60) / step);
+      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.22), 0.75);
+      g.beginPath();
+      g.moveTo(-60, gy + 2);
+      for (let i = first; i < first + Math.ceil(this.width / step) + 4; i++) {
+        const wx = i * step;
+        const h = 5 + Math.sin(wx * 0.0031) * 4 + Math.sin(wx * 0.011) * 2.5 + propRand(i) * 3;
+        g.lineTo(wx - scrollX, gy + 2 + h);
+      }
+      g.lineTo(this.width + 60, gy + 26);
+      g.lineTo(-60, gy + 26);
+      g.closePath();
+      g.fillPath();
+    }
+
+    // Wheel ruts, spreading apart as they come toward the camera
+    for (const [off, a] of [[30, 0.45], [56, 0.35], [92, 0.25]] as const) {
+      if (gy + off > this.height) break;
+      g.lineStyle(2 + off / 46, lerpColor(this.pal.ground, 0x000000, 0.5), a);
+      g.lineBetween(0, gy + off, this.width, gy + off);
+    }
+
+    // Scrolling grit: finer and denser far away, coarser near the camera, so
+    // the speckle itself carries the perspective instead of fighting it.
+    {
+      const sp = 18;
       const first = Math.floor((scrollX - 20) / sp);
       for (let i = first; i < first + Math.ceil(this.width / sp) + 2; i++) {
-        const sx = i * sp + propRand(i) * 20 - scrollX;
-        if (sx < -4 || sx > this.width + 4) continue;
-        const dy = 8 + propRand(i + 3) * 52;
-        g.fillStyle(propRand(i + 9) > 0.5 ? 0x000000 : 0xffffff, 0.06);
-        g.fillRect(sx, gy + dy, 2.5, 1.6);
+        for (let k = 0; k < 3; k++) {
+          const r = propRand(i * 3 + k * 17);
+          const sx = i * sp + r * 16 - scrollX;
+          if (sx < -6 || sx > this.width + 6) continue;
+          const dt = propRand(i + k * 7 + 3);
+          const dy = 6 + dt * Math.min(depth - 10, 120);
+          const sz = 1.4 + dt * 3.2;
+          g.fillStyle(propRand(i + k + 9) > 0.5 ? 0x000000 : 0xffffff, 0.05 + dt * 0.05);
+          g.fillRect(sx, gy + dy, sz, sz * 0.6);
+          // Its own little shadow, cast away from the sun
+          if (dt > 0.45) {
+            g.fillStyle(0x000000, 0.10);
+            g.fillRect(sx + sz * 0.7, gy + dy + sz * 0.5, sz * 0.9, sz * 0.35);
+          }
+        }
       }
     }
 
@@ -1050,8 +1122,8 @@ export class ParallaxWorld {
     const dstLen = (f.destRunwayM ?? 600) * PXM;
     const oriFrom = -oriLen * 0.28, oriTo = oriLen * 0.72;
     const dstFrom = destPx - dstLen * 0.5, dstTo = destPx + dstLen * 0.5;
-    this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f);
-    this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f);
+    this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f, f.originSurface ?? 'open');
+    this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f, f.destSurface ?? 'open');
     // Origin airfield sits just behind the spawn point (aircraft spawns at
     // screen/world ~300) so the field is on screen from the first frame; the
     // destination's is at its strip entrance, overflown on approach.
@@ -1373,6 +1445,7 @@ export class ParallaxWorld {
     scrollX: number,
     gy: number,
     f: WorldFrame,
+    surface: ApproachKind = 'open',
   ): void {
     const x0 = fromM - scrollX;
     const x1 = toM - scrollX;
@@ -1381,15 +1454,49 @@ export class ParallaxWorld {
     const sx0 = Math.max(-60, x0);
     const sx1 = Math.min(this.width + 60, x1);
 
-    // Slab with edge line and worn shoulders
-    g.fillStyle(0x1c1c1a, 0.95);
-    g.fillRect(sx0, gy + 1, sx1 - sx0, 13);
-    g.fillStyle(0x2a2a26, 0.9);
-    g.fillRect(sx0, gy + 1, sx1 - sx0, 2);
-    g.lineStyle(1, 0xb8b0a0, 0.35);
-    g.lineBetween(sx0, gy + 1.5, sx1, gy + 1.5); // painted edge line
-    g.lineStyle(1, 0x3a3a36, 0.8);
-    g.lineBetween(sx0, gy + 14, sx1, gy + 14);
+    /**
+     * Every field used to be the same 13-px black stripe, which is why one
+     * landing looked like every other. The surface is what a place IS: a
+     * nomad strip is scraped dirt, a pre-war freight apron is cracked
+     * concrete, a coastal causeway is salt-bleached. Driven by the same
+     * approach type that gates which aircraft can use the field.
+     */
+    const SURFACES: Record<ApproachKind, {
+      deck: number; near: number; far: number; mark: number; loose: boolean;
+    }> = {
+      open:       { deck: 0x24231f, near: 0x171613, far: 0x393730, mark: 0xc8c0a8, loose: false },
+      industrial: { deck: 0x33322c, near: 0x1d1c18, far: 0x4a473d, mark: 0xd6cfb4, loose: false },
+      coastal:    { deck: 0x2b2b28, near: 0x1a1a18, far: 0x484a44, mark: 0xbfc4bb, loose: false },
+      canyon:     { deck: 0x5a4227, near: 0x332413, far: 0x74582f, mark: 0xa08a5c, loose: true  },
+      mountain:   { deck: 0x4e4438, near: 0x2c261e, far: 0x675944, mark: 0x9c9078, loose: true },
+    };
+    const S = SURFACES[surface] ?? SURFACES.open;
+
+    // ── The deck, as a SURFACE rather than a line ───────────────────────
+    // Banded from the far edge down to the near one so it reads as ground
+    // receding away from the camera instead of a stripe painted on the world.
+    const DECK = 22;
+    const BANDS = 9;
+    for (let i = 0; i < BANDS; i++) {
+      const t = i / (BANDS - 1);
+      const c = Phaser.Display.Color.Interpolate.ColorWithColor(
+        Phaser.Display.Color.IntegerToColor(S.far),
+        Phaser.Display.Color.IntegerToColor(S.near),
+        100, Math.round(t * 100),
+      );
+      g.fillStyle(Phaser.Display.Color.GetColor(c.r, c.g, c.b), 1);
+      g.fillRect(sx0, gy + 1 + (DECK * i) / BANDS, sx1 - sx0, DECK / BANDS + 0.8);
+    }
+    // Shoulders: graded dirt either side of the hard surface
+    g.fillStyle(lerpColor(S.deck, this.pal.ground ?? 0x4a3d28, 0.6), 0.85);
+    g.fillRect(sx0, gy - 3, sx1 - sx0, 4);
+    g.fillRect(sx0, gy + 1 + DECK, sx1 - sx0, 5);
+    // Painted edge lines, top and bottom of the deck
+    g.lineStyle(1.2, S.mark, S.loose ? 0.10 : 0.34);
+    g.lineBetween(sx0, gy + 2.2, sx1, gy + 2.2);
+    g.lineBetween(sx0, gy + DECK - 1, sx1, gy + DECK - 1);
+    g.lineStyle(1, 0x000000, 0.5);
+    g.lineBetween(sx0, gy + 1 + DECK, sx1, gy + 1 + DECK);
 
     // Asphalt patchwork speckle
     {
@@ -1401,7 +1508,7 @@ export class ParallaxWorld {
         if (wx < fromM + 6 || wx > toM - 6) continue;
         const dx = wx - scrollX;
         g.fillStyle(propRand(i + 55) > 0.5 ? 0x000000 : 0x4a4a44, 0.25);
-        g.fillRect(dx, gy + 3 + propRand(i + 8) * 8, 3 + propRand(i) * 5, 1.4);
+        g.fillRect(dx, gy + 3 + propRand(i + 8) * (DECK - 7), 3 + propRand(i) * 6, 1.6);
       }
     }
 
@@ -1411,7 +1518,7 @@ export class ParallaxWorld {
         const tx = endX + i * 15;
         if (tx < -20 || tx > this.width + 20) continue;
         g.fillStyle(0xc8c0a8, 0.75);
-        g.fillRect(tx, gy + 3, 7, 9);
+        g.fillRect(tx, gy + 3.5, 7, DECK - 6);
       }
     }
 
@@ -1419,7 +1526,7 @@ export class ParallaxWorld {
     for (const ax of [x0 + 190, x1 - 265]) {
       if (ax > -60 && ax < this.width + 60) {
         g.fillStyle(0xd8d0b8, 0.6);
-        g.fillRect(ax, gy + 4.5, 34, 5);
+        g.fillRect(ax, gy + 7, 34, 6);
       }
     }
 
@@ -1429,7 +1536,7 @@ export class ParallaxWorld {
         const rx = endX + dir * (i * 26 + propRand(i + 61) * 18);
         if (rx < -40 || rx > this.width + 40) continue;
         g.fillStyle(0x0c0a08, 0.4);
-        g.fillRect(rx, gy + 5 + propRand(i + 31) * 5, 16 + propRand(i + 41) * 14, 1.8);
+        g.fillRect(rx, gy + 6 + propRand(i + 31) * 10, 16 + propRand(i + 41) * 14, 2.4);
       }
     }
 
@@ -1439,7 +1546,7 @@ export class ParallaxWorld {
     for (let wx = fromM + 120; wx < toM - 110; wx += dashW + gap) {
       const dx = wx - scrollX;
       if (dx < -40 || dx > this.width + 40) continue;
-      g.fillRect(dx, gy + 7, dashW, 2.5);
+      g.fillRect(dx, gy + DECK * 0.5, dashW, 3);
     }
 
     // Sequenced approach strobes leading in to the threshold ("the rabbit")

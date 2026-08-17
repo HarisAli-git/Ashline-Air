@@ -1,4 +1,4 @@
-import type { FlightEventDefinition, FlightState, EventConsequence, AircraftDefinition } from '../types';
+import type { FlightEventDefinition, FlightState, EventConsequence, AircraftDefinition, FlightAction } from '../types';
 import { EventBus } from '../game/utils/EventBus';
 import { SaveService } from './SaveService';
 import { clamp } from '../game/utils/math';
@@ -171,6 +171,14 @@ class FlightEventServiceClass {
           factionId: c.target, delta: c.value, total: rep.points,
         });
       }
+      return next;
+    }
+    if (c.type === 'action') {
+      // Handed to FlightScene, which is the only thing that can actually fly
+      // the aeroplane somewhere.
+      EventBus.emit('flight:event-action', {
+        action: c.target as FlightAction, value: c.value,
+      });
       return next;
     }
     if (c.type === 'add_cargo_damage') {
