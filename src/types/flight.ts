@@ -1,6 +1,20 @@
 // Runtime flight state — not persisted, rebuilt each flight
 export interface FlightState {
-  throttle: number;       // 0–1
+  throttle: number;       // 0–1 — the LEVER position
+  /**
+   * Power the engine is actually delivering, 0–1, lagging the lever.
+   *
+   * A piston engine does not make full power the instant you shove the
+   * throttle forward; it takes seconds to spool. Without this the model let
+   * you dive, slam the lever and haul back with no penalty at all, which is
+   * what made the aeroplane feel like a machine that could not be mishandled.
+   */
+  enginePower: number;
+  /**
+   * Wing loading in g, 1 = level flight. Read by the camera and the airframe
+   * so a hard pull is something you can SEE, not just a number that changed.
+   */
+  loadFactor: number;
   pitch: number;          // degrees, positive = nose up
   pitchRate: number;      // deg/s — the nose has momentum, it is not a slider
   /**

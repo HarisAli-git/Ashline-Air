@@ -26,7 +26,19 @@ const DEG = Math.PI / 180;
  * lag filters.
  */
 export const TUNING = {
-  throttleRate: 0.9,        // throttle change per second of key held
+  /**
+   * How fast the LEVER moves, and how fast the ENGINE follows it.
+   *
+   * These were 0.9 and nothing: the lever swept idle→full in 1.1 s and thrust
+   * tracked it instantly, so "dive, slam the throttle, pull up" cost nothing.
+   * A piston engine takes seconds to come up. Measured before: full power
+   * 1.0 s after asking. After: the lever takes 1.8 s and the engine another
+   * ~2.4 s behind it, so a recovery has to be STARTED early — which is the
+   * whole point of managing energy.
+   */
+  throttleRate: 0.55,       // lever travel per second of input held
+  spoolUp: 2.4,             // seconds for the engine to chase the lever up
+  spoolDown: 1.5,           // …and to come back down (faster, as in a real one)
 
   // ── Wing ──
   CL0: 0.25,                // lift coefficient at zero angle of attack
@@ -69,7 +81,18 @@ export const TUNING = {
 
   // ── Pitch: a driven, damped, self-stabilising airframe ──
   controlPower: 78,         // elevator moment, deg/s² at cruise
-  pitchStability: 3.4,      // restoring moment toward the trim ANGLE OF ATTACK
+  /**
+   * Restoring moment per DEGREE of angle-of-attack error.
+   *
+   * This is now the number that decides AUTHORITY, because full stick settles
+   * where control balances stability: αerr ≈ controlPower / pitchStability.
+   * At 16 that was 4.9° — less than the margin to the stall, so the aeroplane
+   * literally could not be rotated for takeoff or stalled in the air. At 6.5 it
+   * is ~12°, which clears the ~14° critical angle when you are already trimmed
+   * nose-up: you can haul it into a stall if you insist, and you have to work
+   * for it.
+   */
+  pitchStability: 6.5,
   /**
    * Fraction of that self-trimming authority that survives at zero thrust.
    *
@@ -148,9 +171,9 @@ export class AircraftController {
   private readonly def: AircraftDefinition;
 
   // Speeds in m/s
-  private readonly vMax: number;
+  readonly vMax: number;
   private readonly vCruise: number;
-  private readonly vStall: number;
+  readonly vStall: number;
 
   /**
    * Lift/drag scale = ½ρS/m lumped into one constant, solved so that level
@@ -197,6 +220,8 @@ export class AircraftController {
     const { stats } = this.def;
     return {
       throttle: 0,
+      enginePower: 0,
+      loadFactor: 1,
       pitch: 0,
       pitchRate: 0,
       flightPathAngle: 0,
@@ -248,7 +273,13 @@ export class AircraftController {
     // ── Throttle ──────────────────────────────────────────────────────────
     if (input.throttleUp)   s.throttle = clamp(s.throttle + TUNING.throttleRate * dt, 0, 1);
     if (input.throttleDown) s.throttle = clamp(s.throttle - TUNING.throttleRate * dt, 0, 1);
-    const effThrottle = input.engineOn && s.fuel > 0 ? s.throttle : 0;
+    const lever = input.engineOn && s.fuel > 0 ? s.throttle : 0;
+    // The engine LAGS the lever. Everything downstream that used to read the
+    // lever now reads delivered power, so the drag of a windmilling prop also
+    // takes its time to come and go.
+    const tau = lever > s.enginePower ? TUNING.spoolUp : TUNING.spoolDown;
+    s.enginePower += (lever - s.enginePower) * (1 - Math.exp(-dt / tau));
+    const effThrottle = s.enginePower;
     const aT = effThrottle * this.tMax * (1 - s.engineTemp * 0.3)
       * (1 - clamp(1 - s.integrity / 100, 0, 1) * 0.45);
 
@@ -306,6 +337,10 @@ export class AircraftController {
     CD += TUNING.idleDragCD * Math.pow(1 - effThrottle, TUNING.idleDragCurve);
 
     const aL = qK * CL * dmgLift * s.modifiers.liftMult;   // lift acceleration
+    // What the airframe is pulling, in g. Everything that should make a hard
+    // manoeuvre FELT rather than merely reported reads this: the camera, the
+    // airframe wobble, the engine and wind note.
+    s.loadFactor = onGround ? 1 : clamp(aL / GRAVITY, -1.5, 6);
     const aD = qK * CD * s.modifiers.dragMult * dmgDrag;
 
     // ── Pitch: driven, damped, statically stable ──────────────────────────
@@ -339,27 +374,35 @@ export class AircraftController {
       -6 * DEG, alphaCrit,
     );
 
-    // …and it trims onto the flight path THE CURRENT POWER CAN SUSTAIN, not
-    // onto whatever path we happen to be on.
-    //
-    // This is the other half of "chop the throttle and come down". Trimming to
-    // `gamma` gave the aeroplane no opinion about whether that path was
-    // payable: with the engine at idle it kept trying to hold whatever it had,
-    // pitched UP to chase the slower trim speed, and ballooned — measured as
-    // five seconds of CLIMB after the throttle was closed, and only 65 m lost
-    // in twenty seconds. Solving the sustainable angle from thrust minus drag
-    // puts the nose down the instant the power comes off: 120 m in the same
-    // twenty seconds, sinking from the first second.
-    const qTrim = this.K * vTrim * vTrim;
-    let cdTrim = TUNING.CD0 + TUNING.inducedK * clForLevel * clForLevel
-      + TUNING.idleDragCD * Math.pow(1 - effThrottle, TUNING.idleDragCurve);
-    if (s.flapsDeployed) cdTrim += TUNING.flapsCD;
-    if (s.gearDown && !this.gearFixed) cdTrim += TUNING.gearCD;
-    const gammaTrim = Math.asin(clamp((aT - qTrim * cdTrim) / GRAVITY, -0.62, 0.42));
-    const pitchTrimDeg = onGround ? 0 : (gammaTrim + alphaTrim) / DEG;
-
     const command = (input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0);
     const controlMoment = command * TUNING.controlPower * qNorm * elevator;
+
+    // ── Longitudinal stability acts on ANGLE OF ATTACK, never on attitude ──
+    //
+    // This used to solve the flight path the current power could sustain and
+    // then SERVO the nose onto it. That is an autopilot, not an aeroplane: it
+    // knew the right answer and flew there, and the player only nudged its
+    // setpoint. Measured, the tell was unmistakable — from a 28° nose-up
+    // attitude, hands off, it converged to pitch 2° and vertical speed 0.0 and
+    // sat there for ever. Nothing real does that. That single behaviour is
+    // what made the whole thing feel like driving a robot.
+    //
+    // A real tailplane makes a restoring moment proportional to how far the
+    // ANGLE OF ATTACK has strayed from its trimmed value, and knows nothing
+    // about flight paths or thrust. Fly too slowly and α must rise to hold the
+    // lift, so the tail pushes the nose DOWN — the aeroplane trades height for
+    // speed on its own. Too fast and α falls, so the nose comes UP and it
+    // climbs, bleeding the speed off again. That exchange is the phugoid, and
+    // it is exactly the "adjusts itself to gravity" behaviour that was missing:
+    // it is emergent here, not scripted.
+    const alphaErrDeg = (alpha - alphaTrim) / DEG;
+    // Propwash over the tail is much of a single's elevator authority, so
+    // stability still fades with power — but it fades toward WALLOWING, not
+    // toward a different tidy equilibrium.
+    const stabPower = TUNING.stabIdle + (1 - TUNING.stabIdle) * effThrottle;
+    const stabilityMoment = onGround
+      ? -s.pitch * TUNING.pitchStability * qNorm          // hold the runway attitude
+      : -alphaErrDeg * TUNING.pitchStability * stabPower * qNorm;
     // Stability fades with power, and it fades FAST. Scaled linearly with the
     // lever, a third of throttle still left the aeroplane 37% stabilised —
     // measured as a trimmed, perfectly controllable 104 km/h glide, which is

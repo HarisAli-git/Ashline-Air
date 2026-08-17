@@ -102,7 +102,7 @@ export function HangarScreen(): React.ReactElement {
         <div className="aa-scroll" style={styles.list}>
           {fleet.map(def => {
             const av = AircraftService.availability(def, save);
-            return <Row key={def.id} def={def} av={av} onBuy={() => buy(def)} onSelect={() => select(def.id)} />;
+            return <Row key={def.id} def={def} av={av} compact={vp.isCompact} onBuy={() => buy(def)} onSelect={() => select(def.id)} />;
           })}
         </div>
       </div>
@@ -110,11 +110,12 @@ export function HangarScreen(): React.ReactElement {
   );
 }
 
-function Row({ def, av, onBuy, onSelect }: {
+function Row({ def, av, onBuy, onSelect, compact }: {
   def: AircraftDefinition;
   av: AircraftAvailability;
   onBuy: () => void;
   onSelect: () => void;
+  compact: boolean;
 }): React.ReactElement {
   const locked = av.state === 'locked';
   const s = def.stats;
@@ -130,7 +131,7 @@ function Row({ def, av, onBuy, onSelect }: {
           <span style={styles.tier}>{TIER_LABEL[def.tier] ?? `T${def.tier}`}</span>
           {av.state === 'owned' && av.active && <span style={styles.badge}>ACTIVE</span>}
         </div>
-        <div style={styles.desc}>{def.description}</div>
+        {!compact && <div style={styles.desc}>{def.description}</div>}
         <div style={styles.stats}>
           <Stat label="CARGO" value={`${s.cargoCapacity} kg`} />
           <Stat label="CRUISE" value={`${s.cruiseSpeed} km/h`} />

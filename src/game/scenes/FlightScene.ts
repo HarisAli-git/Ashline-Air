@@ -16,6 +16,7 @@ import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
 import { clamp, distance, pixelsToKm } from '../utils/math';
 import { isTouchDevice } from '../utils/device';
+import { CameraRig } from './CameraRig';
 import { TouchInput } from '../utils/touchInput';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
@@ -43,6 +44,8 @@ export class FlightScene extends Phaser.Scene {
   private world!: ParallaxWorld;
   private fx!: WeatherFX;
   private aircraft!: AircraftSprite;
+  /** Framing that makes the physics visible — see CameraRig. */
+  private rig!: CameraRig;
   private crash!: CrashSequence;
   private crashing = false;
   private engineRunning = true;
@@ -234,6 +237,7 @@ export class FlightScene extends Phaser.Scene {
     const faction = window.gameData.factions.find(f => f.id === destSettlement?.factionId);
     if (faction) this.world.setFactionColor(parseInt(faction.color.replace('#', ''), 16));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
+    this.rig = new CameraRig(this.cameras.main, this.controller.vStall, this.controller.vMax);
     this.crash    = new CrashSequence(this, this.aircraft, groundY);
     this.fx       = new WeatherFX(this, width, height);
 
@@ -304,6 +308,7 @@ export class FlightScene extends Phaser.Scene {
       }),
     ];
     this.events.once('shutdown', () => {
+      this.rig?.reset();
       this.eventUnsubs.forEach(u => u());
       this.eventUnsubs = [];
       SoundEngine.stopFlightLoop();
@@ -606,7 +611,14 @@ export class FlightScene extends Phaser.Scene {
     this.aircraft.setTurbulence(turbulence);
     this.aircraft.setElevator((input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0));
     this.aircraft.setIceLoad(this.iceLoad);
-    this.aircraft.container.setY(this.world.altitudeToScreenY(this.state.altitude));
+    // The rig offsets the airframe INSIDE its zone in response to g-load,
+    // pitch rate and flight path, so a manoeuvre is something you can see
+    // rather than a number that changed. It never slides with airspeed.
+    this.rig.update(sdt, this.state, turbulence, this.state.altitude <= 0.5);
+    this.aircraft.container.setX(AIRCRAFT_X + this.rig.offsetX);
+    this.aircraft.container.setY(
+      this.world.altitudeToScreenY(this.state.altitude) + this.rig.offsetY,
+    );
     this.aircraft.update(sdt, this.state);
 
     // ── Camera shake (stall buffet) ────────────────────────────────────────
