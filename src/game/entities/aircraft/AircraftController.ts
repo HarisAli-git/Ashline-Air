@@ -104,6 +104,24 @@ export const TUNING = {
    * the throttle goes back in (measured: ~4 s of full power to fly again).
    */
   stabIdle: 0.10,
+  /**
+   * Power is what keeps a propeller aeroplane civilised.
+   *
+   * Most of the elevator's authority on a single is propwash over the tail,
+   * and the thrust line does not pass through the centre of gravity — so
+   * pulling the power off pitches the nose DOWN and takes the trim with it.
+   * Modelling that is the difference between "throttle back and settle into a
+   * tidy glide" and "throttle back and have a problem".
+   *
+   * Authority is zero at or below `powerAuthorityLow`, full at
+   * `powerAuthorityHigh`, and squared in between so it collapses fast. The
+   * high end is deliberately at half throttle: an approach is flown at 45–55%
+   * and has to stay flyable.
+   */
+  powerAuthorityLow: 0.15,
+  powerAuthorityHigh: 0.52,
+  /** Nose-down pitching moment at zero power, deg/s². */
+  powerPitchDown: 34,
   pitchDamping: 2.8,        // pitch-rate damping
   stallPitchDamp: 3.0,      // extra damping in the stall — stops porpoising
   stallNoseDown: 54,        // deg/s² nose-down once fully stalled
@@ -385,6 +403,17 @@ export class AircraftController {
     const stabilityMoment = onGround
       ? -s.pitch * TUNING.pitchStability * qNorm          // hold the runway attitude
       : -alphaErrDeg * TUNING.pitchStability * stabPower * qNorm;
+    // Stability fades with power, and it fades FAST. Scaled linearly with the
+    // lever, a third of throttle still left the aeroplane 37% stabilised —
+    // measured as a trimmed, perfectly controllable 104 km/h glide, which is
+    // the opposite of losing an engine. Squared between 15% and 52% it is all
+    // but gone by a third power, while an approach at half throttle keeps it.
+    const powerAuthority = clamp(
+      (effThrottle - TUNING.powerAuthorityLow)
+        / (TUNING.powerAuthorityHigh - TUNING.powerAuthorityLow), 0, 1,
+    ) ** 2;
+    const stabPower = TUNING.stabIdle + (1 - TUNING.stabIdle) * powerAuthority;
+    const stabilityMoment = (pitchTrimDeg - s.pitch) * TUNING.pitchStability * stabPower * qNorm;
 
     s.pitchRate += (controlMoment + stabilityMoment) * dt;
     // Extra damping while stalled: without it the aircraft porpoises between
@@ -396,6 +425,11 @@ export class AircraftController {
       s.pitchRate -= TUNING.stallNoseDown * stallT * dt;
       this.onBuffet?.(stallT);
     }
+
+    // Losing power drops the nose. Propwash off the tail and a thrust line
+    // above the centre of gravity both push this way, and it is what turns a
+    // throttle chop into a dive instead of a glide.
+    s.pitchRate -= TUNING.powerPitchDown * (1 - powerAuthority) * dt;
 
     // Below flying speed it wallows: the elevator has almost no dynamic
     // pressure to work with and the nose wanders on its own. You are a

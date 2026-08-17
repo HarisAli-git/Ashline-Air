@@ -1,6 +1,8 @@
 import Phaser from 'phaser';
 import type { FlightState, AircraftDefinition } from '../../../types';
-import { specFor, flapHinge, type AircraftVisualSpec } from './render/AircraftVisualSpec';
+import {
+  specFor, flapHinge, stabRoot, STAB_FIXED_FRAC, type AircraftVisualSpec,
+} from './render/AircraftVisualSpec';
 import { ensureAircraftTextures, SS, type AircraftTexKeys } from './render/AircraftPainter';
 import { AircraftParticles } from './render/AircraftParticles';
 
@@ -58,6 +60,8 @@ export class AircraftSprite {
 
   private readonly props: PropAssembly[] = [];
   private readonly legs: GearLeg[] = [];
+  /** Extra bogie wheels — spun in step with their leg's lead wheel. */
+  private readonly extraWheels: Phaser.GameObjects.Image[] = [];
   private readonly flapImg: Phaser.GameObjects.Image;
   /** Hinged elevator — the one control surface that reads in a side view. */
   private readonly elevatorImg: Phaser.GameObjects.Image;
@@ -144,7 +148,8 @@ export class AircraftSprite {
 
     // Elevator hinges at the back of the fixed stabiliser. Added before the
     // hull so it tucks behind the fuselage exactly as the stabiliser does.
-    this.elevatorImg = scene.add.image(-spec.length * 0.43, -spec.height * 0.20, this.tex.elevator)
+    const sr = stabRoot(spec);
+    this.elevatorImg = scene.add.image(sr.x - spec.tail.stabLen * STAB_FIXED_FRAC, sr.y + spec.height * 0.01, this.tex.elevator)
       .setScale(1 / SS)
       .setOrigin(1, 0.5);
     this.body.add(this.elevatorImg);
@@ -224,13 +229,43 @@ export class AircraftSprite {
     const g = this.spec.gear;
     const bellyY = this.spec.height / 2;
 
-    const makeLeg = (hx: number, stowedRad: number, scale = 1, hingeY = g.hingeY): GearLeg => {
+    /**
+     * One leg. `wheels` > 1 puts them in tandem on a bogie beam, which is what
+     * a transport actually stands on — a heavy freighter balanced on a single
+     * wheel per side is the detail that makes it read as a toy.
+     */
+    const makeLeg = (
+      hx: number, stowedRad: number, scale = 1, hingeY = g.hingeY,
+      wheels = 1, wheelScale = 1,
+    ): GearLeg => {
       const root = this.scene.add.container(hx, hingeY);
       root.setScale(scale);
       const strut = this.scene.add.image(0, 0, this.tex.gearStrut).setScale(1 / SS).setOrigin(0.5, 0.06);
-      const wheel = this.scene.add.image(0, g.strutLen, this.tex.wheel).setScale(1 / SS);
       root.add(strut);
-      root.add(wheel);
+
+      const r = g.wheelR * wheelScale;
+      let wheel: Phaser.GameObjects.Image;
+      if (wheels <= 1) {
+        wheel = this.scene.add.image(0, g.strutLen, this.tex.wheel).setScale((1 / SS) * wheelScale);
+        root.add(wheel);
+      } else {
+        // Bogie beam plus a wheel at each station along it
+        const pitch = r * 1.95;
+        const span = pitch * (wheels - 1);
+        const beam = this.scene.add.rectangle(0, g.strutLen - r * 0.55, span + r * 1.1, r * 0.5, 0x2a2620);
+        root.add(beam);
+        const made: Phaser.GameObjects.Image[] = [];
+        for (let i = 0; i < wheels; i++) {
+          const w = this.scene.add
+            .image(-span / 2 + i * pitch, g.strutLen, this.tex.wheel)
+            .setScale((1 / SS) * wheelScale);
+          root.add(w);
+          made.push(w);
+        }
+        // The first is the one the spin animation drives; the rest follow it
+        wheel = made[0];
+        this.extraWheels.push(...made.slice(1));
+      }
       this.body.add(root);
 
       let door: Phaser.GameObjects.Image | null = null;
@@ -243,8 +278,12 @@ export class AircraftSprite {
       return { root, wheel, stowedRad, door };
     };
 
-    this.legs.push(makeLeg(g.mainX, MAIN_STOWED_RAD));
-    if (g.noseX !== null) this.legs.push(makeLeg(g.noseX, NOSE_STOWED_RAD));
+    this.legs.push(makeLeg(g.mainX, MAIN_STOWED_RAD, 1, g.hingeY, g.mainWheels ?? 1));
+    if (g.noseX !== null) {
+      // Nose legs are lighter and shorter-travel; heavies carry a pair.
+      const nr = (g.noseWheelR ?? g.wheelR) / g.wheelR;
+      this.legs.push(makeLeg(g.noseX, NOSE_STOWED_RAD, 1, g.hingeY, g.noseWheels ?? 1, nr));
+    }
     if (g.tailWheelX !== null) {
       // Taildragger tail wheel — the aircraft rests nose-high on it.
       //
@@ -332,11 +371,14 @@ export class AircraftSprite {
     g.lineStyle(thick, 0xdff0ff, 0.55 * a);
     const w = s.wing;
     g.lineBetween(w.rootX + w.chord * 0.5, w.y - 1, w.rootX - w.chord * 0.5, w.y - 1);
-    // Tailplane and fin, measured back from the tail cone
-    const tailX = -s.length * 0.42;
+    // Tailplane and fin. The tailplane comes from stabRoot, the same point the
+    // painter and the hinged elevator use — measuring back from the tail cone
+    // instead put the rime in mid-air beside a T-tail.
+    const sr = stabRoot(s);
     g.lineStyle(thick * 0.8, 0xdff0ff, 0.45 * a);
-    g.lineBetween(tailX + s.tail.stabLen * 0.4, 0, tailX - s.tail.stabLen * 0.6, 0);
-    g.lineBetween(tailX, -2, tailX - s.tail.finSweep, -s.tail.finHeight * 0.85);
+    g.lineBetween(sr.x, sr.y, sr.x - s.tail.stabLen, sr.y - s.height * 0.03);
+    g.lineBetween(-s.length * 0.33, -s.height * 0.42,
+      -s.length / 2 + s.tail.finSweep, -s.height / 2 - s.tail.finHeight);
 
     // Lumpy accretion — rime is not a smooth coat
     g.fillStyle(0xeaf6ff, 0.5 * a);
@@ -409,6 +451,7 @@ export class AircraftSprite {
     this.updatePropeller(dt, state.throttle);
     this.updateGear(dt, state);
     this.updateFlaps(dt, state.flapsDeployed);
+    for (const w of this.extraWheels) w.rotation = this.wheelSpin;
     this.updateDamage(dt, state.integrity);
 
     // Elevator: a control surface has inertia and a hinge, so it eases toward
