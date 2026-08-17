@@ -23,7 +23,11 @@ import { isTouchDevice } from '../utils/device';
 interface Beat {
   /** Seconds this beat runs before auto-advancing. */
   hold: number;
+  /** Chapter mark. "1 / 4" told the reader nothing they needed. */
+  title: string;
   lines: string[];
+  /** Where the fire is, 0–1 across the frame. Drives every light cue. */
+  fire: number;
   draw: (g: Phaser.GameObjects.Graphics, t: number, k: number) => void;
 }
 
@@ -44,6 +48,7 @@ function rnd(i: number): number {
 
 export class IntroScene extends Phaser.Scene {
   private gfx!: Phaser.GameObjects.Graphics;
+  private tableau!: Phaser.GameObjects.Container;
   private titleText!: Phaser.GameObjects.Text;
   private bodyText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
@@ -72,6 +77,14 @@ export class IntroScene extends Phaser.Scene {
     SoundEngine.startAmbient();
 
     this.gfx = this.add.graphics();
+    // The tableau lives in its own container so the beat can PUSH IN on it
+    // without dragging the letterbox and the narration along with it. A static
+    // frame is most of why the sequence felt like slides rather than film.
+    this.tableau = this.add.container(0, 0, [this.gfx]);
+    const maskG = this.make.graphics({}, false);
+    maskG.fillStyle(0xffffff, 1);
+    maskG.fillRect(0, 0, width, height * TEXT_BAND);
+    this.tableau.setMask(maskG.createGeometryMask());
     this.beats = this.buildBeats(width, height);
 
     // Letterbox: the art lives above this line, the narration below it, so a
@@ -112,7 +125,7 @@ export class IntroScene extends Phaser.Scene {
   private showBeat(): void {
     const beat = this.beats[this.index];
     this.t = 0;
-    this.titleText.setText(`${this.index + 1} / ${this.beats.length}`).setAlpha(0);
+    this.titleText.setText(`${'I'.repeat(this.index + 1)}   ${beat.title}`).setAlpha(0);
     this.bodyText.setText(beat.lines.join('\n')).setAlpha(0);
     this.tweens.add({ targets: [this.titleText], alpha: 0.7, duration: 500, delay: 250 });
     this.tweens.add({ targets: [this.bodyText], alpha: 1, duration: 700, delay: 350 });
@@ -147,61 +160,135 @@ export class IntroScene extends Phaser.Scene {
     const k = Phaser.Math.Clamp(this.t / beat.hold, 0, 1);
 
     this.gfx.clear();
+    this.setFire(beat.fire);
     beat.draw(this.gfx, this.total, k);
+    // Drawn over the tableau, inside the same push, so the ash has depth too
+    this.foregroundFx(this.gfx);
+    this.airborneFx(this.gfx, this.total);
+
+    // Slow push-in, easing out, re-anchored on the fire so the shot drifts
+    // toward what it is about.
+    const push = 1 + 0.075 * (1 - Math.pow(1 - k, 2));
+    const { width: W, height: H } = this.cameras.main;
+    const fx = W * beat.fire, fy = H * TEXT_BAND * 0.62;
+    this.tableau.setScale(push);
+    this.tableau.setPosition(fx - fx * push, fy - fy * push);
 
     if (this.t > beat.hold + 2.4 && !this.advancing) this.next();
   }
 
   // ── The beats ─────────────────────────────────────────────────────────────
 
+  /** Set per beat; the shared helpers all read it. */
+  private setFire!: (x01: number) => void;
+  private airborneFx!: (g: Phaser.GameObjects.Graphics, t: number) => void;
+  private foregroundFx!: (g: Phaser.GameObjects.Graphics) => void;
+
   private buildBeats(width: number, height: number): Beat[] {
     const horizon = height * 0.44;
     /** Bottom of the drawable tableau — nothing may cross into the text band. */
     const floor = height * TEXT_BAND;
 
-    /** Dead city skyline — the same broken towers the flight scene draws. */
+    /**
+     * Where the light is coming from, per beat. Everything below reads from
+     * this: the sky bloom, the haze on the horizon, which side of a figure is
+     * rim-lit, and which way the shadows fall. A tableau with no light source
+     * is why the whole sequence read as flat colour bands.
+     */
+    let fireX = width * 0.72;
+    this.setFire = (x01: number): void => { fireX = width * x01; };
+
+    /**
+     * Dead city skyline, in THREE layers with atmospheric perspective.
+     *
+     * One layer at one alpha is a cardboard cut-out. Real distance desaturates
+     * and lifts toward the sky colour, so the far towers are pale and hazy and
+     * only the nearest are properly black — that difference IS the depth.
+     */
     const skyline = (g: Phaser.GameObjects.Graphics, t: number, alpha: number, drift: number): void => {
-      for (let i = 0; i < 22; i++) {
-        const bx = ((i * 74 + rnd(i) * 30 - drift) % (width + 160)) - 80;
-        const bw = 30 + rnd(i + 3) * 34;
-        const bh = 60 + rnd(i + 7) * 150;
-        g.fillStyle(0x0b0a0e, alpha);
-        g.beginPath();
-        g.moveTo(bx, horizon);
-        g.lineTo(bx, horizon - bh + rnd(i + 11) * 14);
-        g.lineTo(bx + bw * 0.4, horizon - bh);
-        g.lineTo(bx + bw, horizon - bh + rnd(i + 13) * 12);
-        g.lineTo(bx + bw, horizon);
-        g.closePath();
-        g.fillPath();
-        // A few windows still lit, fewer as the beats go on
-        if (rnd(i + 21) < 0.5) {
-          g.fillStyle(0xd8a044, alpha * 0.5 * (0.4 + 0.6 * Math.abs(Math.sin(t * 0.4 + i))));
-          g.fillRect(bx + 6 + rnd(i) * 10, horizon - bh + 22 + rnd(i + 2) * 40, 3.5, 5);
+      const layers = [
+        { z: 0.30, tint: 0x3b2b2c, a: 0.55, scale: 0.55, count: 26, par: 0.35 },
+        { z: 0.62, tint: 0x1d1519, a: 0.80, scale: 0.78, count: 22, par: 0.65 },
+        { z: 1.00, tint: 0x0b0a0e, a: 1.00, scale: 1.00, count: 18, par: 1.00 },
+      ];
+      for (const L of layers) {
+        for (let i = 0; i < L.count; i++) {
+          const seed = i + L.count;
+          const bx = ((i * 74 + rnd(seed) * 30 - drift * L.par) % (width + 160)) - 80;
+          const bw = (30 + rnd(seed + 3) * 34) * L.scale;
+          const bh = (60 + rnd(seed + 7) * 150) * L.scale;
+          g.fillStyle(L.tint, alpha * L.a);
+          g.beginPath();
+          g.moveTo(bx, horizon);
+          g.lineTo(bx, horizon - bh + rnd(seed + 11) * 14);
+          g.lineTo(bx + bw * 0.4, horizon - bh);
+          g.lineTo(bx + bw, horizon - bh + rnd(seed + 13) * 12);
+          g.lineTo(bx + bw, horizon);
+          g.closePath();
+          g.fillPath();
+          // The edge facing the fire catches it — this is what separates one
+          // tower from the one behind it without drawing an outline.
+          if (L.z > 0.5) {
+            const facing = bx + bw / 2 < fireX ? bx + bw : bx;
+            g.lineStyle(1.4, 0xc07038, alpha * L.a * 0.30);
+            g.lineBetween(facing, horizon - bh + 8, facing, horizon);
+          }
+          if (L.z > 0.5 && rnd(seed + 21) < 0.42) {
+            g.fillStyle(0xd8a044, alpha * L.a * 0.55 * (0.4 + 0.6 * Math.abs(Math.sin(t * 0.4 + i))));
+            g.fillRect(bx + 6 + rnd(seed) * 10, horizon - bh + 22 + rnd(seed + 2) * 40, 3.5, 5);
+          }
         }
+        // Haze sits BETWEEN the layers, not over the lot — that is the trick
+        g.fillStyle(0x6a3a24, 0.10);
+        g.fillRect(0, horizon - 150 * L.scale, width, 150 * L.scale);
       }
     };
 
-    // Dusty ground catching the light off the sky. It has to be clearly
-    // LIGHTER than the figures standing on it or the crowd disappears.
+    /**
+     * Ground lit from the horizon fire: a warm pool spreading from the light,
+     * falling off to cold shadow at the near edge, with long shadows thrown
+     * toward the camera. Three flat bands is what made this read as lino.
+     */
     const ground = (g: Phaser.GameObjects.Graphics): void => {
-      g.fillStyle(0x584734, 1);
-      g.fillRect(0, horizon, width, floor - horizon);
-      g.fillStyle(0x463829, 1);
-      g.fillRect(0, horizon + 54, width, floor - horizon - 54);
-      g.fillStyle(0x35291d, 1);
-      g.fillRect(0, horizon + 120, width, Math.max(0, floor - horizon - 120));
+      const depth = floor - horizon;
+      const BANDS = 22;
+      for (let i = 0; i < BANDS; i++) {
+        const t0 = i / BANDS;
+        const y = horizon + depth * t0;
+        // Warm and bright at the horizon, cold and dark toward the viewer.
+        // NOTE: `new Phaser.Display.Color(hex)` takes (r, g, b) — handing it a
+        // packed 0xRRGGBB sets red to a clamped 255 and paints the ground
+        // scarlet. IntegerToColor is the one that unpacks.
+        const c = Phaser.Display.Color.Interpolate.ColorWithColor(
+          Phaser.Display.Color.IntegerToColor(0x7a5f3a),
+          Phaser.Display.Color.IntegerToColor(0x241b13),
+          100, Math.round(Math.pow(t0, 0.72) * 100),
+        );
+        g.fillStyle(Phaser.Display.Color.GetColor(c.r, c.g, c.b), 1);
+        g.fillRect(0, y, width, depth / BANDS + 1);
+      }
+      // The fire's pool on the dirt, brightest directly below it
+      for (let i = 10; i >= 1; i--) {
+        g.fillStyle(0xd08040, 0.030);
+        g.fillEllipse(fireX, horizon + depth * 0.10, width * 0.95 * (i / 10), depth * 0.85 * (i / 10));
+      }
       // Hot haze right along the horizon, so silhouettes read against it
-      g.fillStyle(0xc08040, 0.22);
-      g.fillRect(0, horizon - 16, width, 26);
-      g.lineStyle(1.5, 0x6e5a3c, 1);
+      g.fillStyle(0xe09048, 0.26);
+      g.fillRect(0, horizon - 18, width, 30);
+      g.lineStyle(1.5, 0x8a6a44, 1);
       g.lineBetween(0, horizon, width, horizon);
     };
 
-    /** Low red sky with drifting smoke. */
+    /** Low sky with a real bloom where the world is burning. */
     const sky = (g: Phaser.GameObjects.Graphics, t: number, top: number, bot: number): void => {
       g.fillGradientStyle(top, top, bot, bot, 1);
       g.fillRect(0, 0, width, horizon + 2);
+      // Bloom over the fire — a genuine gradient, built from stacked ellipses
+      for (let i = 14; i >= 1; i--) {
+        const f = i / 14;
+        g.fillStyle(0xc85a20, 0.028 * (1 - f) + 0.006);
+        g.fillEllipse(fireX, horizon + 10, width * 1.15 * f, height * 0.60 * f);
+      }
       for (let i = 0; i < 7; i++) {
         const sx = ((i * 220 + t * (7 + i * 3)) % (width + 400)) - 200;
         g.fillStyle(0x120e0c, 0.20);
@@ -209,10 +296,51 @@ export class IntroScene extends Phaser.Scene {
       }
     };
 
+    /**
+     * Ash on the wind and embers off the fires, drawn over everything.
+     * Nothing sells "the air itself is wrong" like particulate.
+     */
+    const airborne = (g: Phaser.GameObjects.Graphics, t: number): void => {
+      for (let i = 0; i < 90; i++) {
+        const sp = 6 + rnd(i) * 26;
+        const x = ((rnd(i + 5) * width + t * sp) % (width + 60)) - 30;
+        const y = ((rnd(i + 9) * floor + t * (3 + rnd(i) * 7)) % floor);
+        const r = 0.6 + rnd(i + 2) * 1.5;
+        g.fillStyle(0x9a8a78, 0.10 + rnd(i + 3) * 0.16);
+        g.fillCircle(x, y, r);
+      }
+      // Embers rise, and only near the fire
+      for (let i = 0; i < 26; i++) {
+        const life = (t * (0.16 + rnd(i) * 0.2) + rnd(i + 7)) % 1;
+        const x = fireX + (rnd(i + 1) - 0.5) * width * 0.45 + Math.sin(t * 1.4 + i) * 14;
+        const y = horizon + 14 - life * (horizon * 0.85);
+        g.fillStyle(0xff9a3c, (1 - life) * 0.55);
+        g.fillCircle(x, y, 0.8 + (1 - life) * 1.5);
+      }
+    };
+
+    /** Near-field frame: out-of-focus rubble across the bottom of the shot. */
+    const foreground = (g: Phaser.GameObjects.Graphics): void => {
+      g.fillStyle(0x0a0807, 1);
+      g.beginPath();
+      g.moveTo(0, floor + 2);
+      for (let x = 0; x <= width; x += 26) {
+        g.lineTo(x, floor - 10 - Math.abs(Math.sin(x * 0.013 + 1.7)) * 26 - rnd(x) * 8);
+      }
+      g.lineTo(width, floor + 2);
+      g.closePath();
+      g.fillPath();
+    };
+
+    this.airborneFx = airborne;
+    this.foregroundFx = foreground;
+
     return [
       // ── 1. The dead ──────────────────────────────────────────────────────
       {
         hold: 7,
+        title: 'THE SEASON',
+        fire: 0.74,
         lines: [
           'The dead came first.',
           'Not as an army. As a season — one that never ended.',
@@ -241,6 +369,8 @@ export class IntroScene extends Phaser.Scene {
       // ── 2. The fracture ──────────────────────────────────────────────────
       {
         hold: 8,
+        title: 'THE FRACTURE',
+        fire: 0.3,
         lines: [
           'What was left of us did not band together.',
           'The convoys were the first thing worth taking — and the men with',
@@ -291,6 +421,8 @@ export class IntroScene extends Phaser.Scene {
       // ── 3. The warlords ──────────────────────────────────────────────────
       {
         hold: 8,
+        title: 'THE WARLORDS',
+        fire: 0.6,
         lines: [
           'They call themselves factions now. They hold ground, fly colours,',
           'and put anti-aircraft guns on the ridgelines, because the roads',
@@ -354,6 +486,8 @@ export class IntroScene extends Phaser.Scene {
       // ── 4. You ───────────────────────────────────────────────────────────
       {
         hold: 9,
+        title: 'THE LANE',
+        fire: 0.22,
         lines: [
           'So the cargo went up.',
           '',

@@ -117,6 +117,9 @@ export interface WorldFrame {
   altitude: number;     // metres
   windX: number;        // along-track wind, m/s (+ = tailwind)
   routeTotalKm: number; // contract distance; destination runway lives there
+  /** Usable runway at each end, in metres — from the settlements' profiles. */
+  originRunwayM?: number;
+  destRunwayM?: number;
   condition: WeatherCondition;
   minutesOfDay: number; // world-clock minutes 0–1439, drives the day/night cycle
   visibility: number;   // 0–1 from weather, dims the sun/moon
@@ -1012,8 +1015,9 @@ export class ParallaxWorld {
     {
       const PXM2 = WORLD_PX_PER_M;
       const dPx = Math.max(2000 * PXM2, f.routeTotalKm * 1000 * PXM2);
-      const zoneA: [number, number] = [-50 * PXM2 - 900, 130 * PXM2 + 900];
-      const zoneB: [number, number] = [dPx - 90 * PXM2 - 900, dPx + 90 * PXM2 + 900];
+      const oL = (f.originRunwayM ?? 600) * PXM2, dL = (f.destRunwayM ?? 600) * PXM2;
+      const zoneA: [number, number] = [-oL * 0.28 - 900, oL * 0.72 + 900];
+      const zoneB: [number, number] = [dPx - dL * 0.5 - 900, dPx + dL * 0.5 + 900];
       const cellW = 760;
       const first = Math.floor((scrollX - 100) / cellW);
       for (let c = first; c <= first + Math.ceil(this.width / cellW) + 1; c++) {
@@ -1039,9 +1043,13 @@ export class ParallaxWorld {
     // settlements beyond.
     const PXM = WORLD_PX_PER_M;
     const destPx = Math.max(2000 * PXM, f.routeTotalKm * 1000 * PXM);
-    // Short bush strips — a runway should read as a strip, not a motorway
-    const oriFrom = -50 * PXM, oriTo = 130 * PXM;
-    const dstFrom = destPx - 90 * PXM, dstTo = destPx + 90 * PXM;
+    // Each field is drawn at the length it actually has. A 430 m mountain
+    // shelf and an 1800 m freight apron are not the same problem, and drawing
+    // both as the same 180 m stub was why every landing felt identical.
+    const oriLen = (f.originRunwayM ?? 600) * PXM;
+    const dstLen = (f.destRunwayM ?? 600) * PXM;
+    const oriFrom = -oriLen * 0.28, oriTo = oriLen * 0.72;
+    const dstFrom = destPx - dstLen * 0.5, dstTo = destPx + dstLen * 0.5;
     this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f);
     this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f);
     // Origin airfield sits just behind the spawn point (aircraft spawns at

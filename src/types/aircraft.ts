@@ -20,7 +20,13 @@ export interface AircraftStats {
   fuelCapacity: number;      // litres
   fuelBurnRate: number;      // litres/minute at cruise
   engineReliability: number; // 0–1, probability of no failure per minute
-  landingDifficulty: number; // 1–10, affects required pilot skill
+  landingDifficulty: number;
+  /**
+   * Runway this aircraft needs, in metres. The gate on where it can operate —
+   * a STOL bush plane deliberately needs LESS than the crop duster, which is
+   * the whole reason to own one.
+   */
+  runwayM: number; // 1–10, affects required pilot skill
   repairCostPerUnit: number; // currency per % structural damage
 }
 

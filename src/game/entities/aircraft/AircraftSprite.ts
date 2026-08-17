@@ -236,7 +236,7 @@ export class AircraftSprite {
      */
     const makeLeg = (
       hx: number, stowedRad: number, scale = 1, hingeY = g.hingeY,
-      wheels = 1, wheelScale = 1,
+      wheels = 1, wheelScale = 1, dual = false,
     ): GearLeg => {
       const root = this.scene.add.container(hx, hingeY);
       root.setScale(scale);
@@ -245,11 +245,26 @@ export class AircraftSprite {
 
       const r = g.wheelR * wheelScale;
       let wheel: Phaser.GameObjects.Image;
+
+      // A side-by-side PAIR is one silhouette — you are looking straight down
+      // the axle. Drawing the pair fore-and-aft put a row of wheels along the
+      // belly of every transport in the fleet, which none of them have. The
+      // outboard tyre just sits a touch proud of the inboard one.
+      if (dual) {
+        const inner = this.scene.add
+          .image(0, g.strutLen, this.tex.wheel)
+          .setScale((1 / SS) * wheelScale * 0.96)
+          .setTint(0x8a8a8a);
+        inner.x = -r * 0.16;
+        root.add(inner);
+        this.extraWheels.push(inner);
+      }
+
       if (wheels <= 1) {
         wheel = this.scene.add.image(0, g.strutLen, this.tex.wheel).setScale((1 / SS) * wheelScale);
         root.add(wheel);
       } else {
-        // Bogie beam plus a wheel at each station along it
+        // A genuine TANDEM bogie: wheels one behind the other on a beam.
         const pitch = r * 1.95;
         const span = pitch * (wheels - 1);
         const beam = this.scene.add.rectangle(0, g.strutLen - r * 0.55, span + r * 1.1, r * 0.5, 0x2a2620);
@@ -278,11 +293,11 @@ export class AircraftSprite {
       return { root, wheel, stowedRad, door };
     };
 
-    this.legs.push(makeLeg(g.mainX, MAIN_STOWED_RAD, 1, g.hingeY, g.mainWheels ?? 1));
+    this.legs.push(makeLeg(g.mainX, MAIN_STOWED_RAD, 1, g.hingeY, g.mainWheels ?? 1, 1, g.mainDual ?? false));
     if (g.noseX !== null) {
       // Nose legs are lighter and shorter-travel; heavies carry a pair.
       const nr = (g.noseWheelR ?? g.wheelR) / g.wheelR;
-      this.legs.push(makeLeg(g.noseX, NOSE_STOWED_RAD, 1, g.hingeY, g.noseWheels ?? 1, nr));
+      this.legs.push(makeLeg(g.noseX, NOSE_STOWED_RAD, 1, g.hingeY, 1, nr, g.noseDual ?? false));
     }
     if (g.tailWheelX !== null) {
       // Taildragger tail wheel — the aircraft rests nose-high on it.

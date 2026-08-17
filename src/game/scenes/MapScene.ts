@@ -8,6 +8,7 @@ import { ensureSharedTextures } from '../entities/aircraft/render/AircraftPainte
 import { SoundEngine } from '../audio/SoundEngine';
 import { distance, pixelsToKm } from '../utils/math';
 import type { SettlementDefinition } from '../../types';
+import { canOperate, fieldSummary } from '../../services/AirfieldService';
 
 const KM_PER_PIXEL = 0.5;
 
@@ -105,68 +106,157 @@ export class MapScene extends Phaser.Scene {
 
   // ── Terrain & decoration ───────────────────────────────────────────────────
 
+  /**
+   * The chart as a physical object: a survey sheet lying on a hangar table
+   * under one lamp.
+   *
+   * It used to be a flat wash plus a grid plus a handful of chevrons at
+   * hardcoded coordinates — which, now that the canvas is device-shaped, also
+   * meant the "mountains" bunched into a corner on a wide screen and fell off
+   * the edge on a narrow one. Everything here is derived from width/height and
+   * from one seeded RNG, so the same chart is drawn at any size.
+   *
+   * The direction is a single warm light source. A lamp pool sits off-centre,
+   * everything falls into shadow toward the corners, and — the part that makes
+   * it read as PAPER rather than a dark rectangle — the grid, the ink and the
+   * grain all fade with distance from that lamp. Flat lighting is what made it
+   * look like a screen; one light makes it look like a thing on a table.
+   */
   private drawTerrain(width: number, height: number): void {
     const g = this.add.graphics();
+    const rnd = mulberry32(0x5eed); // one seed: the wasteland is always the same
 
-    // Aged-chart background wash
-    g.fillGradientStyle(0x14100a, 0x120e08, 0x0d0a05, 0x0f0c06, 1);
+    // The lamp: off-centre, high and left, the way a task lamp actually sits.
+    const lampX = width * 0.34, lampY = height * 0.30;
+    const lampR = Math.hypot(width, height) * 0.62;
+    /** 1 in the middle of the pool, 0 out in the corners. */
+    const lit = (x: number, y: number): number =>
+      Phaser.Math.Clamp(1 - Math.hypot(x - lampX, y - lampY) / lampR, 0, 1);
+
+    // ── Paper ────────────────────────────────────────────────────────────
+    g.fillStyle(0x151009, 1);
     g.fillRect(0, 0, width, height);
+    // Lamp pool, built from concentric ellipses so it is a real gradient
+    for (let i = 26; i >= 1; i--) {
+      const t = i / 26;
+      g.fillStyle(0x8a7038, 0.052 * (1 - t) + 0.005);
+      g.fillEllipse(lampX, lampY, lampR * 2.05 * t, lampR * 1.62 * t);
+    }
+    // A hot core right under the bulb, or the pool reads as a flat wash
+    for (let i = 8; i >= 1; i--) {
+      g.fillStyle(0xc9a45a, 0.020);
+      g.fillEllipse(lampX, lampY, lampR * 0.30 * (i / 8), lampR * 0.23 * (i / 8));
+    }
 
-    // Fine survey grid
-    g.lineStyle(1, 0x241c10, 0.5);
-    for (let x = 0; x < width; x += 50) g.lineBetween(x, 0, x, height);
-    for (let y = 0; y < height; y += 50) g.lineBetween(0, y, width, y);
+    // Paper grain — coarse in the light, lost in the shadow
+    for (let i = 0; i < 1500; i++) {
+      const x = rnd() * width, y = rnd() * height;
+      const l = lit(x, y);
+      if (l < 0.06) continue;
+      g.fillStyle(rnd() < 0.5 ? 0x6f5f3c : 0x0d0a05, 0.05 + l * 0.09);
+      g.fillRect(x, y, 1.3, 1.3);
+    }
 
-    // Mountain ridge chains (chevron clusters)
-    const ridges: Array<[number, number, number, number]> = [
-      [80, 120, 7, 0], [430, 90, 5, 0.3], [720, 140, 6, -0.2],
-      [150, 520, 5, 0.2], [560, 470, 4, -0.3], [880, 300, 6, 0.1],
-      [340, 260, 4, 0.15],
-    ];
-    g.lineStyle(1.5, 0x3a2d18, 0.8);
-    for (const [rx, ry, n, slope] of ridges) {
-      for (let i = 0; i < n; i++) {
-        const cx = rx + i * 26;
-        const cy = ry + i * slope * 26;
-        const h = 9 + ((i * 7) % 6);
-        g.lineBetween(cx - 9, cy, cx, cy - h);
-        g.lineBetween(cx, cy - h, cx + 9, cy);
+    // ── Fold creases: the signature. A crease is a dark valley with a lit
+    // ridge beside it, which is the whole reason it reads as folded paper.
+    const crease = (x1: number, y1: number, x2: number, y2: number): void => {
+      const steps = 34;
+      for (let i = 0; i < steps; i++) {
+        const t0 = i / steps, t1 = (i + 1) / steps;
+        const ax = x1 + (x2 - x1) * t0, ay = y1 + (y2 - y1) * t0;
+        const bx = x1 + (x2 - x1) * t1, by = y1 + (y2 - y1) * t1;
+        const l = lit((ax + bx) / 2, (ay + by) / 2);
+        g.lineStyle(2.2, 0x080603, 0.16 + l * 0.20);
+        g.lineBetween(ax, ay, bx, by);
+        g.lineStyle(1.1, 0xa08f63, 0.05 + l * 0.16);
+        g.lineBetween(ax + 1.6, ay + 1.2, bx + 1.6, by + 1.2);
+      }
+    };
+    crease(width * 0.335, 0, width * 0.352, height);
+    crease(width * 0.678, 0, width * 0.661, height);
+    crease(0, height * 0.507, width, height * 0.492);
+
+    // ── Survey grid, lit ─────────────────────────────────────────────────
+    const step = 54;
+    for (let x = step; x < width; x += step) {
+      for (let y = 0; y < height; y += 18) {
+        const l = lit(x, y + 9);
+        if (l < 0.04) continue;
+        g.lineStyle(1, 0x544323, 0.08 + l * 0.50);
+        g.lineBetween(x, y, x, y + 18);
+      }
+    }
+    for (let y = step; y < height; y += step) {
+      for (let x = 0; x < width; x += 18) {
+        const l = lit(x + 9, y);
+        if (l < 0.04) continue;
+        g.lineStyle(1, 0x544323, 0.08 + l * 0.50);
+        g.lineBetween(x, y, x + 18, y);
       }
     }
 
-    // Dry riverbed meandering across the chart
-    g.lineStyle(2, 0x2c2312, 0.9);
-    g.beginPath();
-    g.moveTo(-10, 430);
-    for (let x = 0; x <= width + 10; x += 24) {
-      g.lineTo(x, 430 + Math.sin(x * 0.011) * 46 + Math.sin(x * 0.031) * 14);
+    // ── Relief: inked hachures, the way a survey sheet shows high ground ──
+    const ranges = 7;
+    for (let r = 0; r < ranges; r++) {
+      const rx = width * (0.06 + rnd() * 0.88);
+      const ry = height * (0.10 + rnd() * 0.78);
+      const len = 5 + Math.floor(rnd() * 5);
+      const slope = (rnd() - 0.5) * 0.7;
+      const spacing = width * 0.026;
+      for (let i = 0; i < len; i++) {
+        const cx = rx + i * spacing;
+        const cy = ry + i * slope * spacing;
+        if (cx < 8 || cx > width - 8) continue;
+        const h = 8 + ((i * 7) % 7);
+        const l = lit(cx, cy);
+        // Peak chevron
+        g.lineStyle(1.7, 0x7a5f28, 0.34 + l * 0.66);
+        g.lineBetween(cx - 9, cy, cx, cy - h);
+        g.lineBetween(cx, cy - h, cx + 9, cy);
+        // Hachures down the shaded flank — this is what gives the range mass
+        g.lineStyle(1, 0x4a3a18, 0.20 + l * 0.46);
+        for (let k = 1; k < 5; k++) {
+          const hx = cx + k * 2.1;
+          g.lineBetween(hx, cy - h + k * (h / 5), hx + 3.4, cy + 1);
+        }
+      }
     }
-    g.strokePath();
-    g.lineStyle(1, 0x2c2312, 0.5);
-    g.beginPath();
-    g.moveTo(-10, 438);
-    for (let x = 0; x <= width + 10; x += 24) {
-      g.lineTo(x, 438 + Math.sin(x * 0.011) * 46 + Math.sin(x * 0.031) * 14);
-    }
-    g.strokePath();
 
-    // Salt flat + dune stipples
-    g.fillStyle(0x261e10, 0.55);
-    g.fillEllipse(640, 560, 260, 70);
-    g.fillStyle(0x33270f, 0.5);
-    for (let i = 0; i < 260; i++) {
-      const sx = (Math.sin(i * 12.9898) * 43758.5453) % 1;
-      const sy = (Math.sin(i * 78.233) * 12543.123) % 1;
-      g.fillRect(Math.abs(sx) * width, 40 + Math.abs(sy) * (height - 80), 1.5, 1.5);
+    // ── Dry riverbed, drawn across whatever width the chart happens to be ──
+    const riverY = height * 0.70;
+    const amp = height * 0.075;
+    for (const [off, w, a] of [[0, 2, 0.85], [7, 1, 0.45]] as const) {
+      g.beginPath();
+      g.moveTo(-10, riverY + off);
+      for (let x = -10; x <= width + 10; x += 22) {
+        const y = riverY + off + Math.sin(x * 0.011) * amp + Math.sin(x * 0.031) * amp * 0.3;
+        g.lineTo(x, y);
+      }
+      g.lineStyle(w, 0x33280f, a * (0.4 + lit(width / 2, riverY) * 0.6));
+      g.strokePath();
     }
 
-    // Hazard hatching in the far corner (irradiated zone flavour)
-    g.lineStyle(1, 0x4a2a10, 0.5);
-    for (let i = 0; i < 14; i++) {
-      g.lineBetween(width - 190 + i * 14, 40, width - 60 + i * 14, 170);
+    // Salt flat
+    g.fillStyle(0x2b2212, 0.45);
+    g.fillEllipse(width * 0.63, height * 0.88, width * 0.26, height * 0.11);
+
+    // ── Irradiated zone: hatched and ringed, pinned to the top-right ──────
+    const zx = width - Math.min(140, width * 0.13), zy = height * 0.17;
+    const zr = Math.min(56, height * 0.11);
+    g.lineStyle(1, 0x6a3a14, 0.42);
+    for (let i = -6; i <= 6; i++) {
+      const o = i * 13;
+      g.lineBetween(zx - zr + o, zy - zr, zx + zr + o, zy + zr);
     }
-    g.lineStyle(1, 0x5a3a18, 0.7);
-    g.strokeCircle(width - 90, 105, 52);
+    g.lineStyle(1.4, 0x7a4a1c, 0.7);
+    g.strokeCircle(zx, zy, zr);
+
+    // ── Edges: the lamp cannot reach the corners ─────────────────────────
+    for (let i = 0; i < 40; i++) {
+      const t = i / 40;
+      g.lineStyle(3, 0x000000, 0.055 * (1 - t));
+      g.strokeRect(t * 26, t * 26, width - t * 52, height - t * 52);
+    }
   }
 
   private drawTerritories(settlements: SettlementDefinition[], unlocked: string[]): void {
@@ -309,7 +399,18 @@ export class MapScene extends Phaser.Scene {
       fontFamily: 'monospace',
     }).setOrigin(0.5, 0);
 
-    container.add([dot, label]);
+    // The runway is the thing that decides whether you can go, so it belongs
+    // on the chart next to the name — not buried in a refusal message.
+    const active = SaveService.getActiveAircraft().def;
+    const verdict = canOperate(active, settlement);
+    const strip = this.add.text(0, (isHere ? 38 : 22) + 14,
+      `▭ ${settlement.field.runwayM} m${verdict.ok ? '' : '  ✕'}`, {
+      fontSize: '9px',
+      color: !unlocked ? '#3a3428' : verdict.ok ? '#7a6a48' : '#b05a3a',
+      fontFamily: 'monospace',
+    }).setOrigin(0.5, 0);
+
+    container.add([dot, label, strip]);
 
     if (!unlocked) {
       const lock = this.add.text(0, -24, 'LOCKED', {
@@ -485,6 +586,8 @@ export class MapScene extends Phaser.Scene {
       `${faction?.name ?? 'Unknown'} · rep ${rep}`,
       `Population: ${settlement.population.toLocaleString()}`,
       `Security: ${settlement.securityLevel}/10`,
+      `Field: ${fieldSummary(settlement)}`,
+      settlement.field.note,
       `Contracts: ${contracts}`,
       ProgressionService.canDepartFrom(settlement.id)
         ? '▸ YOUR AIRCRAFT IS HERE'
@@ -516,4 +619,15 @@ export class MapScene extends Phaser.Scene {
     this.tooltip?.destroy();
     this.tooltip = null;
   }
+}
+
+/** Deterministic RNG: the wasteland is drawn the same way every time. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }

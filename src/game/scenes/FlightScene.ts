@@ -57,6 +57,9 @@ export class FlightScene extends Phaser.Scene {
   private contractId!: string;
   private routeKm = 6;          // gameplay-scale route length to the destination
   private destinationName = 'destination';
+  /** Usable runway at each end, metres — from the settlements' field profiles. */
+  private originRunwayM = 600;
+  private destRunwayM = 600;
   private originBiome = biomeFor(undefined);
   private destBiome = biomeFor(undefined);
   private cargo!: CargoHold;
@@ -213,6 +216,8 @@ export class FlightScene extends Phaser.Scene {
         );
         this.routeKm = clamp(1.8 + loreKm / 110, 1.8, 5);
         destinationName = dest.name;
+        this.originRunwayM = origin.field?.runwayM ?? 600;
+        this.destRunwayM = dest.field?.runwayM ?? 600;
       }
     }
     this.destinationName = destinationName;
@@ -321,7 +326,9 @@ export class FlightScene extends Phaser.Scene {
     // ── First draw ────────────────────────────────────────────────────────
     this.world.update(0, {
       scrollX: 0, altitude: 0, windX: 0,
-      routeTotalKm: this.routeKm, condition: this.weather.current.condition,
+      routeTotalKm: this.routeKm,
+      originRunwayM: this.originRunwayM,
+      destRunwayM: this.destRunwayM, condition: this.weather.current.condition,
       minutesOfDay: this.baseTimestamp % 1440,
       visibility: this.weather.current.visibility,
       progress: 0,
@@ -596,6 +603,8 @@ export class FlightScene extends Phaser.Scene {
       altitude: this.state.altitude,
       windX,
       routeTotalKm: this.routeKm,
+      originRunwayM: this.originRunwayM,
+      destRunwayM: this.destRunwayM,
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
@@ -666,6 +675,8 @@ export class FlightScene extends Phaser.Scene {
       altitude: 0,
       windX: 0,
       routeTotalKm: this.routeKm,
+      originRunwayM: this.originRunwayM,
+      destRunwayM: this.destRunwayM,
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
@@ -682,8 +693,11 @@ export class FlightScene extends Phaser.Scene {
   private isOnRunway(worldX: number): boolean {
     const PXM = WORLD_PX_PER_M;
     const destPx = Math.max(2000 * PXM, this.routeKm * 1000 * PXM);
-    const onOrigin = worldX > -50 * PXM && worldX < 130 * PXM;
-    const onDest   = worldX > destPx - 90 * PXM && worldX < destPx + 90 * PXM;
+    // Same lengths the world draws — the strip you can see IS the strip you
+    // have to stop on.
+    const oL = this.originRunwayM * PXM, dL = this.destRunwayM * PXM;
+    const onOrigin = worldX > -oL * 0.28 && worldX < oL * 0.72;
+    const onDest   = worldX > destPx - dL * 0.5 && worldX < destPx + dL * 0.5;
     return onOrigin || onDest;
   }
 
