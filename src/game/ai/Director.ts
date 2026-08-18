@@ -95,10 +95,16 @@ export class Director {
   /** Fires once when the arc drops into respite, so a scene can say so. */
   onRespite: (() => void) | null = null;
 
-  reset(): void {
+  /**
+   * @param competence where to start the skill read, 0.1-1. The PilotModel
+   *   passes what it has learned across previous flights, so a veteran does
+   *   not spend the first ten minutes of every crossing re-proving themselves.
+   *   Defaults to average for an unknown pilot.
+   */
+  reset(competence = 0.5): void {
     this._pressure = 0.35;
     this._intensity = 0;
-    this._competence = 0.5;
+    this._competence = Phaser.Math.Clamp(competence, 0.1, 1);
     this.phase = 'build';
     this.phaseFor = 0;
   }

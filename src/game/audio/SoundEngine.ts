@@ -25,12 +25,46 @@ export interface FlightAudioState {
   dt: number;
 }
 
+/*
+ * Bus levels, in one place.
+ *
+ * These used to live as literals inside unlock() AND again inside applyDuck(),
+ * which is a duplication that silently undoes itself: ducking restored the
+ * engine to a hardcoded 0.50 regardless of what the bus was actually set to.
+ */
+const BUS_ENGINE = 0.85;
+const BUS_WORLD  = 1.00;
+const BUS_ALERT  = 1.35;
+
+/**
+ * Makeup gain after the compressor.
+ *
+ * A WebAudio DynamicsCompressorNode has NO automatic makeup gain - it only
+ * ever takes level away. Without this stage the whole game played roughly
+ * 15 dB below where it should: a cruising engine measured -34 dBFS RMS, which
+ * is why it was barely audible at full speaker volume.
+ */
+const MAKEUP = 2.6;
+
+/**
+ * What kind of call is coming over the radio.
+ *
+ * These are four different CONSTRUCTIONS, not one sound at four pitches — see
+ * the note on `radio()`. Nothing else in the game distinguishes a routine
+ * advisory from an aircraft going down, so the radio has to.
+ */
+export type RadioKind = 'control' | 'warning' | 'traffic' | 'mayday';
+
 class SoundEngineClass {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  /** Post-compressor makeup. See MAKEUP. */
+  private makeup: GainNode | null = null;
+  /** Final node before the speakers, exposed for measurement. */
+  private out: AudioNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private muted = false;
-  private volume = 0.55;
+  private volume = 0.9;
 
   // ── Continuous flight nodes ───────────────────────────────────────────────
   private engineOsc: OscillatorNode | null = null;
@@ -145,17 +179,65 @@ class SoundEngineClass {
 
         this.master = this.ctx.createGain();
         this.master.gain.value = this.muted ? 0 : this.volume;
-        this.master.connect(comp).connect(this.ctx.destination);
+
+        // Put back what the compressor took. See MAKEUP.
+        this.makeup = this.ctx.createGain();
+        this.makeup.gain.value = MAKEUP;
+
+        /*
+         * A true brickwall after the makeup, so restoring the level cannot
+         * clip. This is a LIMITER, not a second compressor: 20:1 above -1.5 dB
+         * with a hard knee and a fast attack. The compressor above shapes the
+         * mix; this one only stops it going over the edge.
+         */
+        const limiter = this.ctx.createDynamicsCompressor();
+        limiter.threshold.value = -1.5;
+        limiter.knee.value = 0;
+        limiter.ratio.value = 20;
+        limiter.attack.value = 0.002;
+        limiter.release.value = 0.12;
+
+        /*
+         * The true ceiling.
+         *
+         * A DynamicsCompressorNode cannot brickwall: its 2 ms attack lets the
+         * leading edge of a transient straight through, which measured as
+         * +0.7 dBFS peaks on a radio call - over full scale, so the DAC
+         * clips and you hear it crackle. A WaveShaper is sample-accurate and
+         * has no attack time at all, so it physically cannot overshoot.
+         *
+         * The curve is linear below 0.7 (-3.1 dBFS) and only bends above it,
+         * so the engine bed passes through untouched and only the peaks are
+         * rounded off - which is what analogue gear does, and is inaudible on
+         * a transient.
+         */
+        const clip = this.ctx.createWaveShaper();
+        const KNEE = 0.7;
+        const curve = new Float32Array(1025);
+        for (let i = 0; i < curve.length; i++) {
+          const x = (i / (curve.length - 1)) * 2 - 1;
+          const a = Math.abs(x);
+          const y = a <= KNEE ? a : KNEE + (1 - KNEE) * Math.tanh((a - KNEE) / (1 - KNEE));
+          curve[i] = Math.sign(x) * y;
+        }
+        clip.curve = curve;
+        clip.oversample = '4x';
+
+        this.master.connect(comp).connect(this.makeup).connect(limiter)
+          .connect(clip).connect(this.ctx.destination);
+        // Exposed so a headless probe can measure what actually reaches the
+        // speakers rather than an upper bound taken before the compressor.
+        this.out = clip;
 
         // Sub-buses. The engine sits BELOW everything else by default — it is
         // continuous, so it does not need to be loud to be present, and the
         // things you actually have to react to need the headroom.
         this.busEngine = this.ctx.createGain();
-        this.busEngine.gain.value = 0.50;
+        this.busEngine.gain.value = BUS_ENGINE;
         this.busWorld = this.ctx.createGain();
-        this.busWorld.gain.value = 0.85;
+        this.busWorld.gain.value = BUS_WORLD;
         this.busAlert = this.ctx.createGain();
-        this.busAlert.gain.value = 2.1;
+        this.busAlert.gain.value = BUS_ALERT;
         this.busEngine.connect(this.master);
         this.busWorld.connect(this.master);
         this.busAlert.connect(this.master);
@@ -582,45 +664,114 @@ class SoundEngineClass {
    * a bad fake voice is worse than no voice: it reads as a broken speaker
    * rather than as a person, and it grates on every repeat.
    *
-   * So it does not pretend any more. Real aviation already solved "a call is
-   * coming in for you" without words: SELCAL, the selective-calling system,
-   * chimes a pair of two-tone chords drawn from a fixed sixteen-tone alphabet.
-   * Each station has its own four-tone code, so a crew learns to recognise who
-   * is calling before anyone says a thing.
+   * So it does not pretend any more. The caption on screen carries the words;
+   * the radio carries WHO is calling and WHAT KIND of call it is — and those
+   * are four genuinely different sounds, not one sound at four pitches:
    *
-   * That is exactly the job here. The caption on screen carries the words; the
-   * radio carries WHO and HOW URGENT. And because the tones are seeded from
-   * the station name, control and traffic have their own permanent signatures
-   * you come to know by ear.
+   *   control   a formal station. SELCAL, aviation's real selective-calling
+   *             chime: two two-tone chords from a fixed sixteen-tone alphabet.
+   *   warning   the same station with its hair on fire — upper register, an
+   *             attention pip in front, and the code sent twice.
+   *   traffic   another pilot's handheld. Deliberately NOT SELCAL, because a
+   *             pilot does not selective-call you: a keyed mic, a rough
+   *             carrier and a couple of clicks. No musical tone at all, which
+   *             is what makes it unmistakable against the other three.
+   *   mayday    an emergency locator. A descending siren warble under heavy
+   *             static. You will know it the first time you hear it.
    *
-   * @param text     the words, shown on screen; only seeds the code if no
-   *                 station is given
-   * @param opts.urgency 0 routine … 1 emergency — picks the register and how
-   *                 insistently the code repeats
+   * Because the SELCAL code is seeded from the station name, each caller keeps
+   * one permanent signature you come to recognise before reading the caption.
+   *
+   * @param text        the words, shown on screen; seeds the code if no
+   *                    station is given
+   * @param opts.kind   which of the four constructions to use
    * @param opts.station the calling station, so its code stays constant
    */
-  radio(text: string, opts: { urgency?: number; station?: string } = {}): void {
+  radio(text: string, opts: { kind?: RadioKind; station?: string } = {}): void {
     if (!this.ctx || !this.master || !this.noiseBuffer) return;
     const ctx = this.ctx;
     // Never let two transmissions talk over each other — a radio is one channel
     const start = Math.max(ctx.currentTime, this.radioBusyUntil) + 0.02;
-    const urgency = Math.min(1, Math.max(0, opts.urgency ?? 0.3));
+    const kind: RadioKind = opts.kind ?? 'control';
 
     const bus = ctx.createGain();
-    // Comms are the most important thing in the aeroplane; mixed to sit on top.
-    bus.gain.value = 1.5;
-    // Radio band-limiting: this pair is most of why it sounds like a speaker
-    // and not like a synthesiser patched straight into the mix.
+    bus.gain.value = 0.85;
+    /*
+     * Radio band-limiting: this pair is most of why it sounds like a speaker
+     * rather than like a synthesiser patched into the mix. The band itself is
+     * part of the characterisation — a handheld is narrower and more nasal
+     * than a panel set, and an emergency beacon is wider than either.
+     */
+    const band: Record<RadioKind, [number, number]> = {
+      control: [300, 3000],
+      warning: [300, 3000],
+      traffic: [450, 2400],
+      mayday:  [250, 3400],
+    };
     const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 300;
+    hp.type = 'highpass'; hp.frequency.value = band[kind][0];
     const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 3000;
+    lp.type = 'lowpass'; lp.frequency.value = band[kind][1];
     bus.connect(hp).connect(lp).connect(this.busAlert ?? this.master);
 
-    // ── The SELCAL tone alphabet, in real hertz ───────────────────────────
-    // Deliberately not an equal-tempered scale: the intervals are slightly
-    // "wrong" to a musical ear, which is precisely what makes the chime read
-    // as equipment rather than as music.
+    // ── Squelch open ──────────────────────────────────────────────────────
+    this.burstInto(bus, start, 0.035, 2400, 0.22, 'bandpass', 3);
+
+    let total: number;
+    let hiss: number;
+    switch (kind) {
+      case 'traffic':
+        total = this.radioHandheld(bus, start);
+        hiss = 0.055;   // a cheap set is a noisy set
+        break;
+      case 'mayday':
+        total = this.radioBeacon(bus, start);
+        hiss = 0.075;
+        break;
+      default:
+        total = this.radioSelcal(bus, start, kind === 'warning', opts.station ?? text);
+        hiss = 0.024;
+        break;
+    }
+
+    // ── Static bed under the whole transmission ───────────────────────────
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.noiseBuffer;
+    noise.loop = true;
+    const nf = ctx.createBiquadFilter();
+    nf.type = 'bandpass'; nf.frequency.value = 1500; nf.Q.value = 0.6;
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, start);
+    ng.gain.linearRampToValueAtTime(hiss, start + 0.03);
+    ng.gain.setValueAtTime(hiss, start + total - 0.05);
+    ng.gain.linearRampToValueAtTime(0.0001, start + total);
+    noise.connect(nf).connect(ng).connect(bus);
+    noise.start(start);
+    noise.stop(start + total + 0.1);
+
+    // ── Squelch close ─────────────────────────────────────────────────────
+    this.burstInto(bus, start + total, 0.05, 1200, 0.13, 'bandpass', 2);
+    this.radioBusyUntil = start + total + 0.12;
+    // Step the bed back for the transmission plus a beat, so the call is not
+    // competing with the engine it is being heard over. Shallower than the
+    // voice version needed: a tone cuts through where a mumble did not.
+    // A mayday clears the most room, because nothing matters more.
+    this.duck((start - ctx.currentTime) + total + 0.20, kind === 'mayday' ? 0.9 : 0.75);
+  }
+
+  /**
+   * SELCAL: a formal station calling you.
+   *
+   * The tone alphabet is the real one, in real hertz. Deliberately not an
+   * equal-tempered scale — the intervals are slightly "wrong" to a musical
+   * ear, which is precisely what makes the chime read as equipment rather
+   * than as music.
+   *
+   * @returns the length of the transmission in seconds
+   */
+  private radioSelcal(bus: AudioNode, start: number, urgent: boolean, seedText: string): number {
+    const ctx = this.ctx;
+    if (!ctx) return 0;
     const TONES = [
       312.6, 346.7, 384.6, 426.6, 473.2, 524.8, 582.1, 645.7,
       716.1, 794.3, 881.0, 977.2, 1083.9, 1202.3, 1333.5, 1479.1,
@@ -628,84 +779,169 @@ class SoundEngineClass {
 
     // A station's code is a stable hash of its name, so the same caller always
     // sounds the same and you learn the difference without being told.
-    const seedText = opts.station ?? text;
     let h = 2166136261;
     for (let i = 0; i < seedText.length; i++) {
       h ^= seedText.charCodeAt(i);
       h = Math.imul(h, 16777619) >>> 0;
     }
-    // An urgent call sits in the top of the alphabet where the ear is most
-    // sensitive; a routine one sits low and stays out of the way.
-    const floor = urgency > 0.5 ? 6 : 0;
+    // A warning sits in the top of the alphabet where the ear is most
+    // sensitive; a routine call sits low and stays out of the way.
+    const floor = urgent ? 6 : 0;
     const span = TONES.length - floor;
     const code: number[] = [];
     for (let i = 0; i < 4; i++) {
       let idx = floor + ((h >>> (i * 5)) % span);
-      // Distinct tones only — a repeated tone collapses the chord to one note
+      // Distinct tones only — a repeat collapses the chord to a single note
       while (code.includes(idx)) idx = floor + ((idx + 5 - floor) % span);
       code.push(idx);
     }
 
-    // ── Squelch open ──────────────────────────────────────────────────────
-    this.burstInto(bus, start, 0.035, 2400, 0.22, 'bandpass', 3);
+    let t = start + 0.05;
+    // An attention pip in front of a warning. Two fast high blips: the ear
+    // reads a doubled transient as "listen" before it has parsed anything.
+    if (urgent) {
+      for (let i = 0; i < 2; i++) {
+        const o = ctx.createOscillator();
+        o.type = 'square';
+        o.frequency.value = 1720;
+        const g = ctx.createGain();
+        const t0 = t + i * 0.09;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.16, t0 + 0.005);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.055);
+        o.connect(g).connect(bus);
+        o.start(t0); o.stop(t0 + 0.07);
+      }
+      t += 0.24;
+    }
 
-    // Timing: fixed, and short. The old version scaled with the word count and
-    // could drone for three seconds on a long sentence.
-    const chord = urgency > 0.5 ? 0.30 : 0.40;
+    // Timing is FIXED and short. An earlier version scaled with the word count
+    // and could drone for three seconds on a long sentence.
+    const chord = urgent ? 0.30 : 0.40;
     const gap = 0.10;
-    // An emergency repeats the code once. Nothing else does.
-    const reps = urgency > 0.8 ? 2 : 1;
+    const reps = urgent ? 2 : 1;   // a warning sends its code twice
     const cycle = chord * 2 + gap;
-    const total = cycle * reps + (reps > 1 ? 0.22 * (reps - 1) : 0) + 0.08;
 
-    // ── Static bed under the whole transmission ───────────────────────────
-    const hiss = ctx.createBufferSource();
-    hiss.buffer = this.noiseBuffer;
-    hiss.loop = true;
-    const hissF = ctx.createBiquadFilter();
-    hissF.type = 'bandpass'; hissF.frequency.value = 1500; hissF.Q.value = 0.6;
-    const hissG = ctx.createGain();
-    hissG.gain.setValueAtTime(0.0001, start);
-    hissG.gain.linearRampToValueAtTime(0.024, start + 0.03);
-    hissG.gain.setValueAtTime(0.024, start + total - 0.05);
-    hissG.gain.linearRampToValueAtTime(0.0001, start + total);
-    hiss.connect(hissF).connect(hissG).connect(bus);
-    hiss.start(start);
-    hiss.stop(start + total + 0.1);
-
-    // ── The two chords ────────────────────────────────────────────────────
     for (let r = 0; r < reps; r++) {
-      const base = start + 0.05 + r * (cycle + 0.22);
+      const base = t + r * (cycle + 0.22);
       for (let pair = 0; pair < 2; pair++) {
         const t0 = base + pair * (chord + gap);
         for (let v = 0; v < 2; v++) {
-          const hz = TONES[code[pair * 2 + v]];
-          const osc = ctx.createOscillator();
-          // Sine, not sawtooth. The harshness in the old version came from
+          const o = ctx.createOscillator();
+          // Sine, not sawtooth. The harshness in the old voice came from
           // running rich waveforms through resonant filters; a transmitter
           // sends clean tones and the receiver is what colours them.
-          osc.type = 'sine';
-          osc.frequency.value = hz;
+          o.type = 'sine';
+          o.frequency.value = TONES[code[pair * 2 + v]];
           const g = ctx.createGain();
+          const peak = v === 0 ? 0.30 : 0.22;
           // Soft edges: a hard gate on a sine is an audible click
           g.gain.setValueAtTime(0.0001, t0);
-          g.gain.exponentialRampToValueAtTime(v === 0 ? 0.30 : 0.22, t0 + 0.022);
-          g.gain.setValueAtTime(v === 0 ? 0.30 : 0.22, t0 + chord - 0.05);
+          g.gain.exponentialRampToValueAtTime(peak, t0 + 0.022);
+          g.gain.setValueAtTime(peak, t0 + chord - 0.05);
           g.gain.exponentialRampToValueAtTime(0.0001, t0 + chord);
-          osc.connect(g).connect(bus);
-          osc.start(t0);
-          osc.stop(t0 + chord + 0.02);
+          o.connect(g).connect(bus);
+          o.start(t0); o.stop(t0 + chord + 0.02);
         }
       }
     }
+    return (t - start) + cycle * reps + 0.22 * (reps - 1) + 0.08;
+  }
 
-    // ── Squelch close ─────────────────────────────────────────────────────
-    this.burstInto(bus, start + total, 0.05, 1200, 0.13, 'bandpass', 2);
-    this.radioBusyUntil = start + total + 0.12;
-    // Step the bed back for the transmission plus a beat, so the call is not
-    // competing with the engine it is being heard over. Shallower than before:
-    // a tone cuts through where a mumbled voice needed the room cleared.
-    this.duck((start - ctx.currentTime) + total + 0.20, 0.75);
+  /**
+   * Another pilot on a handheld.
+   *
+   * No tones at all, and that is the whole design: against three tonal calls,
+   * the one with no pitch in it is instantly identifiable. What you hear is
+   * somebody keying a mic — the click, the carrier coming up, the set's own
+   * hum, a fumble halfway through, and the release.
+   *
+   * @returns the length of the transmission in seconds
+   */
+  private radioHandheld(bus: AudioNode, start: number): number {
+    const ctx = this.ctx;
+    if (!ctx) return 0;
+    const dur = 0.62 + Math.random() * 0.28;
+
+    // The set's own hum under the carrier. Very low, but it is the difference
+    // between "a radio" and "a hiss".
+    const hum = ctx.createOscillator();
+    hum.type = 'sawtooth';
+    hum.frequency.value = 88;
+    const hg = ctx.createGain();
+    hg.gain.setValueAtTime(0.0001, start);
+    hg.gain.exponentialRampToValueAtTime(0.055, start + 0.04);
+    hg.gain.setValueAtTime(0.055, start + dur - 0.06);
+    hg.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+    hum.connect(hg).connect(bus);
+    hum.start(start); hum.stop(start + dur + 0.02);
+
+    // Carrier: narrow band noise that breathes, so it is not a flat wash
+    const car = ctx.createBufferSource();
+    car.buffer = this.noiseBuffer;
+    car.loop = true;
+    const cf = ctx.createBiquadFilter();
+    cf.type = 'bandpass'; cf.frequency.value = 1100; cf.Q.value = 1.6;
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(0.0001, start);
+    cg.gain.linearRampToValueAtTime(0.10, start + 0.05);
+    // A few level steps across the call: somebody moving while they talk
+    for (let i = 1; i < 5; i++) {
+      cg.gain.linearRampToValueAtTime(
+        0.05 + Math.random() * 0.08, start + dur * (i / 5),
+      );
+    }
+    cg.gain.linearRampToValueAtTime(0.0001, start + dur);
+    car.connect(cf).connect(cg).connect(bus);
+    car.start(start, Math.random());
+    car.stop(start + dur + 0.05);
+
+    // Mic clicks — the fumble that makes it a person and not a transmitter
+    this.burstInto(bus, start + dur * 0.42, 0.012, 2600, 0.10, 'bandpass', 4);
+    if (Math.random() < 0.6) {
+      this.burstInto(bus, start + dur * 0.71, 0.010, 3100, 0.08, 'bandpass', 4);
+    }
+    return dur + 0.06;
+  }
+
+  /**
+   * An emergency locator beacon — somebody is going down.
+   *
+   * The descending warble is the real ELT sound and it exists precisely
+   * because it is impossible to mistake for anything else on a busy
+   * frequency. Sweeping DOWN matters: a rising tone reads as a machine
+   * spooling up, a falling one reads as something failing.
+   *
+   * @returns the length of the transmission in seconds
+   */
+  private radioBeacon(bus: AudioNode, start: number): number {
+    const ctx = this.ctx;
+    if (!ctx) return 0;
+    const sweeps = 3;
+    const each = 0.42;
+
+    for (let i = 0; i < sweeps; i++) {
+      const t0 = start + 0.04 + i * each;
+      const o = ctx.createOscillator();
+      // Sawtooth: a beacon is a cheap oscillator screaming, not a flute
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(1650, t0);
+      o.frequency.exponentialRampToValueAtTime(320, t0 + each * 0.86);
+      // Band-pass follows the sweep down so the harmonics do not turn to grit
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'lowpass';
+      bp.frequency.setValueAtTime(3200, t0);
+      bp.frequency.exponentialRampToValueAtTime(900, t0 + each * 0.86);
+      bp.Q.value = 1.1;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.22, t0 + 0.02);
+      g.gain.setValueAtTime(0.22, t0 + each * 0.72);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + each * 0.9);
+      o.connect(bp).connect(g).connect(bus);
+      o.start(t0); o.stop(t0 + each);
+    }
+    return sweeps * each + 0.1;
   }
 
   /** Noise burst routed into a specific bus at an absolute time. */
@@ -1011,8 +1247,8 @@ class SoundEngineClass {
     const d = this.duckLeft > 0 ? this.duckDepth : 0;
     // The engine ducks hardest; the world bed only steps back a little, so the
     // aeroplane never goes eerily silent underneath a transmission.
-    this.busEngine.gain.setTargetAtTime(0.50 * (1 - d * 0.86), t, timeConstant);
-    this.busWorld.gain.setTargetAtTime(0.85 * (1 - d * 0.60), t, timeConstant);
+    this.busEngine.gain.setTargetAtTime(BUS_ENGINE * (1 - d * 0.86), t, timeConstant);
+    this.busWorld.gain.setTargetAtTime(BUS_WORLD * (1 - d * 0.60), t, timeConstant);
   }
 
   /** Drive the duck envelope. Called once per frame from the flight loop. */

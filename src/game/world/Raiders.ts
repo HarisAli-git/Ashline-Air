@@ -213,6 +213,30 @@ export class Raiders {
     this.predictability = this.observed * Phaser.Math.Clamp(1 - sd / 45, 0, 1);
   }
 
+  /**
+   * What they already believe about you before you arrive, 0-1.
+   *
+   * Word gets around between zones and between flights: a pilot who has flown
+   * the same height across their whole career is one the next lot are already
+   * half-expecting. Capped by the caller at 0.45 - nobody has your number
+   * before you are in range.
+   *
+   * Critically this only sets the STARTING value. `observe()` keeps running,
+   * so flying unpredictably today pulls it straight back down and the
+   * counterplay survives. A prior you cannot beat is not a prior, it is a
+   * difficulty setting the player never agreed to.
+   */
+  setPrior(predictability: number): void {
+    this.predictability = Phaser.Math.Clamp(predictability, 0, 1);
+    // Give the prior some inertia, or the first frame of observation with
+    // `observed` still near zero would wipe it out immediately.
+    this.observed = Math.min(0.6, predictability * 1.4);
+    // A believed habit is a believed spread: start the variance where that
+    // predictability implies, so the two do not contradict each other.
+    const sd = 45 * (1 - this.predictability);
+    this.altVar = sd * sd;
+  }
+
   /** How well the gunners have you worked out, 0–1. Surfaced on the HUD. */
   get rangedOn(): number { return this.predictability; }
 

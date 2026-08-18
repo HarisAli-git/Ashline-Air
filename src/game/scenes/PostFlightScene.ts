@@ -18,6 +18,12 @@ interface PostFlightData {
   landedOnRunway: boolean;
   /** Traffic threaded inside 30 m without hitting it. Pays a bonus. */
   closeCalls?: number;
+  /**
+   * What the world has worked out about how this pilot flies, in words.
+   * See game/ai/PilotModel.ts - the model adjusts the next flight, so it has
+   * to say so out loud.
+   */
+  logbook?: string[];
 }
 
 type Outcome = 'delivered' | 'cargo_ruined' | 'diverted' | 'crashed' | 'ferry';
@@ -245,7 +251,12 @@ export class PostFlightScene extends Phaser.Scene {
     // is showing you something you already know.
     // Collected first, then laid out bottom-up from just above the button, so
     // a long unlock blurb can never end up printed through "RETURN TO MAP".
-    interface InfoLine { text: string; size: number; color: string; bold?: boolean; star?: boolean; }
+    interface InfoLine {
+      text: string; size: number; color: string;
+      bold?: boolean; star?: boolean;
+      /** Row height. Defaults to the standard 24 - the logbook runs tighter. */
+      h?: number;
+    }
     const info: InfoLine[] = [];
 
     const here = ProgressionService.currentLocation(save);
@@ -269,9 +280,24 @@ export class PostFlightScene extends Phaser.Scene {
       if (hint) info.push({ text: `Next destination:  ${hint}`, size: 12, color: '#6a5a3a' });
     }
 
-    const lineH = 24;
+    /*
+     * The logbook.
+     *
+     * The pilot model changes how hard the NEXT flight is, so it owes the
+     * player an account of itself. Capped at two lines: this is a note in the
+     * margin, not the subject of the screen.
+     */
+    const logbook = data.logbook ?? [];
+    if (logbook.length > 0) {
+      info.push({ text: '- LOGBOOK -', size: 11, color: '#5a4a2a', h: 20 });
+      for (const line of logbook.slice(0, 2)) {
+        info.push({ text: line, size: 12, color: '#8a7a5a', h: 18 });
+      }
+    }
+
     const blockBottom = height - 84;
-    let infoY = Math.max(payY + 96, blockBottom - info.length * lineH);
+    const blockH = info.reduce((a2, l) => a2 + (l.h ?? 24), 0);
+    let infoY = Math.max(payY + 96, blockBottom - blockH);
     for (const line of info) {
       const t = this.add.text(cx, infoY, line.text, {
         fontSize: `${line.size}px`, color: line.color, fontFamily: 'monospace',
@@ -282,7 +308,7 @@ export class PostFlightScene extends Phaser.Scene {
         this.tweens.add({ targets: t, alpha: 1, duration: 500, delay: 700 });
         this.tweens.add({ targets: t, scale: 1.04, duration: 900, yoyo: true, repeat: 2, delay: 700 });
       }
-      infoY += lineH;
+      infoY += line.h ?? 24;
     }
 
     if (outcome === 'delivered') SoundEngine.success();

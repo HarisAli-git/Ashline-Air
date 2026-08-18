@@ -20,6 +20,7 @@ import type { ApproachKind, FlightAction } from '../../types';
 import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
 import { Director } from '../ai/Director';
+import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
@@ -129,6 +130,11 @@ export class FlightScene extends Phaser.Scene {
    * one budget that the weather, the traffic and the gunners each spend.
    */
   private director = new Director();
+  /**
+   * What the world has learned about this pilot across every previous flight.
+   * Seeds the Director and the gunners, then records what today taught it.
+   */
+  private pilot = new PilotModel();
   /** Integrity at the last sample, so hull loss can be read as a RATE. */
   private lastIntegrity = 100;
   /** Smoothed hull loss, points per second. */
@@ -276,8 +282,14 @@ export class FlightScene extends Phaser.Scene {
     );
     this.weather.attachField(this.world.weatherField);
 
-    // -- Pacing ------------------------------------------------------------
-    this.director.reset();
+    // -- Pacing, and what the world already knows about you ----------------
+    this.pilot = new PilotModel(SaveService.get().player.pilot ?? null);
+    this.pilot.beginFlight();
+    // A veteran does not spend the first ten minutes of every crossing
+    // re-proving themselves, and a creature of habit is expected before they
+    // arrive. Both priors are beatable inside this flight - see PilotModel.
+    this.director.reset(this.pilot.directorSeed());
+    this.world.raiders.setPrior(this.pilot.raiderPrior());
     this.lastIntegrity = this.state.integrity;
     /*
      * A respite you cannot perceive is only a lull. Control says so on the
@@ -288,7 +300,7 @@ export class FlightScene extends Phaser.Scene {
       if (!this.hasBeenAirborne || this.landed) return;
       const call = 'Ashline flight, nothing on the board ahead of you. Enjoy the quiet.';
       EventBus.emit('ui:show-notification', { message: `📻 ${call}`, type: 'info' });
-      SoundEngine.radio(call, { urgency: 0.15, station: 'ASHLINE CONTROL' });
+      SoundEngine.radio(call, { kind: 'control', station: 'ASHLINE CONTROL' });
     };
 
     // ── The frequency is not empty ────────────────────────────────────────
@@ -299,7 +311,7 @@ export class FlightScene extends Phaser.Scene {
       // The caption carries the words; the radio carries who is calling.
       // Traffic keeps one tone signature for the whole flight, so a second
       // call from the circuit is recognisable before you have read it.
-      SoundEngine.radio(msg, { urgency: 0.35, station: 'ASHLINE TRAFFIC' });
+      SoundEngine.radio(msg, { kind: 'traffic' });
     };
     // Threading a needle is the most satisfying thing in the flight, so it is
     // recognised and paid for. Anything under 30 m counts; under 12 m is a
@@ -609,7 +621,7 @@ export class FlightScene extends Phaser.Scene {
         : wx.ahead.kind === 'dust_storm' ? 'a dust wall' : 'a snow band';
       const call = `Ashline flight, ${what} on your nose, ${km} kilometres. Advise you go round it.`;
       EventBus.emit('ui:show-notification', { message: `📻 ${call}`, type: 'warning' });
-      SoundEngine.radio(call, { urgency: 0.6, station: 'ASHLINE CONTROL' });
+      SoundEngine.radio(call, { kind: 'warning', station: 'ASHLINE CONTROL' });
     }
     this.airVertical = air.vertical;
     this.inThermal = air.inThermal;
@@ -1021,7 +1033,11 @@ export class FlightScene extends Phaser.Scene {
     if (threat && alt < threat.ceilingM &&
         this.state.elapsedSeconds - this.threatAlertAt > 8) {
       this.threatAlertAt = this.state.elapsedSeconds;
-      SoundEngine.alarm();
+      const call = `Ashline flight, ${threat.label.toLowerCase()} in the next stretch. `
+        + `Clear altitude ${Math.round(threat.ceilingM)} metres.`;
+      // Control warns you about the ground the same way it warns you about
+      // the weather, so the two threats arrive in the same voice.
+      SoundEngine.radio(call, { kind: 'warning', station: 'ASHLINE CONTROL' });
       EventBus.emit('ui:show-notification', {
         message: `▲ ${threat.label} AHEAD — CLEAR ALTITUDE ${Math.round(threat.ceilingM)} m`,
         type: 'warning',
@@ -1096,6 +1112,21 @@ export class FlightScene extends Phaser.Scene {
       this.lastIntegrity = this.state.integrity;
       const instant = sdt > 0 ? lost / sdt : 0;
       this.hullLostRate += (instant - this.hullLostRate) * Math.min(1, sdt / 1.5);
+
+      /*
+       * The career model watches the same frame the Director does, but on
+       * time constants two orders of magnitude longer. The Director asks
+       * "what is happening right now"; this asks "who is this pilot".
+       */
+      if (this.hasBeenAirborne && !this.landed) {
+        this.pilot.observe(sdt, {
+          altitudeM: alt,
+          throttle: this.state.throttle,
+          weatherStrength: this.weather.current.turbulenceIntensity,
+          weatherAheadStrength: this.weatherAhead ? 0.6 : 0,
+          competence: this.director.state.competence,
+        });
+      }
 
       this.director.update(sdt, {
         routeFrac: clamp(this.scrollX / (this.routeKm * 1000 * WORLD_PX_PER_M), 0, 1),
@@ -1326,6 +1357,14 @@ export class FlightScene extends Phaser.Scene {
   private midair(): void {
     SoundEngine.impact();
     SoundEngine.crash();
+    // An ELT is exactly what follows a midair, and it is the one radio sound
+    // in the game that means something has already gone wrong rather than
+    // that something might.
+    SoundEngine.radio('MAYDAY MAYDAY MAYDAY - midair, going down.', { kind: 'mayday' });
+    EventBus.emit('ui:show-notification', {
+      message: '📻 MAYDAY — emergency locator on the frequency.',
+      type: 'danger',
+    });
     this.cameras.main.shake(900, 0.02);
     this.cameras.main.flash(220, 255, 220, 160);
     this.disengageWarp('midair collision');
@@ -1568,6 +1607,20 @@ export class FlightScene extends Phaser.Scene {
   private finishFlight(result: LandingResult): void {
     if (this.landed) return;
     this.landed = true;
+
+    /*
+     * Fold this crossing into the career numbers and write them down.
+     *
+     * Done here rather than in PostFlightScene because BOTH exits pass through
+     * this method - a good landing and a smoking hole teach the model equally
+     * - and because a crash's cinematic runs for several seconds afterwards,
+     * during which the scene could be torn down.
+     */
+    this.pilot.recordLanding(result.verticalSpeed);
+    const profile = this.pilot.endFlight();
+    const save = SaveService.get();
+    SaveService.save({ ...save.player, pilot: profile }, save.world);
+
     const data = {
       result,
       contractId: this.contractId,
@@ -1576,6 +1629,9 @@ export class FlightScene extends Phaser.Scene {
       reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
       landedOnRunway: this.isOnRunway(this.scrollX + AIRCRAFT_X),
       closeCalls: this.closeCalls,
+      // What the world has worked out about you, in words. An adaptive system
+      // nobody can see is indistinguishable from an unfair one.
+      logbook: this.pilot.describe(),
     };
     if (result.quality !== 'crash') {
       SoundEngine.chime();
@@ -1609,6 +1665,13 @@ export class FlightScene extends Phaser.Scene {
     this.state.verticalSpeed = 0;
     this.state.throttle = 0;
     EventBus.emit('flight:state-update', this.state);
+    // Your own beacon. It fires under the wreck as the slide starts, which is
+    // when a real ELT triggers - on the impact, not on the fireball.
+    SoundEngine.radio('MAYDAY - Ashline flight is down.', { kind: 'mayday' });
+    EventBus.emit('ui:show-notification', {
+      message: '📻 Your locator beacon is transmitting.',
+      type: 'danger',
+    });
     this.crash.play(
       {
         speed: this.state.speed,
