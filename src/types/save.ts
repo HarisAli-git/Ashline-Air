@@ -1,3 +1,4 @@
+import type { PilotProfile } from '../game/ai/PilotModel';
 import type { OwnedAircraft } from './aircraft';
 import type { FactionReputation } from './faction';
 import type { SettlementState } from './settlement';
@@ -26,6 +27,13 @@ export interface PlayerState {
    */
   currentLocationId: string;
   stats: PlayerStats;
+  /**
+   * What the world has worked out about how you fly. Written every flight,
+   * read at the start of the next one. See game/ai/PilotModel.ts - and note
+   * that everything derived from it must stay beatable within a single
+   * flight, or it becomes a difficulty setting the player never chose.
+   */
+  pilot?: PilotProfile;
 }
 
 export interface PlayerStats {

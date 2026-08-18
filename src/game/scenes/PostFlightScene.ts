@@ -16,6 +16,14 @@ interface PostFlightData {
   cargoSlots: CargoSlot[];
   reachedDestination: boolean;
   landedOnRunway: boolean;
+  /** Traffic threaded inside 30 m without hitting it. Pays a bonus. */
+  closeCalls?: number;
+  /**
+   * What the world has worked out about how this pilot flies, in words.
+   * See game/ai/PilotModel.ts - the model adjusts the next flight, so it has
+   * to say so out loud.
+   */
+  logbook?: string[];
 }
 
 type Outcome = 'delivered' | 'cargo_ruined' | 'diverted' | 'crashed' | 'ferry';
@@ -28,6 +36,7 @@ export class PostFlightScene extends Phaser.Scene {
   create(data: PostFlightData): void {
     const { result, contractId, finalState, cargoSlots, reachedDestination } = data;
     const landedOnRunway = data.landedOnRunway ?? true;
+    const closeCalls = data.closeCalls ?? 0;
     const { width, height } = this.cameras.main;
     const cx = width / 2;
 
@@ -64,6 +73,7 @@ export class PostFlightScene extends Phaser.Scene {
     else outcome = 'delivered';
 
     let payout = 0;
+    let airmanship = 0;
     let bonusEarned = 0;
     let repGain = 0;
     let penalty = 0;
@@ -84,6 +94,15 @@ export class PostFlightScene extends Phaser.Scene {
           if (isPassenger) { payout = Math.round(payout * 0.5); repGain = 0; }
         }
         payout += bonusEarned;
+
+        // ── Airmanship ─────────────────────────────────────────────────────
+        // Threading traffic instead of blundering through it is the most
+        // satisfying thing you can do in the air, so it is worth money. It is
+        // the one bonus you cannot earn by flying carefully and slowly.
+        if (closeCalls > 0) {
+          airmanship = closeCalls * 120;
+          payout += airmanship;
+        }
 
         // Condition scaling: half the pay rides on cargo state
         payout = Math.round(payout * (0.5 + 0.5 * (avgCondition / 100)));
@@ -203,7 +222,13 @@ export class PostFlightScene extends Phaser.Scene {
           fontSize: '17px', color: '#00ff88', fontFamily: 'monospace',
         }).setOrigin(0.5);
       }
-      this.add.text(cx, payY + 58, `TOTAL:  ₢ ${payout.toLocaleString()}`, {
+      if (airmanship > 0) {
+        this.add.text(cx, payY + (bonusEarned > 0 ? 46 : 26),
+          `AIRMANSHIP: ₢ ${airmanship.toLocaleString()}   (${closeCalls} close call${closeCalls > 1 ? 's' : ''})`, {
+            fontSize: '15px', color: '#88ccff', fontFamily: 'monospace',
+          }).setOrigin(0.5);
+      }
+      this.add.text(cx, payY + (airmanship > 0 ? 76 : 58), `TOTAL:  ₢ ${payout.toLocaleString()}`, {
         fontSize: '23px', color: '#ffd080', fontFamily: 'monospace', fontStyle: 'bold',
       }).setOrigin(0.5);
       if (repGain > 0) {
@@ -226,7 +251,12 @@ export class PostFlightScene extends Phaser.Scene {
     // is showing you something you already know.
     // Collected first, then laid out bottom-up from just above the button, so
     // a long unlock blurb can never end up printed through "RETURN TO MAP".
-    interface InfoLine { text: string; size: number; color: string; bold?: boolean; star?: boolean; }
+    interface InfoLine {
+      text: string; size: number; color: string;
+      bold?: boolean; star?: boolean;
+      /** Row height. Defaults to the standard 24 - the logbook runs tighter. */
+      h?: number;
+    }
     const info: InfoLine[] = [];
 
     const here = ProgressionService.currentLocation(save);
@@ -250,9 +280,24 @@ export class PostFlightScene extends Phaser.Scene {
       if (hint) info.push({ text: `Next destination:  ${hint}`, size: 12, color: '#6a5a3a' });
     }
 
-    const lineH = 24;
+    /*
+     * The logbook.
+     *
+     * The pilot model changes how hard the NEXT flight is, so it owes the
+     * player an account of itself. Capped at two lines: this is a note in the
+     * margin, not the subject of the screen.
+     */
+    const logbook = data.logbook ?? [];
+    if (logbook.length > 0) {
+      info.push({ text: '- LOGBOOK -', size: 11, color: '#5a4a2a', h: 20 });
+      for (const line of logbook.slice(0, 2)) {
+        info.push({ text: line, size: 12, color: '#8a7a5a', h: 18 });
+      }
+    }
+
     const blockBottom = height - 84;
-    let infoY = Math.max(payY + 96, blockBottom - info.length * lineH);
+    const blockH = info.reduce((a2, l) => a2 + (l.h ?? 24), 0);
+    let infoY = Math.max(payY + 96, blockBottom - blockH);
     for (const line of info) {
       const t = this.add.text(cx, infoY, line.text, {
         fontSize: `${line.size}px`, color: line.color, fontFamily: 'monospace',
@@ -263,7 +308,7 @@ export class PostFlightScene extends Phaser.Scene {
         this.tweens.add({ targets: t, alpha: 1, duration: 500, delay: 700 });
         this.tweens.add({ targets: t, scale: 1.04, duration: 900, yoyo: true, repeat: 2, delay: 700 });
       }
-      infoY += lineH;
+      infoY += line.h ?? 24;
     }
 
     if (outcome === 'delivered') SoundEngine.success();

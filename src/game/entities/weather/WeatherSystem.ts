@@ -1,6 +1,7 @@
 import type { WeatherState, WeatherCondition } from '../../../types';
 import { randomBetween, clamp } from '../../utils/math';
 import { EventBus } from '../../utils/EventBus';
+import type { WeatherField } from '../../world/WeatherField';
 
 const MIN_CHANGE_INTERVAL = 25;   // s before the weather can shift
 const CHANGE_CHANCE_PER_SECOND = 0.035;
@@ -60,10 +61,49 @@ export class WeatherSystem {
     return Math.cos(rad) * this.state.windSpeed;
   }
 
-  update(deltaMs: number): void {
+  /**
+   * The field of drifting cells that decides what the weather IS.
+   *
+   * When one is attached, this class stops rolling a global condition on a
+   * timer and becomes a reader: it reports whatever the cell field says at the
+   * aircraft's own position. Everything downstream — WeatherFX, the palettes,
+   * WeatherHazards, the HUD — keeps consuming `current` exactly as before, so
+   * the change is confined to where the condition COMES FROM.
+   */
+  private field: WeatherField | null = null;
+  private forced: WeatherCondition | null = null;
+
+  attachField(field: WeatherField): void {
+    this.field = field;
+    this.forced = null;
+  }
+
+  /**
+   * @param pressure the Director's pacing budget, 0-1, handed straight to the
+   *   cell field. Nothing else in the weather reads it.
+   */
+  update(deltaMs: number, worldX?: number, pressure?: number): void {
     const dt = deltaMs / 1000;
     this.timeSinceChange += dt;
     this.driftAccum += dt;
+
+    // ── Field-driven: the weather is a place, and we are reading it ───────
+    if (this.field && worldX !== undefined) {
+      this.field.update(dt, worldX, pressure);
+      while (this.driftAccum >= 1) {
+        this.driftAccum -= 1;
+        this.state.windSpeed = clamp(this.state.windSpeed + randomBetween(-0.5, 0.5), 0, 25);
+        this.state.windDirection = (this.state.windDirection + randomBetween(-2, 2) + 360) % 360;
+      }
+      if (this.forced !== null) return;
+
+      const s = this.field.sample(worldX);
+      if (s.condition !== this.state.condition) this.applyCondition(s.condition);
+      // Intensity scales the bite: the edge of a cell is not its middle.
+      this.state.turbulenceIntensity = TURBULENCE[s.condition] * (0.35 + s.intensity * 0.65);
+      this.state.visibility = 1 - (1 - VISIBILITY[s.condition]) * s.intensity;
+      return;
+    }
 
     // Wind drifts once per accumulated second — same rate at any frame rate
     while (this.driftAccum >= 1) {
@@ -107,6 +147,8 @@ export class WeatherSystem {
    * and a debug key becomes a coin toss.
    */
   forceCondition(condition: WeatherCondition): void {
+    // A forced condition must survive the field overwriting it every frame.
+    this.forced = condition === 'clear' && this.field ? null : condition;
     this.squallLeft = 0;
     this.preSquall = null;
     this.timeSinceChange = 0;

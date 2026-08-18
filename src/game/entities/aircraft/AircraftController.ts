@@ -285,13 +285,16 @@ export class AircraftController {
    * fixed-step accumulator, so the sim advances identically at 30, 60 or
    * 144 Hz. windX is the along-track wind component in m/s (+ = tailwind).
    */
-  update(state: FlightState, input: FlightInput, dtSeconds: number, windX = 0): FlightState {
+  update(
+    state: FlightState, input: FlightInput, dtSeconds: number,
+    windX = 0, windUp = 0,
+  ): FlightState {
     const next: FlightState = { ...state, modifiers: { ...state.modifiers } };
 
     this.accumulator += clamp(dtSeconds, 0, MAX_FRAME_DT);
     let steps = 0;
     while (this.accumulator >= STEP && steps < MAX_SUBSTEPS) {
-      this.step(next, input, STEP, windX);
+      this.step(next, input, STEP, windX, windUp);
       this.accumulator -= STEP;
       steps++;
     }
@@ -300,7 +303,9 @@ export class AircraftController {
     return next;
   }
 
-  private step(s: FlightState, input: FlightInput, dt: number, windX: number): void {
+  private step(
+    s: FlightState, input: FlightInput, dt: number, windX: number, windUp = 0,
+  ): void {
     const { stats } = this.def;
     const onGround = s.altitude <= 0;
 
@@ -552,7 +557,21 @@ export class AircraftController {
       const newGamma = clamp(gamma + gammaDot * dt, -1.35, 1.35);
       s.flightPathAngle = newGamma;
 
-      s.verticalSpeed = s.speed * Math.sin(newGamma);
+      /**
+       * The aeroplane flies through the AIR; the air moves over the ground.
+       *
+       * This is the whole trick, and it is why it is applied here rather than
+       * by nudging `verticalSpeed` from outside. All the aerodynamics above —
+       * α, lift, drag, the flight path — are computed relative to the air and
+       * are untouched: the wing does not know it is in a thermal. What changes
+       * is the aeroplane's speed over the GROUND, because the parcel of air
+       * carrying it is itself going up or down.
+       *
+       * Nudging vertical speed directly would have quietly rewritten γ, which
+       * is integrated state, and fought the flight model every frame.
+       */
+      const airSpeedVertical = s.speed * Math.sin(newGamma);
+      s.verticalSpeed = airSpeedVertical + windUp;
       const wasAirborne = s.altitude > 0;
       s.altitude = clamp(s.altitude + s.verticalSpeed * dt, 0, stats.maxAltitude);
       if (wasAirborne && s.altitude <= 0) {

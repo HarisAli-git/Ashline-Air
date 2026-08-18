@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { AircraftController, type FlightInput } from '../entities/aircraft/AircraftController';
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
+import { specFor } from '../entities/aircraft/render/AircraftVisualSpec';
 import { CrashSequence } from '../entities/aircraft/CrashSequence';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { WeatherHazards } from '../entities/weather/WeatherHazards';
@@ -18,6 +19,8 @@ import { clamp, distance, pixelsToKm } from '../utils/math';
 import type { ApproachKind, FlightAction } from '../../types';
 import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
+import { Director } from '../ai/Director';
+import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
@@ -88,6 +91,16 @@ export class FlightScene extends Phaser.Scene {
   private gustTimer     = 0;
   /** Slow wave driving sustained gusts and downdraughts. */
   private gustPhase = 0;
+  /** Vertical speed of the air itself, m/s — shown on the variometer. */
+  private airVertical = 0;
+  private inThermal = false;
+  private airTurb = 0;
+  /** The cell standing in the way, for the annunciator. */
+  private weatherAhead: { kind: string; km: number } | null = null;
+  /** The cell we have already called on the radio, so it is warned once. */
+  private warnedCell: unknown = null;
+  /** Traffic passed inside 30 m without hitting it — paid out on delivery. */
+  private closeCalls = 0;
   private notifiedApproach = false;
   private notifiedArrival  = false;
 
@@ -110,6 +123,26 @@ export class FlightScene extends Phaser.Scene {
   private engineFailed   = false;
   private failureCheckAt = 0;
   private restartHoldFor = 0;     // seconds of cranking left
+
+  // -- Pacing --------------------------------------------------------------
+  /**
+   * The Director shapes the crossing. It spawns nothing itself; it publishes
+   * one budget that the weather, the traffic and the gunners each spend.
+   */
+  private director = new Director();
+  /**
+   * What the world has learned about this pilot across every previous flight.
+   * Seeds the Director and the gunners, then records what today taught it.
+   */
+  private pilot = new PilotModel();
+  /** Integrity at the last sample, so hull loss can be read as a RATE. */
+  private lastIntegrity = 100;
+  /** Smoothed hull loss, points per second. */
+  private hullLostRate = 0;
+  /** Decaying trace of rounds going past, 0-1. A burst is not a single frame. */
+  private fireHeat = 0;
+  /** Ground clearance under the aircraft, obstacles included, in metres. */
+  private clearanceM = 999;
 
   // ── Time warp ─────────────────────────────────────────────────────────────
   private timeScale = 1;
@@ -176,7 +209,7 @@ export class FlightScene extends Phaser.Scene {
     this.world?.resize(width, height, groundY);
     this.fx?.resize(width, height);
     this.approachText?.setPosition(width / 2, height / 2 - 30);
-    this.keyHintText?.setPosition(width - 12, 12);
+    this.keyHintText?.setPosition(width / 2, this.cameras.main.height - 4);
   }
 
   create(): void {
@@ -243,6 +276,57 @@ export class FlightScene extends Phaser.Scene {
     // Obstacles and raider ground are deterministic per contract, so a route
     // you have flown before hands you the same threats.
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+    // Weather becomes a set of places on this route rather than a global mood.
+    this.world.weatherField.reset(
+      this.hashRoute(this.contractId), this.routeKm * 1000 * WORLD_PX_PER_M,
+    );
+    this.weather.attachField(this.world.weatherField);
+
+    // -- Pacing, and what the world already knows about you ----------------
+    this.pilot = new PilotModel(SaveService.get().player.pilot ?? null);
+    this.pilot.beginFlight();
+    // A veteran does not spend the first ten minutes of every crossing
+    // re-proving themselves, and a creature of habit is expected before they
+    // arrive. Both priors are beatable inside this flight - see PilotModel.
+    this.director.reset(this.pilot.directorSeed());
+    this.world.raiders.setPrior(this.pilot.raiderPrior());
+    this.lastIntegrity = this.state.integrity;
+    /*
+     * A respite you cannot perceive is only a lull. Control says so on the
+     * radio, which both makes the arc legible and gives the quiet stretch a
+     * beginning rather than it merely being an absence of events.
+     */
+    this.director.onRespite = () => {
+      if (!this.hasBeenAirborne || this.landed) return;
+      const call = 'Ashline flight, nothing on the board ahead of you. Enjoy the quiet.';
+      EventBus.emit('ui:show-notification', { message: `📻 ${call}`, type: 'info' });
+      SoundEngine.radio(call, { kind: 'control', station: 'ASHLINE CONTROL' });
+    };
+
+    // ── The frequency is not empty ────────────────────────────────────────
+    // Other pilots call their intentions before they fly them, so a conflict
+    // has a voice attached to it rather than being a silent number on the HUD.
+    this.world.traffic.onRadio = msg => {
+      EventBus.emit('ui:show-notification', { message: `📻 ${msg}`, type: 'info' });
+      // The caption carries the words; the radio carries who is calling.
+      // Traffic keeps one tone signature for the whole flight, so a second
+      // call from the circuit is recognisable before you have read it.
+      SoundEngine.radio(msg, { kind: 'traffic' });
+    };
+    // Threading a needle is the most satisfying thing in the flight, so it is
+    // recognised and paid for. Anything under 30 m counts; under 12 m is a
+    // genuinely fine piece of flying.
+    this.world.traffic.onNearMiss = (sep) => {
+      this.closeCalls++;
+      const tight = sep < 12;
+      EventBus.emit('ui:show-notification', {
+        message: tight
+          ? `⚡ THREADED IT — ${Math.round(sep)} m separation. That was flying.`
+          : `✈ Close call — ${Math.round(sep)} m. Both of you saw it coming.`,
+        type: tight ? 'success' : 'info',
+      });
+      SoundEngine.chime();
+    };
     // The land itself changes between the two settlements
     this.world.setBiomes(this.originBiome, this.destBiome);
     // The garrison at both fields flies the destination faction's colours
@@ -251,6 +335,27 @@ export class FlightScene extends Phaser.Scene {
     if (faction) this.world.setFactionColor(parseInt(faction.color.replace('#', ''), 16));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
     this.rig = new CameraRig(this.cameras.main, this.controller.vStall, this.controller.vMax);
+
+    // The engine you hear is the engine you can see. Style, count and blade
+    // count all come from the airframe's own visual spec, so a single radial
+    // crop duster and a four-engine turboprop heavy cannot sound the same.
+    {
+      const vs = specFor(definition.id);
+      // ALL of them, not just the near-side ones: `far` is a DRAWING flag for
+      // which engines render behind the fuselage, and filtering on it made
+      // every twin in the fleet sound like a single.
+      const engines = Math.max(1, vs.engines.length);
+      SoundEngine.setEngineProfile({
+        kind: vs.engineStyle,
+        blades: vs.prop.bladePairs * 2,
+        count: engines,
+        // A bigger aeroplane swings a bigger, slower propeller, so it sits
+        // lower. Keyed to stall speed as a proxy for size, and centred so the
+        // fleet actually spreads across the range instead of piling up at the
+        // clamp: 60 km/h → 1.45, 130 km/h → 0.70.
+        pitch: Phaser.Math.Clamp(90 / Math.max(45, definition.stats.stallSpeed), 0.70, 1.45),
+      });
+    }
     this.crash    = new CrashSequence(this, this.aircraft, groundY);
     this.fx       = new WeatherFX(this, width, height);
 
@@ -260,15 +365,16 @@ export class FlightScene extends Phaser.Scene {
       backgroundColor: '#00000099', padding: { x: 14, y: 6 },
     }).setOrigin(0.5).setDepth(10).setAlpha(0);
 
-    // Keyboard legend, TOP right. The bottom of the canvas belongs to the
-    // React instrument panel, whose height in design units varies with the
-    // display scale — anything anchored to the bottom edge disappears behind
-    // it on some screens and not others. The top-right corner is always free.
-    this.keyHintText = this.add.text(width - 12, 12,
+    // Keyboard legend, bottom CENTRE. It moved to the top-right when the HUD
+    // had an instrument panel along the bottom; now the panel is gone and the
+    // top belongs to the radio strip, so the bottom edge is free again — and
+    // the legend is reference text that should sit as far out of the way as
+    // it can get.
+    this.keyHintText = this.add.text(width / 2, height - 4,
       'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine/Restart   T: Time   M: Mute   ESC: Abort',
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
-    ).setOrigin(1, 0).setDepth(10).setVisible(!isTouchDevice());
+    ).setOrigin(0.5, 1).setDepth(10).setVisible(!isTouchDevice());
 
     this.warpText = this.add.text(14, 14, '»» TIME ×4', {
       fontSize: '15px', color: '#ffd080', fontFamily: 'monospace', fontStyle: 'bold',
@@ -328,6 +434,10 @@ export class FlightScene extends Phaser.Scene {
       this.eventUnsubs.forEach(u => u());
       this.eventUnsubs = [];
       SoundEngine.stopFlightLoop();
+    SoundEngine.stopWeatherBed();
+    SoundEngine.stopTraffic();
+      SoundEngine.stopWeatherBed();
+      SoundEngine.stopTraffic();
       this.crash.destroy();
     });
     SoundEngine.unlock();
@@ -470,11 +580,60 @@ export class FlightScene extends Phaser.Scene {
     const sdt = dt * this.timeScale;
 
     // ── Weather → wind ─────────────────────────────────────────────────────
-    this.weather.update(delta * this.timeScale);
+    this.weather.update(
+      delta * this.timeScale, this.scrollX + AIRCRAFT_X, this.director.pressure,
+    );
     const windX = this.weather.windX() * 0.4;
 
+    // ── The air the aeroplane is flying through ───────────────────────────
+    // Sampled at the aircraft's own world position, then handed to the
+    // controller as a vertical wind so the aerodynamics stay untouched: the
+    // wing does not know it is in a thermal, it just goes up with the air.
+    const airX = this.scrollX + AIRCRAFT_X;
+    // Convection dies under cloud, and with the sun. An overcast route has
+    // dead air and has to be flown on the engine.
+    // Cloud over your head shuts the heating off — straight from the cell.
+    const wx = this.world.weatherField.sample(airX);
+    const cover = wx.convection;
+    const minutes = this.baseTimestamp + this.state.elapsedSeconds;
+    const dayFrac = ((minutes / 60) % 24) / 24;
+    const solar = Math.max(0, Math.sin((dayFrac - 0.25) * Math.PI * 2));
+    this.world.air.setConditions(solar, cover);
+    const air = this.world.air.sample(airX, this.state.altitude);
+    // A cell's own updraught/outflow rides on top of the convective field.
+    air.vertical += wx.draught;
+
+    // What is standing between here and the destination, and how far off it is
+    this.weatherAhead = wx.ahead && wx.distanceToEdge < 26000 && wx.ahead.kind !== 'clear'
+      ? { kind: wx.ahead.kind, km: wx.distanceToEdge / (WORLD_PX_PER_M * 1000) }
+      : null;
+
+    // Somebody calls the weather ahead over the air, once per cell, while
+    // there is still time to route around it. Silence about a storm you can
+    // already see would be the strangest thing in the sky.
+    if (wx.ahead && wx.ahead !== this.warnedCell
+      && wx.distanceToEdge < 14000 && wx.distanceToEdge > 0
+      && (wx.ahead.kind === 'thunderstorm' || wx.ahead.kind === 'dust_storm'
+        || wx.ahead.kind === 'blizzard')) {
+      this.warnedCell = wx.ahead;
+      const km = (wx.distanceToEdge / (WORLD_PX_PER_M * 1000)).toFixed(1);
+      const what = wx.ahead.kind === 'thunderstorm' ? 'a cell'
+        : wx.ahead.kind === 'dust_storm' ? 'a dust wall' : 'a snow band';
+      const call = `Ashline flight, ${what} on your nose, ${km} kilometres. Advise you go round it.`;
+      EventBus.emit('ui:show-notification', { message: `📻 ${call}`, type: 'warning' });
+      SoundEngine.radio(call, { kind: 'warning', station: 'ASHLINE CONTROL' });
+    }
+    this.airVertical = air.vertical;
+    this.inThermal = air.inThermal;
+    this.airTurb = air.turbulence;
+
+    // ── Continuous audio: the weather you are inside, and the air itself ──
+    SoundEngine.setWeather(this.weather.current.condition, Math.max(wx.intensity, 0.0), sdt);
+    // Audio vario: hunt a thermal by ear while looking where you are going.
+    SoundEngine.setVario(air.vertical, sdt);
+
     // ── Physics (fixed-step, frame-rate independent) ───────────────────────
-    this.state = this.controller.update(this.state, input, sdt, windX);
+    this.state = this.controller.update(this.state, input, sdt, windX, air.vertical);
 
     // ── Weather with teeth ────────────────────────────────────────────────
     // Icing, lightning and sand ingestion, each with its own answer. Applied
@@ -483,7 +642,7 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Turbulence: gusts nudge the aircraft, dt-scaled so a storm is rough
     //    but flyable (previously this was per-frame and slammed you down) ────
-    const turbulence = this.weather.current.turbulenceIntensity;
+    const turbulence = Math.min(1, this.weather.current.turbulenceIntensity + this.airTurb);
 
     // Rough air makes the aeroplane HARDER TO FLY, not merely bumpy: the tail
     // is working in disturbed flow, so the airframe stops holding an attitude
@@ -622,6 +781,13 @@ export class FlightScene extends Phaser.Scene {
     const worldX = this.scrollX + AIRCRAFT_X;
     this.updateHazards(worldX, sdt);
 
+    // Another aeroplane you can HEAR closing is the oldest traffic alert there
+    // is — and the pitch dropping as it goes past is the whole effect.
+    {
+      const near = this.world.traffic.nearest(worldX, this.state.altitude);
+      SoundEngine.setTraffic(near.proximity, near.closure);
+    }
+
     // ── Other traffic: advisories, then the midair if you ignored them ────
     this.updateTraffic(worldX, sdt);
     if (this.landed) return;
@@ -677,6 +843,7 @@ export class FlightScene extends Phaser.Scene {
       Math.max((this.state.engineTemp - 0.7) / 0.3, (60 - this.state.integrity) / 60), 0, 1,
     );
     SoundEngine.updateFlight({
+      dt: sdt,
       rpm,
       throttle: this.engineRunning ? this.state.throttle : 0,
       speedFrac: clamp(this.state.speed / 60, 0, 1),
@@ -791,6 +958,10 @@ export class FlightScene extends Phaser.Scene {
     // Range set so the call always lands with room to out-climb the tallest
     // obstacle in the mix (masts now reach 78 m).
     const ahead = hz.ahead(worldX, 3600);
+    // Height over whatever is actually below, not over sea level. A mast in
+    // the way means the ground has effectively risen to meet you, and that is
+    // exactly how it should feel to the Director.
+    this.clearanceM = ahead ? Math.max(0, alt - ahead.hazard.heightM) : alt;
     if (ahead && alt < ahead.hazard.heightM + 12 &&
         this.state.elapsedSeconds - this.hazardAlertAt > 2.5) {
       this.hazardAlertAt = this.state.elapsedSeconds;
@@ -806,7 +977,9 @@ export class FlightScene extends Phaser.Scene {
     // Every weapon on the ground has its own reach. Small arms are a nuisance
     // you clear by not being on the deck; an AA battery reaches 340 m and
     // turns "how high do I cruise?" into a decision with a fuel bill attached.
-    const fire = this.world.raiderFire(sdt, worldX, this.world.altitudeToScreenY(alt), alt);
+    const fire = this.world.raiderFire(
+      sdt, worldX, this.world.altitudeToScreenY(alt), alt, this.director.pressure,
+    );
     // Hold the caution up briefly after the last round. Weapons drift in and
     // out of range as you cross a zone, and a light that strobes on and off
     // every frame is one the player cannot read.
@@ -830,7 +1003,22 @@ export class FlightScene extends Phaser.Scene {
         this.disengageWarp('taking ground fire');
       }
     }
-    if (fire.shots > 0) SoundEngine.gunfire();
+    // Each weapon has its own voice and distance dulls it, so you can hear
+    // what is shooting and roughly how far off it is.
+    if (fire.shots > 0 && fire.firedKind) {
+      SoundEngine.gunshot(fire.firedKind, fire.firedDist);
+    }
+    /*
+     * How much fire is in the air, as one decaying number for the Director.
+     * Rounds arrive in bursts with dead frames between them, so sampling
+     * `fire.shots` on its own would read as calm most of the time. Close fire
+     * counts for more than distant fire, which is the difference between
+     * being shot at and hearing shooting.
+     */
+    this.fireHeat = Math.max(
+      this.fireHeat - sdt * 0.5,
+      fire.shots > 0 ? 0.35 + (1 - fire.firedDist) * 0.65 : 0,
+    );
     if (fire.hit) {
       SoundEngine.bulletHit();
       this.aircraft.notifyHit();
@@ -845,7 +1033,11 @@ export class FlightScene extends Phaser.Scene {
     if (threat && alt < threat.ceilingM &&
         this.state.elapsedSeconds - this.threatAlertAt > 8) {
       this.threatAlertAt = this.state.elapsedSeconds;
-      SoundEngine.alarm();
+      const call = `Ashline flight, ${threat.label.toLowerCase()} in the next stretch. `
+        + `Clear altitude ${Math.round(threat.ceilingM)} metres.`;
+      // Control warns you about the ground the same way it warns you about
+      // the weather, so the two threats arrive in the same voice.
+      SoundEngine.radio(call, { kind: 'warning', station: 'ASHLINE CONTROL' });
       EventBus.emit('ui:show-notification', {
         message: `▲ ${threat.label} AHEAD — CLEAR ALTITUDE ${Math.round(threat.ceilingM)} m`,
         type: 'warning',
@@ -904,11 +1096,62 @@ export class FlightScene extends Phaser.Scene {
       SoundEngine.alarm();
     }
 
+    /*
+     * -- The Director ------------------------------------------------------
+     *
+     * Run once here, at the end of the systems pass, where every sense is
+     * this frame's truth. The consumers read `director.pressure` earlier in
+     * their own updates and are therefore one frame behind, which does not
+     * matter in the least: pressure climbs at 0.055 per second, so a frame is
+     * about one part in three hundred of a move.
+     */
+    {
+      // Hull loss as a RATE. The Director cares about being hammered right
+      // now, not about damage taken twenty minutes ago and flown off since.
+      const lost = Math.max(0, this.lastIntegrity - this.state.integrity);
+      this.lastIntegrity = this.state.integrity;
+      const instant = sdt > 0 ? lost / sdt : 0;
+      this.hullLostRate += (instant - this.hullLostRate) * Math.min(1, sdt / 1.5);
+
+      /*
+       * The career model watches the same frame the Director does, but on
+       * time constants two orders of magnitude longer. The Director asks
+       * "what is happening right now"; this asks "who is this pilot".
+       */
+      if (this.hasBeenAirborne && !this.landed) {
+        this.pilot.observe(sdt, {
+          altitudeM: alt,
+          throttle: this.state.throttle,
+          weatherStrength: this.weather.current.turbulenceIntensity,
+          weatherAheadStrength: this.weatherAhead ? 0.6 : 0,
+          competence: this.director.state.competence,
+        });
+      }
+
+      this.director.update(sdt, {
+        routeFrac: clamp(this.scrollX / (this.routeKm * 1000 * WORLD_PX_PER_M), 0, 1),
+        onGround: alt <= 0.5,
+        hullLostRate: this.hullLostRate,
+        roundsNear: this.fireHeat,
+        stallMargin: this.controller.stallMargin,
+        groundClearanceM: this.clearanceM,
+        turbulence: this.airTurb,
+        weatherStrength: this.weather.current.turbulenceIntensity,
+        trafficConflict: this.trafficAdvisory !== null,
+        engineFailed: this.engineFailed,
+        integrityFrac: this.state.integrity / 100,
+      });
+    }
+
     // Annunciator panel state for the React HUD
     EventBus.emit('flight:status', {
       engineFailed: this.engineFailed,
       underFire: this.underFire,
       groundThreat: this.groundThreat,
+      rangedOn: this.world.raiders.rangedOn,
+      airVertical: this.airVertical,
+      inThermal: this.inThermal,
+      weatherAhead: this.weatherAhead,
       weatherCaution: this.weatherCaution,
       iceLoad: this.iceLoad,
       avionicsOut: this.avionicsOut,
@@ -1004,6 +1247,7 @@ export class FlightScene extends Phaser.Scene {
       planeSpeedPx: speedPx,
       airborne: this.hasBeenAirborne && !this.rollout,
       routeEndPx: this.routeKm * 1000 * WORLD_PX_PER_M,
+      pressure: this.director.pressure,
     });
 
     // ── Advisory: relative height and which way to go, like the real box ──
@@ -1113,6 +1357,14 @@ export class FlightScene extends Phaser.Scene {
   private midair(): void {
     SoundEngine.impact();
     SoundEngine.crash();
+    // An ELT is exactly what follows a midair, and it is the one radio sound
+    // in the game that means something has already gone wrong rather than
+    // that something might.
+    SoundEngine.radio('MAYDAY MAYDAY MAYDAY - midair, going down.', { kind: 'mayday' });
+    EventBus.emit('ui:show-notification', {
+      message: '📻 MAYDAY — emergency locator on the frequency.',
+      type: 'danger',
+    });
     this.cameras.main.shake(900, 0.02);
     this.cameras.main.flash(220, 255, 220, 160);
     this.disengageWarp('midair collision');
@@ -1355,6 +1607,20 @@ export class FlightScene extends Phaser.Scene {
   private finishFlight(result: LandingResult): void {
     if (this.landed) return;
     this.landed = true;
+
+    /*
+     * Fold this crossing into the career numbers and write them down.
+     *
+     * Done here rather than in PostFlightScene because BOTH exits pass through
+     * this method - a good landing and a smoking hole teach the model equally
+     * - and because a crash's cinematic runs for several seconds afterwards,
+     * during which the scene could be torn down.
+     */
+    this.pilot.recordLanding(result.verticalSpeed);
+    const profile = this.pilot.endFlight();
+    const save = SaveService.get();
+    SaveService.save({ ...save.player, pilot: profile }, save.world);
+
     const data = {
       result,
       contractId: this.contractId,
@@ -1362,6 +1628,10 @@ export class FlightScene extends Phaser.Scene {
       cargoSlots: this.cargo.slots,
       reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
       landedOnRunway: this.isOnRunway(this.scrollX + AIRCRAFT_X),
+      closeCalls: this.closeCalls,
+      // What the world has worked out about you, in words. An adaptive system
+      // nobody can see is indistinguishable from an unfair one.
+      logbook: this.pilot.describe(),
     };
     if (result.quality !== 'crash') {
       SoundEngine.chime();
@@ -1387,7 +1657,7 @@ export class FlightScene extends Phaser.Scene {
     this.groundThreat = null;
     this.trafficAdvisory = null;
     EventBus.emit('flight:status', {
-      engineFailed: false, underFire: false, groundThreat: null, stall: false,
+      engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
       overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false,
     });
@@ -1395,6 +1665,13 @@ export class FlightScene extends Phaser.Scene {
     this.state.verticalSpeed = 0;
     this.state.throttle = 0;
     EventBus.emit('flight:state-update', this.state);
+    // Your own beacon. It fires under the wreck as the slide starts, which is
+    // when a real ELT triggers - on the impact, not on the fireball.
+    SoundEngine.radio('MAYDAY - Ashline flight is down.', { kind: 'mayday' });
+    EventBus.emit('ui:show-notification', {
+      message: '📻 Your locator beacon is transmitting.',
+      type: 'danger',
+    });
     this.crash.play(
       {
         speed: this.state.speed,

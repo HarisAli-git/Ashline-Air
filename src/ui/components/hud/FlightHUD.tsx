@@ -5,6 +5,26 @@ import { SaveService } from '../../../services/SaveService';
 import { useViewport } from '../../viewport';
 import { hudStyles, type HudStyles } from './hudStyles';
 
+/**
+ * The instrument panel was a slab.
+ *
+ * A full-width opaque strip, plus a stacked annunciator, plus a route box,
+ * plus a bottom-sheet dialog, left almost nothing of a 390 px-tall phone for
+ * the aeroplane — the interface was overshadowing the game it reports on.
+ *
+ * This throws the panel away entirely. The world cannot afford a glass
+ * cockpit; what a scavenger pilot has is a few marks on the windscreen and a
+ * radio. So every readout sits DIRECTLY ON THE GLASS with no background at
+ * all, held together by two corner clusters and one hairline. Legibility comes
+ * from a hard text shadow, which is what a reflected HUD looks like anyway.
+ *
+ * Three rules keep it honest:
+ *   1. Nothing spans the screen. Corners only; the centre stays clear.
+ *   2. Secondary numbers appear ONLY when off-nominal. In a healthy cruise,
+ *      engine temp, hull and cargo are simply not on screen.
+ *   3. Scale contrast carries the hierarchy the boxes used to: big numerals
+ *      against 8 px labels.
+ */
 export function FlightHUD(): React.ReactElement | null {
   const vp = useViewport();
   const state = useFlightState();
@@ -16,212 +36,258 @@ export function FlightHUD(): React.ReactElement | null {
 
   if (!state) return null;
 
-  // A phone gets a genuinely COMPACT panel, not the desktop one scaled down:
-  // at 390 px tall the full instrument strip ate a fifth of the screen and
-  // "115 km/h" wrapped onto two lines. Secondary gauges drop out instead.
   const compact = vp.isCompact;
-  const styles = hudStyles(vp.uiScale, compact);
+  const styles = hudStyles(vp.uiScale, compact, vp.isTouch, event ? event.choices.length : 0);
 
   const { def } = SaveService.getActiveAircraft();
-  const throttlePct = Math.round(state.throttle * 100);
   const speedKmh = Math.round(state.speed * 3.6);
   const tempPct = Math.round(state.engineTemp * 100);
   const fuelFrac = state.fuel / def.stats.fuelCapacity;
-  const integrityColor = state.integrity > 60 ? '#00ff88' : state.integrity > 30 ? '#ffd080' : '#ff4444';
-  const tempColor = tempPct > 80 ? '#ff4444' : tempPct > 60 ? '#ffd080' : '#00ff88';
-  const fuelColor = fuelFrac < 0.18 ? '#ff4444' : fuelFrac < 0.4 ? '#ffd080' : '#e8d5b7';
+  const integrity = state.integrity;
 
   const progress = route ? Math.min(1, state.distanceTravelled / route.routeKm) : 0;
   const remainingKm = route ? Math.max(0, route.routeKm - state.distanceTravelled) : null;
+  const arriving = remainingKm !== null && remainingKm < 1.5;
+
+  // ── Progressive disclosure ────────────────────────────────────────────
+  // These earn screen space only once they are a problem. Everything that is
+  // fine stays invisible, which is most of what the old panel was showing.
+  const warnTemp = state.engineTemp > 0.72;
+  const warnFuel = fuelFrac < 0.28;
+  const warnHull = integrity < 70;
+  const warnCargo = cargo !== null && cargo.average < 80;
 
   return (
     <>
-      {/* Route progress strip */}
+      {/* ── Route: a hairline along the very top edge, not a box ────────── */}
       {route && (
-        <div style={styles.routeStrip}>
-          <span style={{ ...styles.routeDot, background: '#8a7a5a' }} />
-          <div style={styles.routeTrack}>
-            <div style={{ ...styles.routeFill, width: `${progress * 100}%` }} />
-            <span style={{ ...styles.planeMarker, left: `calc(${(progress * 100).toFixed(1)}% - 8px)` }}>✈</span>
-          </div>
-          <span style={{ ...styles.routeDot, background: remainingKm !== null && remainingKm < 1.5 ? '#00ff88' : '#5a4a20' }} />
-          <span style={styles.routeLabel}>
-            {route.destinationName}
-            <span style={{ color: remainingKm !== null && remainingKm < 1.5 ? '#00ff88' : '#8a7a5a' }}>
-              {'  '}{remainingKm !== null ? (remainingKm <= 0.05 ? 'ARRIVED — LAND' : `${remainingKm.toFixed(1)} km`) : ''}
+        <div style={styles.routeRail}>
+          <div style={{ ...styles.routeRailFill, width: `${progress * 100}%` }} />
+          <div style={{ ...styles.routeRailPip, left: `${progress * 100}%` }} />
+          {arriving && (
+            <span style={styles.routeRailLabel}>
+              {remainingKm !== null && remainingKm <= 0.05
+                ? 'ARRIVED — LAND'
+                : `${route.destinationName}  ${remainingKm?.toFixed(1)} km`}
             </span>
-          </span>
+          )}
         </div>
       )}
 
-      {/* Main instrument panel — bottom strip */}
-      <div style={styles.panel}>
-        {!compact && <AttitudeIndicator pitch={state.pitch} styles={styles} />}
-        <Gauge s={styles} label="ALT" value={`${state.altitude.toFixed(0)} m`} />
-        <Gauge s={styles} label="SPD" value={compact ? `${speedKmh}` : `${speedKmh} km/h`} />
-        <Gauge s={styles} label="V/S" value={`${state.verticalSpeed.toFixed(1)}`} color={state.verticalSpeed < -4 ? '#ff4444' : undefined} />
-        <Gauge s={styles} label="THR" value={`${throttlePct}%`} pct={state.throttle} barColor="#c9a44a" />
-        <Gauge s={styles} label="FUEL" value={`${state.fuel.toFixed(0)} L`} color={fuelColor} pct={fuelFrac} barColor={fuelColor} />
-        {!compact && (
-          <Gauge s={styles} label="ENG" value={`${tempPct}%`} color={tempColor} pct={state.engineTemp} barColor={tempColor} />
-        )}
-        <Gauge s={styles} label="INT" value={`${state.integrity.toFixed(0)}%`} color={integrityColor} pct={state.integrity / 100} barColor={integrityColor} />
-        {cargo && !compact && (
-          <Gauge
-            s={styles}
-            label="CARGO"
-            value={`${cargo.average.toFixed(0)}%`}
-            color={cargo.average > 75 ? '#00ff88' : cargo.average > 45 ? '#ffd080' : '#ff4444'}
-            pct={cargo.average / 100}
-            barColor={cargo.average > 75 ? '#00ff88' : cargo.average > 45 ? '#ffd080' : '#ff4444'}
-          />
-        )}
-        {remainingKm !== null && (
-          <Gauge s={styles} label="DIST" value={`${remainingKm.toFixed(1)}`} color={remainingKm < 1.5 ? '#00ff88' : undefined} />
-        )}
-        <div style={styles.toggles}>
-          <span style={{ color: gearDown ? '#00ff88' : '#888' }}>GEAR {gearDown ? '▼' : '▲'}</span>
-          <span style={{ color: flapsDeployed ? '#ffd080' : '#888' }}>FLAP {flapsDeployed ? 'ON' : 'OFF'}</span>
+      {/* ── Cautions: chips, and only while they are true ───────────────── */}
+      {status && (
+        <div style={styles.cautions}>
+          {status.engineFailed && (
+            <Chip s={styles} tone="#ff4a3a" text={compact ? 'ENGINE OUT' : 'ENGINE OUT — HOLD E'} />
+          )}
+          {status.stall && <Chip s={styles} tone="#ff4a3a" text="STALL" />}
+          {status.weatherCaution && (
+            <Chip s={styles} text={status.weatherCaution}
+              tone={status.avionicsOut || status.iceLoad > 0.6 ? '#ff4a3a' : '#88ccff'} />
+          )}
+          {status.overspeed && <Chip s={styles} tone="#ff4a3a" text="OVERSPEED" />}
+          {status.trafficDeltaM !== null && (
+            <Chip s={styles} tone="#ff4a3a"
+              text={`TRAFFIC ${Math.abs(Math.round(status.trafficDeltaM))}m ${status.trafficDeltaM >= 0 ? '▲' : '▼'} — ${status.trafficAvoid === 1 ? 'CLIMB' : 'DESCEND'}`} />
+          )}
+          {status.weatherAhead && (
+            <Chip s={styles} tone={status.weatherAhead.kind === 'thunderstorm' ? '#ff8844' : '#88ccff'}
+              text={`${WEATHER_LABEL[status.weatherAhead.kind] ?? 'WEATHER'} ${status.weatherAhead.km.toFixed(1)}km`} />
+          )}
+          {status.underFire && (
+            <Chip s={styles} tone={status.groundThreat && status.groundThreat.clearM > 200 ? '#ff4a3a' : '#ff8844'}
+              text={status.groundThreat
+                ? `${status.groundThreat.label} — CLIMB ${Math.round(status.groundThreat.clearM)}m`
+                : 'TAKING FIRE'} />
+          )}
+          {status.underFire && status.rangedOn > 0.45 && (
+            <Chip s={styles} tone={status.rangedOn > 0.75 ? '#ff4a3a' : '#ff8844'}
+              text={status.rangedOn > 0.75 ? 'THEY HAVE YOUR NUMBER — JINK' : 'GUNNERS RANGING YOU'} />
+          )}
+          {status.obstacleAheadM !== null && (
+            <Chip s={styles} tone="#ffd080" text={`OBSTACLE ${Math.round(status.obstacleAheadM)}m`} />
+          )}
+        </div>
+      )}
+
+      {/* ── Left cluster: the two numbers you actually fly by ───────────── */}
+      <div style={styles.primary}>
+        {/*
+          The vario ribbon, and the signature of the whole HUD: a bar that
+          grows UP from a centre line in lift and DOWN in sink, so the air the
+          aeroplane is flying through is readable in peripheral vision. No
+          numbers — the point is that it is read without looking at it.
+        */}
+        {status && <VarioRibbon s={styles} air={status.airVertical} inThermal={status.inThermal} />}
+        <div style={styles.primaryStack}>
+          <div style={styles.bigRow}>
+            <span style={styles.bigNum}>{speedKmh}</span>
+            <span style={styles.unit}>km/h</span>
+          </div>
+          <div style={styles.bigRow}>
+            <span style={{ ...styles.bigNum, ...styles.bigNumAlt }}>{state.altitude.toFixed(0)}</span>
+            <span style={styles.unit}>m</span>
+          </div>
+          <div style={{
+            ...styles.vs,
+            color: state.verticalSpeed < -4 ? '#ff8844'
+              : state.verticalSpeed > 0.5 ? '#9fe8b0' : '#8a7a5a',
+          }}>
+            {state.verticalSpeed >= 0 ? '▲' : '▼'} {Math.abs(state.verticalSpeed).toFixed(1)}
+          </div>
         </div>
       </div>
 
-      {/* Annunciator panel — the things that will kill you, in priority order */}
-      {status && (status.engineFailed || status.stall || status.overspeed || status.underFire
-        || status.obstacleAheadM !== null || status.trafficDeltaM !== null
-        || status.weatherCaution !== null) && (
-        <div style={styles.annunciators}>
-          {status.engineFailed && <Caution styles={styles} label={compact ? 'ENGINE OUT' : 'ENGINE OUT — HOLD E'} tone="#ff4444" />}
-          {status.stall && <Caution styles={styles} label="STALL" tone="#ff4444" />}
-          {/* Weather is now something you have to fly around, so it gets a
-              light of its own with the action spelled out. */}
-          {status.weatherCaution && (
-            <Caution
-              styles={styles}
-              label={status.weatherCaution}
-              tone={status.avionicsOut || status.iceLoad > 0.6 ? '#ff4444' : '#88ccff'}
-            />
-          )}
-          {status.overspeed && <Caution styles={styles} label="OVERSPEED — EASE OFF" tone="#ff4444" />}
-          {/* Traffic reads like the real box: how far off they are vertically,
-              and the single word that resolves it. */}
-          {status.trafficDeltaM !== null && (
-            <Caution
-              styles={styles}
-              label={`✈ TRAFFIC ${Math.abs(Math.round(status.trafficDeltaM))} m ${status.trafficDeltaM >= 0 ? '▲' : '▼'} — ${status.trafficAvoid === 1 ? 'CLIMB' : 'DESCEND'}`}
-              tone="#ff4444"
-            />
-          )}
-          {/* Name the weapon and the height that beats it — "CLIMB" alone
-              doesn't tell you whether that means 80 m or 340 m. */}
-          {status.underFire && (
-            <Caution
-              styles={styles}
-              label={status.groundThreat
-                ? `${status.groundThreat.label} — CLIMB ${Math.round(status.groundThreat.clearM)} m`
-                : 'TAKING FIRE — CLIMB'}
-              tone={status.groundThreat && status.groundThreat.clearM > 200 ? '#ff4444' : '#ff8844'}
-            />
-          )}
-          {status.obstacleAheadM !== null && (
-            <Caution styles={styles} label={`OBSTACLE ${Math.round(status.obstacleAheadM)} m`} tone="#ffd080" />
-          )}
-        </div>
-      )}
+      {/* ── Right cluster: what the aircraft has left ───────────────────── */}
+      <div style={styles.rightCluster}>
+        <Bar s={styles} label="THR" frac={state.throttle} tone="#ffd080"
+          text={`${Math.round(state.throttle * 100)}`} />
+        <Bar s={styles} label="FUEL" frac={fuelFrac} tone={warnFuel ? '#ff4a3a' : '#c8b888'}
+          text={`${state.fuel.toFixed(0)}`} alert={warnFuel} />
 
-      {/* Notifications are rendered by the always-mounted GlobalNotification */}
+        {/* Only when they matter — see the note at the top of this file */}
+        {warnTemp && <Mini s={styles} label="ENG" value={`${tempPct}%`} tone="#ff8844" />}
+        {warnHull && (
+          <Mini s={styles} label="HULL" value={`${integrity.toFixed(0)}%`}
+            tone={integrity < 40 ? '#ff4a3a' : '#ff8844'} />
+        )}
+        {warnCargo && cargo && (
+          <Mini s={styles} label="CARGO" value={`${cargo.average.toFixed(0)}%`} tone="#ff8844" />
+        )}
 
-      {/* Flight event modal */}
-      {event && (
-        <div style={styles.modalBackdrop}>
-          {/*
-            The dialog is a RADIO CALL, so it is dressed as one. Everything in
-            here — weather, a distress signal, a warning light — reaches the
-            pilot down a channel, and a generic bordered panel said nothing
-            about that. The header is a live channel strip; the choices are
-            the switches you actually throw, each showing what it will cost.
-          */}
-          <div style={styles.modal}>
-            <div style={styles.modalChannel}>
-              <span style={styles.modalLive} />
-              <span style={styles.modalChannelText}>CABIN INTERCOM · 121.5</span>
-              <span style={styles.modalChannelRule} />
-            </div>
-            <h2 style={styles.modalTitle}>{event.title}</h2>
-            <p style={styles.modalDesc}>{event.description}</p>
-            <div style={styles.choices}>
-              {event.choices.map((choice, i) => (
-                <button
-                  key={choice.id}
-                  style={styles.choiceBtn}
-                  onClick={() => EventBus.emit('flight:apply-event-choice', { choiceId: choice.id })}
-                >
-                  <span style={styles.choiceKey}>{i + 1}</span>
-                  <span style={styles.choiceBody}>
-                    <span style={styles.choiceLabel}>{choice.label}</span>
-                    {/* What it costs, in the player's terms, before they commit */}
-                    <span style={styles.choiceCost}>
-                      {choice.consequences.map(c => c.description).filter(Boolean).join('  ·  ')}
-                    </span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
+        <div style={styles.configRow}>
+          <span style={{ color: gearDown ? '#9fe8b0' : '#5a5040' }}>GEAR</span>
+          <span style={{ color: flapsDeployed ? '#ffd080' : '#5a5040' }}>FLAP</span>
         </div>
-      )}
+      </div>
+
+      {/* ── The radio call ──────────────────────────────────────────────── */}
+      {event && <RadioStrip s={styles} event={event} compact={compact} />}
     </>
   );
 }
 
-/** Blinking caution light in the annunciator stack. */
-function Caution({ label, tone, styles }: {
-  label: string; tone: string; styles: HudStyles;
-}): React.ReactElement {
-  return (
-    <div style={{ ...styles.caution, color: tone, borderColor: tone }}>
-      {label}
-    </div>
-  );
+/** Plain names for what is standing in the way. */
+const WEATHER_LABEL: Record<string, string> = {
+  thunderstorm: '⛈ STORM',
+  dust_storm: '🌫 DUST',
+  blizzard: '❄ BLIZZARD',
+  fog: '🌫 FOG',
+  strong_winds: '💨 ROUGH AIR',
+  cloudy: '☁ CLOUD',
+};
+
+interface EventLike {
+  title: string;
+  description: string;
+  choices: Array<{
+    id: string;
+    label: string;
+    consequences?: Array<{ description?: string }>;
+  }>;
 }
 
-/** Mini artificial horizon: the sky/ground card shifts with pitch. */
-function AttitudeIndicator({ pitch, styles }: {
-  pitch: number; styles: HudStyles;
+/**
+ * An incoming call, docked under the route rail.
+ *
+ * The old version was a centred box — on a phone, a sheet taking well over
+ * half the screen to ask a one-line question. Events arrive over the RADIO, so
+ * this is shaped like a transmission: who is calling, what they said, and the
+ * replies as numbered chips on the row beneath. Roughly three lines instead of
+ * half a screen, and the aeroplane you are deciding about stays visible while
+ * you decide.
+ *
+ * The cost of each choice is kept — knowing what a switch does before you
+ * throw it is what made these decisions real rather than a coin toss — but it
+ * is demoted to one quiet line under the label, and dropped entirely on a
+ * phone where the room is not there.
+ */
+function RadioStrip({ s, event, compact }: {
+  s: HudStyles; event: EventLike; compact: boolean;
 }): React.ReactElement {
-  const shift = Math.max(-30, Math.min(30, pitch)) * 0.55;
   return (
-    <div style={styles.adi}>
-      <div style={{ ...styles.adiCard, transform: `translateY(${shift}px)` }}>
-        <div style={styles.adiSky} />
-        <div style={styles.adiGround} />
-        <div style={styles.adiHorizon} />
+    <div style={s.radioStrip}>
+      <div style={s.radioHead}>
+        <span style={s.radioLive} />
+        <span style={s.radioFrom}>{event.title}</span>
       </div>
-      {/* Fixed aircraft reference */}
-      <div style={styles.adiWingL} />
-      <div style={styles.adiWingR} />
-      <div style={styles.adiDot} />
+      <p style={s.radioBody}>{event.description}</p>
+      <div style={s.radioChoices}>
+        {event.choices.map((choice, i) => {
+          const cost = (choice.consequences ?? [])
+            .map(c => c.description).filter(Boolean).join(' · ');
+          return (
+            <button
+              key={choice.id}
+              style={s.radioChip}
+              onClick={() => EventBus.emit('flight:apply-event-choice', { choiceId: choice.id })}
+            >
+              <span style={s.radioChipKey}>{i + 1}</span>
+              <span style={s.radioChipText}>
+                <span>{choice.label}</span>
+                {cost && !compact && <span style={s.radioChipCost}>{cost}</span>}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-function Gauge({
-  s: styles, label, value, color = '#e8d5b7', pct, barColor,
-}: {
-  s: HudStyles; label: string; value: string; color?: string; pct?: number; barColor?: string;
+/** Vertical air movement as a ribbon growing from a centre line. */
+function VarioRibbon({ s, air, inThermal }: {
+  s: HudStyles; air: number; inThermal: boolean;
+}): React.ReactElement {
+  const t = Math.max(-1, Math.min(1, air / 5));
+  const tone = inThermal ? '#00ff88' : air > 0.3 ? '#9fe8b0' : air < -1.2 ? '#ff8844' : '#5a5040';
+  return (
+    <div style={s.varioRail} aria-label="air mass">
+      <div style={s.varioZero} />
+      <div style={{
+        ...s.varioFill,
+        background: tone,
+        boxShadow: inThermal ? `0 0 8px ${tone}` : 'none',
+        height: `${Math.abs(t) * 50}%`,
+        top: air >= 0 ? `${50 - Math.abs(t) * 50}%` : '50%',
+      }} />
+    </div>
+  );
+}
+
+/** A caution, as a chip on the glass. */
+function Chip({ s, text, tone }: { s: HudStyles; text: string; tone: string }): React.ReactElement {
+  return <div style={{ ...s.chip, color: tone, borderColor: tone }}>{text}</div>;
+}
+
+/** A thin quantity bar with its value beside it. */
+function Bar({ s, label, frac, tone, text, alert }: {
+  s: HudStyles; label: string; frac: number; tone: string; text: string; alert?: boolean;
 }): React.ReactElement {
   return (
-    <div style={styles.gauge}>
-      <span style={styles.gaugeLabel}>{label}</span>
-      <span style={{ ...styles.gaugeValue, color }}>{value}</span>
-      {pct !== undefined && (
-        <div style={styles.barBg}>
-          <div style={{
-            ...styles.barFill,
-            width: `${Math.max(0, Math.min(1, pct)) * 100}%`,
-            background: barColor ?? color,
-          }} />
-        </div>
-      )}
+    <div style={s.barRow}>
+      <span style={s.barLabel}>{label}</span>
+      <div style={s.barTrack}>
+        <div style={{
+          ...s.barFill,
+          width: `${Math.max(0, Math.min(1, frac)) * 100}%`,
+          background: tone,
+          boxShadow: alert ? `0 0 6px ${tone}` : 'none',
+        }} />
+      </div>
+      <span style={{ ...s.barValue, color: tone }}>{text}</span>
+    </div>
+  );
+}
+
+/** A single off-nominal reading. On screen only because something is wrong. */
+function Mini({ s, label, value, tone }: {
+  s: HudStyles; label: string; value: string; tone: string;
+}): React.ReactElement {
+  return (
+    <div style={s.miniRow}>
+      <span style={s.barLabel}>{label}</span>
+      <span style={{ ...s.barValue, color: tone }}>{value}</span>
     </div>
   );
 }

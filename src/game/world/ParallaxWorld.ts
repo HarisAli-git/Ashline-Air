@@ -3,6 +3,8 @@ import type { ApproachKind, WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
 import { Raiders, MAX_ENGAGEMENT_M, type RaiderFireReport } from './Raiders';
 import { AirTraffic } from './AirTraffic';
+import { AirMass } from './AirMass';
+import { WeatherField, type WeatherCell } from './WeatherField';
 import { drawUndead, drawCorpse, drawHorde, undeadKindFor, type CrowdStyle } from './Crowds';
 import {
   drawFighter, drawMuzzleFlash, drawWireFence, drawBarrier, garrisonPalette,
@@ -103,6 +105,9 @@ function propRand(i: number): number {
  * Multi-octave ridge profile, continuous in world space — no tiling, no
  * repeating triangles. Returns roughly -1..1.
  */
+/** Altitude the marker cumulus sits at — the top of the convective layer. */
+const THERMAL_MARKER_M = 400;
+
 function ridge(x: number, seed: number): number {
   return (
     Math.sin(x * 0.0019 + seed) * 0.45 +
@@ -177,6 +182,10 @@ export class ParallaxWorld {
   readonly raiders = new Raiders();
   /** Other traffic sharing the airspace. */
   readonly traffic = new AirTraffic();
+  /** The moving air the aircraft actually flies through. */
+  readonly air = new AirMass();
+  /** Drifting weather cells — the weather is a place, not a global mood. */
+  readonly weatherField = new WeatherField();
 
   private pal: Palette = resolve('clear');   // final: biome + weather + daylight
   private shape: BiomeShape = blendBiome('ashland', 'ashland', 0).shape;
@@ -251,6 +260,9 @@ export class ParallaxWorld {
     const destPx = Math.max(2000 * WORLD_PX_PER_M, routeKm * 1000 * WORLD_PX_PER_M);
     this.hazards.generate(450 * WORLD_PX_PER_M, destPx - 300 * WORLD_PX_PER_M, seed);
     this.raiders.layout(this.hazards.zones, seed);
+    // The air has to know what it is flowing around, or there is no rotor.
+    this.air.reset(seed);
+    this.air.setObstacles(this.hazards.all.map(h => ({ x: h.x, heightM: h.heightM })));
     this.traffic.reset(seed);
   }
 
@@ -332,6 +344,8 @@ export class ParallaxWorld {
     this.drawClouds(f.scrollX, f.altitude);
     this.drawHills(f.scrollX, sink * 0.8, f);
     this.drawScrub(f.scrollX, sink);
+    this.drawThermals(f.scrollX, sink, f.altitude);
+    this.drawWeatherCells(f.scrollX, sink);
     this.drawGround(f.scrollX, sink, f);
 
     this.drawNearField(f.scrollX, sink, f.speedFrac ?? 0);
@@ -375,9 +389,12 @@ export class ParallaxWorld {
    */
   raiderFire(
     dt: number, planeWorldX: number, planeScreenY: number, altitude: number,
+    pressure = 0.5,
   ): RaiderFireReport {
     const gy = this.groundY + Math.max(0, (altitude - ALT_BAND) * this.pxPerM);
-    return this.raiders.engage(dt, gy, { worldX: planeWorldX, screenY: planeScreenY, altM: altitude });
+    return this.raiders.engage(
+      dt, gy, { worldX: planeWorldX, screenY: planeScreenY, altM: altitude }, pressure,
+    );
   }
 
   /** Worst weapon in the stretch ahead, so the climb can start in time. */
@@ -888,6 +905,141 @@ export class ParallaxWorld {
    * number on the gauge. These layers slide vertically past you at every
    * altitude, so gaining and losing height is always legible.
    */
+  /**
+   * Where the lift is, drawn where the lift is.
+   *
+   * A field of invisible vertical air is not a mechanic, it is a random
+   * altitude wobble — the player has to be able to SEE a thermal to decide to
+   * fly through it. Every cue here sits at the column's own world x at 1:1, so
+   * what you steer at is what you get: dust lifting off the ground at the
+   * base, debris and birds turning in the column, and a scrap of cumulus
+   * marking the top. That is exactly how a real pilot reads the sky.
+   */
+  private drawThermals(scrollX: number, sink: number, altitudeM: number): void {
+    const g = this.scrubGfx;
+    const gy = this.groundY + sink;
+    // Cued off the same field the physics reads, so they cannot disagree
+    const SPACING = 2400;
+    const first = Math.floor((scrollX - 400) / SPACING);
+    for (let i = first; i <= first + Math.ceil(this.width / SPACING) + 1; i++) {
+      const core = this.air.thermalCoreNear(i * SPACING);
+      const sx = core.x - scrollX;
+      if (sx < -220 || sx > this.width + 220) continue;
+      // Sample the real field so a dead (overcast, night) column draws nothing
+      const strength = this.air.sample(core.x, Math.max(60, altitudeM)).vertical;
+      if (strength < 0.6) continue;
+      const a = Phaser.Math.Clamp(strength / 6, 0.12, 0.75);
+
+      // Dust picked up off the deck and drawn up into the column
+      for (let k = 0; k < 9; k++) {
+        const climb = ((this.t * (26 + k * 5) + k * 61 + i * 37) % 260);
+        const y = gy - climb;
+        if (y < gy - 300 || y > gy) continue;
+        const spread = 6 + climb * 0.17;
+        g.fillStyle(lerpColor(this.pal.ground, 0xffffff, 0.30), a * 0.30 * (1 - climb / 260));
+        g.fillEllipse(sx + Math.sin(this.t * 1.4 + k * 2.1) * spread, y, 10 + climb * 0.10, 5 + climb * 0.05);
+      }
+
+      // A dust devil rotating at the base — the unmistakable tell
+      if (strength > 3.4) {
+        g.lineStyle(1.4, lerpColor(this.pal.ground, 0xffffff, 0.45), a * 0.5);
+        g.beginPath();
+        for (let k = 0; k <= 22; k++) {
+          const t0 = k / 22;
+          const y = gy - t0 * 90;
+          const x = sx + Math.sin(this.t * 3.4 + t0 * 7) * (4 + t0 * 13);
+          if (k === 0) g.moveTo(x, y); else g.lineTo(x, y);
+        }
+        g.strokePath();
+      }
+
+      // Scraps of cumulus marking the top of the column. This is the cue you
+      // read from a distance and steer at.
+      const topY = gy - (THERMAL_MARKER_M - altitudeM) * this.pxPerM;
+      if (topY > -60 && topY < this.height) {
+        for (let k = 0; k < 3; k++) {
+          const ox = (k - 1) * 26 + Math.sin(this.t * 0.3 + i + k) * 6;
+          g.fillStyle(0xf0ece4, a * 0.5);
+          g.fillEllipse(sx + ox, topY + (k % 2) * 5, 44 - k * 6, 20 - k * 3);
+        }
+        g.fillStyle(0x9a9086, a * 0.35);
+        g.fillEllipse(sx, topY + 11, 78, 10);
+      }
+    }
+  }
+
+  /**
+   * Weather you can see coming.
+   *
+   * This is what turns a cell from a status effect into a decision. A storm
+   * stands on the horizon as a dark column with rain shafts under it, a dust
+   * cell as a wall rolling along the deck — and because both are drawn at the
+   * cell's own world x at 1:1, the thing you are looking at is exactly the
+   * thing you will fly into. Deciding to go over, round, or straight through
+   * is only a decision if you can see it in time to make it.
+   */
+  private drawWeatherCells(scrollX: number, sink: number): void {
+    const g = this.deckGfx;
+    const gy = this.groundY + sink;
+    for (const c of this.weatherField.all) {
+      const strength = this.weatherField.strength(c);
+      if (strength < 0.05) continue;
+      const sx = c.x - scrollX;
+      const r = c.radius;
+      if (sx + r < -200 || sx - r > this.width + 200) continue;
+
+      const a = strength;
+      switch (c.kind) {
+        case 'thunderstorm': {
+          // Anvil, dark base, and rain shafts falling out of it
+          const topY = gy - 460 * this.pxPerM * 0.55;
+          for (let k = 0; k < 7; k++) {
+            const w = r * (1.15 - k * 0.09);
+            g.fillStyle(lerpColor(0x2a2c34, this.pal.skyBot, 0.18), a * 0.16);
+            g.fillEllipse(sx + Math.sin(k * 1.7) * r * 0.10, topY + k * 26, w * 2, 90 - k * 6);
+          }
+          g.fillStyle(0x14161c, a * 0.30);
+          g.fillEllipse(sx, topY + 190, r * 1.9, 110);
+          // Rain shafts
+          for (let k = 0; k < 12; k++) {
+            const rx = sx + (k / 11 - 0.5) * r * 1.5 + Math.sin(this.t * 0.4 + k) * 8;
+            g.fillStyle(0x3a4048, a * 0.13);
+            g.fillRect(rx, topY + 230, r * 0.11, gy - topY - 230);
+          }
+          break;
+        }
+        case 'dust_storm': {
+          // A wall rolling along the deck, boiling at the leading edge
+          const h = 230;
+          for (let k = 0; k < 9; k++) {
+            const t0 = k / 8;
+            g.fillStyle(lerpColor(0x8a5a2c, this.pal.glow, 0.25), a * 0.14);
+            g.fillEllipse(
+              sx + (t0 - 0.5) * r * 1.6 + Math.sin(this.t * 0.6 + k * 1.3) * 16,
+              gy - h * (0.35 + Math.sin(t0 * Math.PI) * 0.55),
+              r * 0.66, h * 0.7,
+            );
+          }
+          g.fillStyle(lerpColor(0x6b4520, this.pal.glow, 0.15), a * 0.22);
+          g.fillRect(sx - r, gy - h * 0.42, r * 2, h * 0.42);
+          break;
+        }
+        case 'blizzard':
+        case 'fog': {
+          g.fillStyle(c.kind === 'fog' ? 0x8a8f96 : 0xc4ccd4, a * 0.16);
+          g.fillEllipse(sx, gy - 120, r * 2, 260);
+          break;
+        }
+        default: {
+          // Cloudy / windy: a soft grey mass with a darker base
+          g.fillStyle(0x555b63, a * 0.11);
+          g.fillEllipse(sx, gy - 300 * this.pxPerM * 0.5, r * 1.8, 120);
+          break;
+        }
+      }
+    }
+  }
+
   private drawClouds(scrollX: number, alt: number): void {
     const g = this.cloudGfx;
     g.clear();

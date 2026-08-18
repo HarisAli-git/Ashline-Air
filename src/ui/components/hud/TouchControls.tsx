@@ -19,8 +19,18 @@ import { hudPanelHeight } from './hudStyles';
  * the aircraft flies away at full deflection.
  */
 
-const HOLD_BG = 'rgba(20,16,9,0.72)';
-const EDGE = '#5a4a20';
+/**
+ * The controls were as heavy as the panel they sat next to.
+ *
+ * Once the instrument slab came off, the throttle lever became the biggest
+ * opaque object on a phone screen — a solid block down 45% of the display.
+ * These now follow the same rule as the rest of the HUD: hug the edge, stay
+ * translucent, and let the aeroplane show through. A control has to be big
+ * enough for a thumb, not big enough to fly the game from behind.
+ */
+const HOLD_BG = 'rgba(16,13,7,0.42)';
+const HOLD_BG_ON = 'rgba(255,208,128,0.26)';
+const EDGE = 'rgba(160,138,80,0.55)';
 
 export function TouchControls(): React.ReactElement | null {
   const vp = useViewport();
@@ -42,8 +52,10 @@ export function TouchControls(): React.ReactElement | null {
   // The lever has to fit between the panel and the top of the screen, with the
   // annunciator stack left clear, so its length is budgeted from the viewport
   // rather than fixed.
-  const leverH = Math.max(96, Math.min(Math.round(190 * s), vp.canvas.height - deck - pad(58)));
-  const stickSize = Math.max(52, Math.min(Math.round(74 * s), Math.round((vp.canvas.height - deck - pad(60)) / 2)));
+  // Budgeted as a FRACTION of the screen rather than a fixed pixel length, so
+  // it can never take the display over the way the old 190 px lever did.
+  const leverH = Math.max(84, Math.min(Math.round(vp.canvas.height * 0.34), Math.round(150 * s)));
+  const stickSize = Math.max(48, Math.min(Math.round(62 * s), Math.round((vp.canvas.height - deck - pad(70)) / 2)));
 
   return (
     <>
@@ -93,7 +105,7 @@ function ThrottleLever({ scale, throttle, height, deck }: {
   scale: number; throttle: number; height: number; deck: number;
 }): React.ReactElement {
   const ref = useRef<HTMLDivElement>(null);
-  const w = Math.round(52 * scale);
+  const w = Math.round(34 * scale);
   const h = height;
 
   const setFromEvent = useCallback((clientY: number) => {
@@ -117,7 +129,7 @@ function ThrottleLever({ scale, throttle, height, deck }: {
       onPointerCancel={() => { /* keep the setting */ }}
       style={{
         position: 'absolute',
-        left: `calc(${Math.round(14 * scale)}px + env(safe-area-inset-left, 0px))`,
+        left: `calc(${Math.round(4 * scale)}px + env(safe-area-inset-left, 0px))`,
         bottom: `calc(${deck}px + env(safe-area-inset-bottom, 0px))`,
         width: w,
         height: h,
@@ -135,7 +147,7 @@ function ThrottleLever({ scale, throttle, height, deck }: {
       <div style={{
         height: `${throttle * 100}%`,
         background: 'linear-gradient(180deg, #ffd080 0%, #8a6a20 100%)',
-        opacity: 0.55,
+        opacity: 0.30,
       }} />
       {/* Knob at the current setting */}
       <div style={{
@@ -173,11 +185,11 @@ function PitchStick({ scale, size, deck }: {
   return (
     <div style={{
       position: 'absolute',
-      right: `calc(${Math.round(14 * scale)}px + env(safe-area-inset-right, 0px))`,
+      right: `calc(${Math.round(4 * scale)}px + env(safe-area-inset-right, 0px))`,
       bottom: `calc(${deck}px + env(safe-area-inset-bottom, 0px))`,
       display: 'flex',
       flexDirection: 'column',
-      gap: Math.round(6 * scale),
+      gap: Math.round(5 * scale),
       pointerEvents: 'auto',
     }}>
       <HoldButton control="pitchUp" label="▲" size={size} scale={scale} hint="NOSE UP" />
@@ -209,8 +221,9 @@ function HoldButton({
       style={{
         width: size,
         height: size,
-        background: down ? 'rgba(255,208,128,0.30)' : HOLD_BG,
+        background: down ? HOLD_BG_ON : HOLD_BG,
         border: `1px solid ${down ? '#ffd080' : EDGE}`,
+        backdropFilter: 'blur(1px)',
         borderRadius: Math.round(12 * scale),
         color: '#e8d5b7',
         fontSize: Math.round(24 * scale),
