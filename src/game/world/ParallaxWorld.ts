@@ -389,9 +389,12 @@ export class ParallaxWorld {
    */
   raiderFire(
     dt: number, planeWorldX: number, planeScreenY: number, altitude: number,
+    pressure = 0.5,
   ): RaiderFireReport {
     const gy = this.groundY + Math.max(0, (altitude - ALT_BAND) * this.pxPerM);
-    return this.raiders.engage(dt, gy, { worldX: planeWorldX, screenY: planeScreenY, altM: altitude });
+    return this.raiders.engage(
+      dt, gy, { worldX: planeWorldX, screenY: planeScreenY, altM: altitude }, pressure,
+    );
   }
 
   /** Worst weapon in the stretch ahead, so the climb can start in time. */

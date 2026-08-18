@@ -574,43 +574,91 @@ class SoundEngineClass {
    * spoken, so a short call is clipped and a long one runs on, matching the
    * caption on screen.
    */
-  radio(text: string, opts: { urgency?: number; pitch?: number } = {}): void {
+  /**
+   * A radio call.
+   *
+   * This used to try to synthesise a human voice — a glottal source through
+   * formant resonators. It never got past sounding like a distorted buzz, and
+   * a bad fake voice is worse than no voice: it reads as a broken speaker
+   * rather than as a person, and it grates on every repeat.
+   *
+   * So it does not pretend any more. Real aviation already solved "a call is
+   * coming in for you" without words: SELCAL, the selective-calling system,
+   * chimes a pair of two-tone chords drawn from a fixed sixteen-tone alphabet.
+   * Each station has its own four-tone code, so a crew learns to recognise who
+   * is calling before anyone says a thing.
+   *
+   * That is exactly the job here. The caption on screen carries the words; the
+   * radio carries WHO and HOW URGENT. And because the tones are seeded from
+   * the station name, control and traffic have their own permanent signatures
+   * you come to know by ear.
+   *
+   * @param text     the words, shown on screen; only seeds the code if no
+   *                 station is given
+   * @param opts.urgency 0 routine … 1 emergency — picks the register and how
+   *                 insistently the code repeats
+   * @param opts.station the calling station, so its code stays constant
+   */
+  radio(text: string, opts: { urgency?: number; station?: string } = {}): void {
     if (!this.ctx || !this.master || !this.noiseBuffer) return;
     const ctx = this.ctx;
     // Never let two transmissions talk over each other — a radio is one channel
     const start = Math.max(ctx.currentTime, this.radioBusyUntil) + 0.02;
-
     const urgency = Math.min(1, Math.max(0, opts.urgency ?? 0.3));
-    // Rough syllable count from the words, clamped so nothing drones on
-    const words = Math.max(1, text.split(/\s+/).filter(Boolean).length);
-    const syllables = Math.min(16, Math.max(3, Math.round(words * 1.35)));
-    // An urgent call is clipped and higher; a routine one is slower and flatter
-    const rate = 0.115 - urgency * 0.03;
-    const basePitch = (opts.pitch ?? 105) * (1 + urgency * 0.22);
 
     const bus = ctx.createGain();
     // Comms are the most important thing in the aeroplane; mixed to sit on top.
-    bus.gain.value = 3.4;
+    bus.gain.value = 1.5;
     // Radio band-limiting: this pair is most of why it sounds like a speaker
+    // and not like a synthesiser patched straight into the mix.
     const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 320;
+    hp.type = 'highpass'; hp.frequency.value = 300;
     const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 2900;
-    // A little drive so it sounds squashed the way comms audio is
-    const shaper = ctx.createWaveShaper();
-    const curve = new Float32Array(257);
-    for (let i = 0; i < 257; i++) {
-      const x = (i / 128) - 1;
-      curve[i] = Math.tanh(x * 2.6);
+    lp.type = 'lowpass'; lp.frequency.value = 3000;
+    bus.connect(hp).connect(lp).connect(this.busAlert ?? this.master);
+
+    // ── The SELCAL tone alphabet, in real hertz ───────────────────────────
+    // Deliberately not an equal-tempered scale: the intervals are slightly
+    // "wrong" to a musical ear, which is precisely what makes the chime read
+    // as equipment rather than as music.
+    const TONES = [
+      312.6, 346.7, 384.6, 426.6, 473.2, 524.8, 582.1, 645.7,
+      716.1, 794.3, 881.0, 977.2, 1083.9, 1202.3, 1333.5, 1479.1,
+    ];
+
+    // A station's code is a stable hash of its name, so the same caller always
+    // sounds the same and you learn the difference without being told.
+    const seedText = opts.station ?? text;
+    let h = 2166136261;
+    for (let i = 0; i < seedText.length; i++) {
+      h ^= seedText.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
     }
-    shaper.curve = curve;
-    bus.connect(hp).connect(lp).connect(shaper).connect(this.busAlert ?? this.master);
+    // An urgent call sits in the top of the alphabet where the ear is most
+    // sensitive; a routine one sits low and stays out of the way.
+    const floor = urgency > 0.5 ? 6 : 0;
+    const span = TONES.length - floor;
+    const code: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      let idx = floor + ((h >>> (i * 5)) % span);
+      // Distinct tones only — a repeated tone collapses the chord to one note
+      while (code.includes(idx)) idx = floor + ((idx + 5 - floor) % span);
+      code.push(idx);
+    }
 
     // ── Squelch open ──────────────────────────────────────────────────────
-    this.burstInto(bus, start, 0.035, 2400, 0.26, 'bandpass', 3);
+    this.burstInto(bus, start, 0.035, 2400, 0.22, 'bandpass', 3);
+
+    // Timing: fixed, and short. The old version scaled with the word count and
+    // could drone for three seconds on a long sentence.
+    const chord = urgency > 0.5 ? 0.30 : 0.40;
+    const gap = 0.10;
+    // An emergency repeats the code once. Nothing else does.
+    const reps = urgency > 0.8 ? 2 : 1;
+    const cycle = chord * 2 + gap;
+    const total = cycle * reps + (reps > 1 ? 0.22 * (reps - 1) : 0) + 0.08;
 
     // ── Static bed under the whole transmission ───────────────────────────
-    const total = syllables * rate + 0.16;
     const hiss = ctx.createBufferSource();
     hiss.buffer = this.noiseBuffer;
     hiss.loop = true;
@@ -618,99 +666,46 @@ class SoundEngineClass {
     hissF.type = 'bandpass'; hissF.frequency.value = 1500; hissF.Q.value = 0.6;
     const hissG = ctx.createGain();
     hissG.gain.setValueAtTime(0.0001, start);
-    hissG.gain.linearRampToValueAtTime(0.020, start + 0.03);
-    hissG.gain.setValueAtTime(0.020, start + total - 0.05);
+    hissG.gain.linearRampToValueAtTime(0.024, start + 0.03);
+    hissG.gain.setValueAtTime(0.024, start + total - 0.05);
     hissG.gain.linearRampToValueAtTime(0.0001, start + total);
     hiss.connect(hissF).connect(hissG).connect(bus);
     hiss.start(start);
     hiss.stop(start + total + 0.1);
 
-    // ── The voice: a glottal source through PARALLEL formants ─────────────
-    //
-    // The formants must be in parallel, each with its own gain, summed. The
-    // first version chained them in series, and a series of narrow bandpasses
-    // at 700 / 1220 / 2600 Hz passes almost nothing but their overlap — which
-    // is exactly why it came out as a thin beep instead of a voice.
-    //
-    // Vowels alone still sound like a synthesiser humming. What makes it read
-    // as SPEECH is the consonants between them: a short burst of filtered
-    // noise before most syllables, which is what the ear uses to segment a
-    // stream of sound into words.
-    const VOWELS: Array<[number, number, number]> = [
-      [730, 1090, 2440],  // "ah"
-      [530, 1840, 2480],  // "eh"
-      [270, 2290, 3010],  // "ee"
-      [570,  840, 2410],  // "aw"
-      [440, 1020, 2240],  // "uh"
-      [300,  870, 2240],  // "oo"
-    ];
-
-    for (let i = 0; i < syllables; i++) {
-      const t0 = start + 0.06 + i * rate;
-      const dur = rate * (0.60 + Math.random() * 0.22);
-
-      // ── Consonant: a brief noise burst that opens the syllable ──────────
-      // Alternating plosive (low, short) and fricative (high, longer) keeps
-      // the stream from sounding like one repeated sound.
-      if (i > 0 || Math.random() < 0.6) {
-        const fric = Math.random() < 0.45;
-        this.burstInto(bus, t0 - 0.018,
-          fric ? 0.045 : 0.022,
-          fric ? 3800 + Math.random() * 1800 : 900 + Math.random() * 700,
-          fric ? 0.045 : 0.075,
-          fric ? 'highpass' : 'bandpass', fric ? 0.7 : 2.5);
+    // ── The two chords ────────────────────────────────────────────────────
+    for (let r = 0; r < reps; r++) {
+      const base = start + 0.05 + r * (cycle + 0.22);
+      for (let pair = 0; pair < 2; pair++) {
+        const t0 = base + pair * (chord + gap);
+        for (let v = 0; v < 2; v++) {
+          const hz = TONES[code[pair * 2 + v]];
+          const osc = ctx.createOscillator();
+          // Sine, not sawtooth. The harshness in the old version came from
+          // running rich waveforms through resonant filters; a transmitter
+          // sends clean tones and the receiver is what colours them.
+          osc.type = 'sine';
+          osc.frequency.value = hz;
+          const g = ctx.createGain();
+          // Soft edges: a hard gate on a sine is an audible click
+          g.gain.setValueAtTime(0.0001, t0);
+          g.gain.exponentialRampToValueAtTime(v === 0 ? 0.30 : 0.22, t0 + 0.022);
+          g.gain.setValueAtTime(v === 0 ? 0.30 : 0.22, t0 + chord - 0.05);
+          g.gain.exponentialRampToValueAtTime(0.0001, t0 + chord);
+          osc.connect(g).connect(bus);
+          osc.start(t0);
+          osc.stop(t0 + chord + 0.02);
+        }
       }
-
-      // ── Glottal source ──────────────────────────────────────────────────
-      // Sentence melody: drifts down through the call, lifts at the very end
-      // the way a real transmission signs off.
-      const last = i === syllables - 1;
-      const droop = 1 - (i / syllables) * 0.22 + (last ? 0.14 : 0);
-      const f0 = basePitch * droop * (0.94 + Math.random() * 0.12);
-
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f0, t0);
-      // Intonation inside the syllable — a flat pitch reads as a machine
-      osc.frequency.linearRampToValueAtTime(f0 * (0.93 + Math.random() * 0.14), t0 + dur);
-
-      // Glide between two vowels: this is what a diphthong is, and it does
-      // more for intelligibility-of-cadence than any single steady vowel.
-      const vA = VOWELS[Math.floor(Math.random() * VOWELS.length)];
-      const vB = VOWELS[Math.floor(Math.random() * VOWELS.length)];
-
-      // Syllable envelope, shared by every formant branch
-      const env = ctx.createGain();
-      env.gain.setValueAtTime(0.0001, t0);
-      env.gain.exponentialRampToValueAtTime(0.30, t0 + dur * 0.16);
-      env.gain.setValueAtTime(0.30, t0 + dur * 0.62);
-      env.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-      env.connect(bus);
-
-      // Three resonators IN PARALLEL, weighted the way a vocal tract is:
-      // F1 carries the body, F2 the identity, F3 just the brightness.
-      const fGain = [1.0, 0.62, 0.22];
-      for (let k = 0; k < 3; k++) {
-        const bp = ctx.createBiquadFilter();
-        bp.type = 'bandpass';
-        bp.frequency.setValueAtTime(vA[k], t0);
-        bp.frequency.linearRampToValueAtTime(vB[k], t0 + dur);
-        bp.Q.value = 9 - k * 2;
-        const gk = ctx.createGain();
-        gk.gain.value = fGain[k];
-        osc.connect(bp).connect(gk).connect(env);
-      }
-
-      osc.start(t0);
-      osc.stop(t0 + dur + 0.02);
     }
 
     // ── Squelch close ─────────────────────────────────────────────────────
     this.burstInto(bus, start + total, 0.05, 1200, 0.13, 'bandpass', 2);
     this.radioBusyUntil = start + total + 0.12;
-    // Step the bed back for the whole transmission plus a beat, so the voice
-    // is not competing with the engine it is being heard over.
-    this.duck((start - ctx.currentTime) + total + 0.25, 1.0);
+    // Step the bed back for the transmission plus a beat, so the call is not
+    // competing with the engine it is being heard over. Shallower than before:
+    // a tone cuts through where a mumbled voice needed the room cleared.
+    this.duck((start - ctx.currentTime) + total + 0.20, 0.75);
   }
 
   /** Noise burst routed into a specific bus at an absolute time. */

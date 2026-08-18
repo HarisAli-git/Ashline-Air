@@ -19,6 +19,7 @@ import { clamp, distance, pixelsToKm } from '../utils/math';
 import type { ApproachKind, FlightAction } from '../../types';
 import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
+import { Director } from '../ai/Director';
 import { TouchInput } from '../utils/touchInput';
 
 // ─── Layout constants ────────────────────────────────────────────────────────
@@ -121,6 +122,21 @@ export class FlightScene extends Phaser.Scene {
   private engineFailed   = false;
   private failureCheckAt = 0;
   private restartHoldFor = 0;     // seconds of cranking left
+
+  // -- Pacing --------------------------------------------------------------
+  /**
+   * The Director shapes the crossing. It spawns nothing itself; it publishes
+   * one budget that the weather, the traffic and the gunners each spend.
+   */
+  private director = new Director();
+  /** Integrity at the last sample, so hull loss can be read as a RATE. */
+  private lastIntegrity = 100;
+  /** Smoothed hull loss, points per second. */
+  private hullLostRate = 0;
+  /** Decaying trace of rounds going past, 0-1. A burst is not a single frame. */
+  private fireHeat = 0;
+  /** Ground clearance under the aircraft, obstacles included, in metres. */
+  private clearanceM = 999;
 
   // ── Time warp ─────────────────────────────────────────────────────────────
   private timeScale = 1;
@@ -260,14 +276,30 @@ export class FlightScene extends Phaser.Scene {
     );
     this.weather.attachField(this.world.weatherField);
 
+    // -- Pacing ------------------------------------------------------------
+    this.director.reset();
+    this.lastIntegrity = this.state.integrity;
+    /*
+     * A respite you cannot perceive is only a lull. Control says so on the
+     * radio, which both makes the arc legible and gives the quiet stretch a
+     * beginning rather than it merely being an absence of events.
+     */
+    this.director.onRespite = () => {
+      if (!this.hasBeenAirborne || this.landed) return;
+      const call = 'Ashline flight, nothing on the board ahead of you. Enjoy the quiet.';
+      EventBus.emit('ui:show-notification', { message: `📻 ${call}`, type: 'info' });
+      SoundEngine.radio(call, { urgency: 0.15, station: 'ASHLINE CONTROL' });
+    };
+
     // ── The frequency is not empty ────────────────────────────────────────
     // Other pilots call their intentions before they fly them, so a conflict
     // has a voice attached to it rather than being a silent number on the HUD.
     this.world.traffic.onRadio = msg => {
       EventBus.emit('ui:show-notification', { message: `📻 ${msg}`, type: 'info' });
-      // The caption carries the words; the synthesised voice carries the
-      // cadence. Without it a radio call reads as a UI toast.
-      SoundEngine.radio(msg, { urgency: 0.35 });
+      // The caption carries the words; the radio carries who is calling.
+      // Traffic keeps one tone signature for the whole flight, so a second
+      // call from the circuit is recognisable before you have read it.
+      SoundEngine.radio(msg, { urgency: 0.35, station: 'ASHLINE TRAFFIC' });
     };
     // Threading a needle is the most satisfying thing in the flight, so it is
     // recognised and paid for. Anything under 30 m counts; under 12 m is a
@@ -536,7 +568,9 @@ export class FlightScene extends Phaser.Scene {
     const sdt = dt * this.timeScale;
 
     // ── Weather → wind ─────────────────────────────────────────────────────
-    this.weather.update(delta * this.timeScale, this.scrollX + AIRCRAFT_X);
+    this.weather.update(
+      delta * this.timeScale, this.scrollX + AIRCRAFT_X, this.director.pressure,
+    );
     const windX = this.weather.windX() * 0.4;
 
     // ── The air the aeroplane is flying through ───────────────────────────
@@ -575,7 +609,7 @@ export class FlightScene extends Phaser.Scene {
         : wx.ahead.kind === 'dust_storm' ? 'a dust wall' : 'a snow band';
       const call = `Ashline flight, ${what} on your nose, ${km} kilometres. Advise you go round it.`;
       EventBus.emit('ui:show-notification', { message: `📻 ${call}`, type: 'warning' });
-      SoundEngine.radio(call, { urgency: 0.6, pitch: 96 });
+      SoundEngine.radio(call, { urgency: 0.6, station: 'ASHLINE CONTROL' });
     }
     this.airVertical = air.vertical;
     this.inThermal = air.inThermal;
@@ -912,6 +946,10 @@ export class FlightScene extends Phaser.Scene {
     // Range set so the call always lands with room to out-climb the tallest
     // obstacle in the mix (masts now reach 78 m).
     const ahead = hz.ahead(worldX, 3600);
+    // Height over whatever is actually below, not over sea level. A mast in
+    // the way means the ground has effectively risen to meet you, and that is
+    // exactly how it should feel to the Director.
+    this.clearanceM = ahead ? Math.max(0, alt - ahead.hazard.heightM) : alt;
     if (ahead && alt < ahead.hazard.heightM + 12 &&
         this.state.elapsedSeconds - this.hazardAlertAt > 2.5) {
       this.hazardAlertAt = this.state.elapsedSeconds;
@@ -927,7 +965,9 @@ export class FlightScene extends Phaser.Scene {
     // Every weapon on the ground has its own reach. Small arms are a nuisance
     // you clear by not being on the deck; an AA battery reaches 340 m and
     // turns "how high do I cruise?" into a decision with a fuel bill attached.
-    const fire = this.world.raiderFire(sdt, worldX, this.world.altitudeToScreenY(alt), alt);
+    const fire = this.world.raiderFire(
+      sdt, worldX, this.world.altitudeToScreenY(alt), alt, this.director.pressure,
+    );
     // Hold the caution up briefly after the last round. Weapons drift in and
     // out of range as you cross a zone, and a light that strobes on and off
     // every frame is one the player cannot read.
@@ -956,6 +996,17 @@ export class FlightScene extends Phaser.Scene {
     if (fire.shots > 0 && fire.firedKind) {
       SoundEngine.gunshot(fire.firedKind, fire.firedDist);
     }
+    /*
+     * How much fire is in the air, as one decaying number for the Director.
+     * Rounds arrive in bursts with dead frames between them, so sampling
+     * `fire.shots` on its own would read as calm most of the time. Close fire
+     * counts for more than distant fire, which is the difference between
+     * being shot at and hearing shooting.
+     */
+    this.fireHeat = Math.max(
+      this.fireHeat - sdt * 0.5,
+      fire.shots > 0 ? 0.35 + (1 - fire.firedDist) * 0.65 : 0,
+    );
     if (fire.hit) {
       SoundEngine.bulletHit();
       this.aircraft.notifyHit();
@@ -1027,6 +1078,38 @@ export class FlightScene extends Phaser.Scene {
     if (overspeed && this.state.elapsedSeconds - this.overspeedWarnAt > 3) {
       this.overspeedWarnAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
+    }
+
+    /*
+     * -- The Director ------------------------------------------------------
+     *
+     * Run once here, at the end of the systems pass, where every sense is
+     * this frame's truth. The consumers read `director.pressure` earlier in
+     * their own updates and are therefore one frame behind, which does not
+     * matter in the least: pressure climbs at 0.055 per second, so a frame is
+     * about one part in three hundred of a move.
+     */
+    {
+      // Hull loss as a RATE. The Director cares about being hammered right
+      // now, not about damage taken twenty minutes ago and flown off since.
+      const lost = Math.max(0, this.lastIntegrity - this.state.integrity);
+      this.lastIntegrity = this.state.integrity;
+      const instant = sdt > 0 ? lost / sdt : 0;
+      this.hullLostRate += (instant - this.hullLostRate) * Math.min(1, sdt / 1.5);
+
+      this.director.update(sdt, {
+        routeFrac: clamp(this.scrollX / (this.routeKm * 1000 * WORLD_PX_PER_M), 0, 1),
+        onGround: alt <= 0.5,
+        hullLostRate: this.hullLostRate,
+        roundsNear: this.fireHeat,
+        stallMargin: this.controller.stallMargin,
+        groundClearanceM: this.clearanceM,
+        turbulence: this.airTurb,
+        weatherStrength: this.weather.current.turbulenceIntensity,
+        trafficConflict: this.trafficAdvisory !== null,
+        engineFailed: this.engineFailed,
+        integrityFrac: this.state.integrity / 100,
+      });
     }
 
     // Annunciator panel state for the React HUD
@@ -1133,6 +1216,7 @@ export class FlightScene extends Phaser.Scene {
       planeSpeedPx: speedPx,
       airborne: this.hasBeenAirborne && !this.rollout,
       routeEndPx: this.routeKm * 1000 * WORLD_PX_PER_M,
+      pressure: this.director.pressure,
     });
 
     // ── Advisory: relative height and which way to go, like the real box ──

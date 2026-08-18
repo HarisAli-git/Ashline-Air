@@ -102,9 +102,17 @@ export class WeatherField {
     }
   }
 
-  private makeCell(x: number, seed: number): WeatherCell {
-    // Weighted pick over the kinds
-    const r = hash(seed);
+  /**
+   * @param pressure the Director's budget, 0-1. Only ever passed for cells
+   *   spawned mid-flight; the route's opening layout is built at 0.5 so the
+   *   same leg always presents the same problem. See update().
+   */
+  private makeCell(x: number, seed: number, pressure = 0.5): WeatherCell {
+    // Weighted pick over the kinds, tilted by how much the Director is
+    // willing to spend. At low pressure the roll is pushed down the table
+    // toward cloud and fog; at high pressure it is pulled up toward the two
+    // kinds that actually cost you something.
+    const r = Phaser.Math.Clamp(hash(seed) - (pressure - 0.5) * 0.34, 0, 1);
     let acc = 0;
     let kind: WeatherCondition = 'cloudy';
     for (const k of KINDS) { acc += k.weight; if (r <= acc) { kind = k.kind; break; } }
@@ -119,12 +127,18 @@ export class WeatherField {
       age: hash(seed + 7) * life * 0.6,
       life,
       drift: (hash(seed + 11) - 0.62) * 90,
-      peak: 0.55 + hash(seed + 13) * 0.45,
+      peak: (0.55 + hash(seed + 13) * 0.45) * (0.72 + pressure * 0.56),
       seed,
     };
   }
 
-  update(dt: number, playerX: number): void {
+  /**
+   * @param pressure the Director's budget, 0-1. It governs how often new cells
+   *   arrive, how many may stand at once, and how hard they blow - but NOT the
+   *   cells laid down by reset(). That layout stays deterministic per route,
+   *   because a leg you cannot learn is a leg you cannot fly well.
+   */
+  update(dt: number, playerX: number, pressure = 0.5): void {
     for (const c of this.cells) {
       c.age += dt;
       c.x += c.drift * dt;
@@ -132,13 +146,17 @@ export class WeatherField {
     // Retire dead cells and anything that has drifted well behind
     this.cells = this.cells.filter(c => c.age < c.life && c.x > playerX - 9000);
 
-    // Keep the sky populated ahead of the aircraft
+    // Keep the sky populated ahead of the aircraft. In a respite the ceiling
+    // drops to two cells and the interval nearly doubles, which is what a
+    // quiet stretch of sky actually is.
+    const maxCells = 2 + Math.round(Phaser.Math.Clamp(pressure, 0, 1) * 3);
     this.spawnTimer -= dt;
-    if (this.spawnTimer <= 0 && this.cells.length < 5) {
-      this.spawnTimer = 25 + hash(this.seed + Math.floor(playerX / 1000)) * 35;
+    if (this.spawnTimer <= 0 && this.cells.length < maxCells) {
+      const eagerness = 1.65 - Phaser.Math.Clamp(pressure, 0, 1) * 1.05;
+      this.spawnTimer = (25 + hash(this.seed + Math.floor(playerX / 1000)) * 35) * eagerness;
       const x = playerX + 14000 + hash(this.seed + this.cells.length * 17 + Math.floor(playerX)) * 12000;
       if (x < this.routeEndPx * 0.92) {
-        this.cells.push(this.makeCell(x, this.seed + Math.floor(playerX / 500) * 7));
+        this.cells.push(this.makeCell(x, this.seed + Math.floor(playerX / 500) * 7, pressure));
       }
     }
   }

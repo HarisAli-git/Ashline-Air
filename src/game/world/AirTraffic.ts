@@ -133,6 +133,9 @@ export class AirTraffic {
       planeSpeedPx: number;   // player's ground speed in world px/s
       airborne: boolean;
       routeEndPx: number;
+      /** The Director's budget, 0-1. Sets the gap between encounters and how
+       *  many of them are laid on to conflict. Defaults to the old behaviour. */
+      pressure?: number;
     },
   ): void {
     this.elapsed += dt;
@@ -189,13 +192,21 @@ export class AirTraffic {
     // conflict thrown at you while you are configured to land is not a
     // decision, it is an ambush.
     if (ctx.routeEndPx - ctx.planeWorldX < 3000) return;
+    const pressure = Phaser.Math.Clamp(ctx.pressure ?? 0.5, 0, 1);
+    // In a respite two aeroplanes at once would undo the quiet, so the second
+    // slot only opens when the Director is actually spending.
+    const concurrent = pressure > 0.55 ? MAX_CONCURRENT : 1;
     this.cooldown -= dt;
-    if (this.cooldown > 0 || this.list.length >= MAX_CONCURRENT) return;
-    this.cooldown = 26 + rnd(this.seed + this.elapsed * 0.37) * 34;
-    this.spawn(ctx);
+    if (this.cooldown > 0 || this.list.length >= concurrent) return;
+    // 26-60 s at full pressure stretches to roughly 45-105 s at none.
+    this.cooldown = (26 + rnd(this.seed + this.elapsed * 0.37) * 34) * (1.75 - pressure);
+    this.spawn(ctx, pressure);
   }
 
-  private spawn(ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; routeEndPx: number }): void {
+  private spawn(
+    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; routeEndPx: number },
+    pressure = 0.5,
+  ): void {
     const id = this.seed * 7919 + Math.floor(this.elapsed * 13);
     const r = rnd(id);
     const headOn = r < 0.4;
@@ -204,8 +215,10 @@ export class AirTraffic {
       kindRoll < 0.44 ? 'hauler' : kindRoll < 0.72 ? 'courier' : kindRoll < 0.9 ? 'ultralight' : 'gunship';
 
     // Most encounters are set up to conflict — that is the whole point of them —
-    // but a clear pass now and then keeps the advisory meaningful.
-    const conflicting = rnd(id + 11) < 0.68;
+    // but a clear pass now and then keeps the advisory meaningful. Under a
+    // respite that inverts: the aeroplane you see goes by well clear, so the
+    // frequency is still alive without asking anything of you.
+    const conflicting = rnd(id + 11) < 0.34 + pressure * 0.52;
     const offset = conflicting
       ? (rnd(id + 13) - 0.5) * 9
       : (rnd(id + 13) > 0.5 ? 1 : -1) * (32 + rnd(id + 17) * 40);

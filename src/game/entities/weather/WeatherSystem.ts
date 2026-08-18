@@ -78,14 +78,18 @@ export class WeatherSystem {
     this.forced = null;
   }
 
-  update(deltaMs: number, worldX?: number): void {
+  /**
+   * @param pressure the Director's pacing budget, 0-1, handed straight to the
+   *   cell field. Nothing else in the weather reads it.
+   */
+  update(deltaMs: number, worldX?: number, pressure?: number): void {
     const dt = deltaMs / 1000;
     this.timeSinceChange += dt;
     this.driftAccum += dt;
 
     // ── Field-driven: the weather is a place, and we are reading it ───────
     if (this.field && worldX !== undefined) {
-      this.field.update(dt, worldX);
+      this.field.update(dt, worldX, pressure);
       while (this.driftAccum >= 1) {
         this.driftAccum -= 1;
         this.state.windSpeed = clamp(this.state.windSpeed + randomBetween(-0.5, 0.5), 0, 25);

@@ -368,10 +368,17 @@ export class Raiders {
    * altitude ceiling, and its accuracy falls off across that ceiling — so the
    * last few metres of a climb genuinely buy you something.
    */
+  /**
+   * @param pressure the Director's budget, 0-1. It stretches or tightens the
+   *   cadence between bursts and nothing else. Accuracy stays entirely a
+   *   function of your height and how readable your flying is - that loop is
+   *   the player's to win, and a hidden hand on it would make it a lie.
+   */
   engage(
     dt: number,
     baseY: number,
     target: { worldX: number; screenY: number; altM: number },
+    pressure = 0.5,
   ): RaiderFireReport {
     let engaged = false;
     let worst: WeaponProfile | null = null;
@@ -426,7 +433,10 @@ export class Raiders {
             : e.kind === 'tower' ? 'marksman' : 'small';
       const rel = Math.min(1, d / w.rangePx);
       if (firedKind === null || rel < firedDist) { firedKind = voice; firedDist = rel; }
-      e.cool = w.cadence * (0.75 + Math.random() * 0.5);
+      // Half again as long between bursts in a respite; a shade quicker than
+      // stock when the Director is pushing.
+      const keen = 1.55 - Phaser.Math.Clamp(pressure, 0, 1) * 0.75;
+      e.cool = w.cadence * (0.75 + Math.random() * 0.5) * keen;
 
       // Height is the whole defence, and it works by spoiling their aim: on
       // the deck the rounds go where they are pointed, near the ceiling they
