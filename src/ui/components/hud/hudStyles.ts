@@ -3,269 +3,237 @@ import type React from 'react';
 export type HudStyles = Record<string, React.CSSProperties>;
 
 /**
- * Height of the bottom instrument strip, in CSS pixels.
+ * Height of the HUD's bottom furniture, in CSS pixels.
  *
- * Exported because the on-screen flight controls have to sit ABOVE it — the
- * throttle lever and the pitch stick were originally offset by a guessed
- * constant and ended up half-buried under the panel on a short screen.
+ * There is no instrument panel any more, so this is just the depth of the two
+ * corner clusters — the number the on-screen flight controls need in order to
+ * sit clear of them.
  */
 export function hudPanelHeight(uiScale: number, compact: boolean): number {
-  return Math.round((compact ? 44 : 74) * uiScale);
+  return Math.round((compact ? 62 : 78) * uiScale);
 }
 
 /**
- * The HUD is laid out for the screen it is on, not scaled from one design.
+ * "Marks on the glass."
  *
- * `compact` is a different layout, not a smaller one: on a 390 px-tall phone
- * the full desktop strip took a fifth of the screen and wrapped its own values
- * onto two lines. Compact drops the artificial horizon and the secondary
- * gauges, shortens the units, and halves the vertical budget.
+ * Every filled panel is gone. Readouts sit straight on the world with a hard
+ * text shadow doing the work a background used to do, which is both what a
+ * reflected HUD actually looks like and what gives a 390 px phone its screen
+ * back. The palette is the game's own — bone, amber, ash — so the interface
+ * reads as part of the aeroplane rather than a layer on top of it.
  */
-export function hudStyles(uiScale: number, compact: boolean): HudStyles {
+export function hudStyles(
+  uiScale: number, compact: boolean, touch = false, radioChoices = 0,
+): HudStyles {
   const s = uiScale;
   const n = (v: number): number => Math.round(v * s);
-  const panelH = hudPanelHeight(uiScale, compact);
+
+  // The one thing holding legibility together now that nothing has a box
+  const etch = '0 1px 0 rgba(0,0,0,0.95), 0 0 6px rgba(0,0,0,0.85)';
+
+  // On a touch device the throttle lever hugs the left edge, so the primary
+  // readout has to start to the right of it. On desktop there is no lever and
+  // the readout goes right up against the edge where it belongs.
+  const leverClearance = touch ? Math.round(44 * s) : 0;
+
+  const safeL = 'env(safe-area-inset-left, 0px)';
+  const safeR = 'env(safe-area-inset-right, 0px)';
+  const safeB = 'env(safe-area-inset-bottom, 0px)';
+  const safeT = 'env(safe-area-inset-top, 0px)';
 
   return {
-    routeStrip: {
+    // ── Route: a 2 px hairline on the top edge ──────────────────────────
+    routeRail: {
       position: 'absolute',
-      top: `calc(${n(8)}px + env(safe-area-inset-top, 0px))`,
-      left: '50%',
-      transform: 'translateX(-50%)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: n(8),
-      // Never wider than the screen it is drawn on — a fixed 520 px strip
-      // overhung both edges of a phone.
-      width: compact ? 'min(80vw, 420px)' : 'min(70vw, 520px)',
-      padding: `${n(5)}px ${n(12)}px`,
-      background: 'rgba(10,8,4,0.75)',
-      border: '1px solid #3a2a10',
-      borderRadius: 4,
-      fontFamily: 'monospace',
-      zIndex: 90,
-    },
-    routeDot: { width: n(8), height: n(8), borderRadius: '50%', flexShrink: 0 },
-    routeTrack: { position: 'relative', flex: 1, height: 4, background: '#241a0c', borderRadius: 2 },
-    routeFill: { position: 'absolute', left: 0, top: 0, height: '100%', background: '#5a4a20', borderRadius: 2 },
-    planeMarker: { position: 'absolute', top: -n(9), fontSize: n(13), color: '#ffd080', transition: 'left 0.4s linear' },
-    routeLabel: { fontSize: n(compact ? 9 : 11), color: '#c8b888', whiteSpace: 'nowrap', flexShrink: 0 },
-
-    panel: {
-      position: 'absolute',
-      bottom: 0,
-      left: 0,
-      right: 0,
-      height: panelH,
-      display: 'flex',
-      alignItems: 'center',
-      // space-evenly keeps the row filling the width at any size instead of
-      // bunching left with a fixed gap and overflowing on a narrow screen.
-      justifyContent: compact ? 'space-evenly' : 'flex-start',
-      gap: compact ? n(4) : n(22),
-      padding: compact
-        ? `0 calc(${n(8)}px + env(safe-area-inset-left, 0px)) env(safe-area-inset-bottom, 0px)`
-        : `${n(8)}px ${n(24)}px ${n(10)}px`,
-      background: 'linear-gradient(180deg, rgba(16,12,6,0.92) 0%, rgba(8,6,3,0.95) 100%)',
-      borderTop: '2px solid #3a2a10',
-      boxShadow: '0 -4px 18px rgba(0,0,0,0.55)',
-      fontFamily: 'monospace',
-      zIndex: 100,
-      overflow: 'hidden',
-    },
-
-    annunciators: {
-      position: 'absolute',
-      top: `calc(${n(compact ? 74 : 92)}px + env(safe-area-inset-top, 0px))`,
-      left: '50%',
-      transform: 'translateX(-50%)',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      gap: n(5),
-      zIndex: 150,
+      top: `calc(${n(3)}px + ${safeT})`,
+      left: '6%', right: '6%',
+      height: 2,
+      background: 'rgba(120,100,60,0.30)',
+      borderRadius: 2,
       pointerEvents: 'none',
-      maxWidth: '92vw',
     },
-    caution: {
+    routeRailFill: {
+      position: 'absolute', left: 0, top: 0, height: '100%',
+      background: '#8a6a2a', borderRadius: 2,
+    },
+    routeRailPip: {
+      position: 'absolute', top: -2, width: 6, height: 6,
+      marginLeft: -3, borderRadius: '50%',
+      background: '#ffd080', boxShadow: '0 0 6px #ffd080',
+      transition: 'left 0.4s linear',
+    },
+    routeRailLabel: {
+      position: 'absolute', top: n(6), right: 0,
+      fontFamily: 'monospace', fontSize: n(compact ? 9 : 10),
+      letterSpacing: 1, color: '#ffd080', textShadow: etch, whiteSpace: 'nowrap',
+    },
+
+    // ── Cautions: a tight column under the rail ─────────────────────────
+    cautions: {
+      position: 'absolute',
+      /*
+       * A call pushes the cautions below it rather than under it.
+       *
+       * Measured from the strip's actual content — header, body and one row
+       * per choice — because a fixed offset is wrong the moment an event has
+       * two options instead of three, and the chips end up hidden behind it.
+       */
+      top: `calc(${n(compact ? 14 : 18)
+        + (radioChoices > 0
+          ? n(compact ? 64 : 72) + radioChoices * n(compact ? 36 : 42)
+          : 0)}px + ${safeT})`,
+      left: '50%', transform: 'translateX(-50%)',
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+      gap: n(3), pointerEvents: 'none', maxWidth: '80%',
+    },
+    chip: {
+      // Just enough of a wash to hold the letterform against a bright sky
+      background: 'rgba(8,6,3,0.45)',
       border: '1px solid',
-      borderRadius: 3,
-      padding: `${n(3)}px ${n(11)}px`,
+      borderRadius: 2,
+      padding: `${n(1.5)}px ${n(7)}px`,
       fontFamily: 'monospace',
-      fontSize: n(compact ? 11 : 13),
+      fontSize: n(compact ? 9.5 : 11),
       fontWeight: 'bold',
-      letterSpacing: compact ? 1 : 2,
-      background: 'rgba(10,8,4,0.85)',
-      textAlign: 'center',
-    },
-
-    adi: {
-      position: 'relative', width: n(46), height: n(46), borderRadius: '50%',
-      overflow: 'hidden', border: '2px solid #3a2a10', flexShrink: 0,
-    },
-    adiCard: { position: 'absolute', left: 0, top: '-50%', width: '100%', height: '200%', transition: 'transform 0.12s linear' },
-    adiSky: { position: 'absolute', top: 0, width: '100%', height: '50%', background: '#3d5a74' },
-    adiGround: { position: 'absolute', top: '50%', width: '100%', height: '50%', background: '#5a4226' },
-    adiHorizon: { position: 'absolute', top: 'calc(50% - 1px)', width: '100%', height: 2, background: '#e8d5b7' },
-    adiWingL: { position: 'absolute', top: 'calc(50% - 1px)', left: 5, width: 12, height: 2, background: '#ffd080' },
-    adiWingR: { position: 'absolute', top: 'calc(50% - 1px)', right: 5, width: 12, height: 2, background: '#ffd080' },
-    adiDot: { position: 'absolute', top: 'calc(50% - 2px)', left: 'calc(50% - 2px)', width: 4, height: 4, borderRadius: '50%', background: '#ffd080' },
-
-    gauge: {
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      minWidth: compact ? n(38) : n(64),
-      gap: compact ? 0 : 2,
-      lineHeight: 1.15,
-    },
-    gaugeLabel: {
-      fontSize: n(compact ? 8 : 10),
-      color: '#6a5a3a',
-      letterSpacing: compact ? 1 : 2,
+      letterSpacing: 1,
+      textShadow: etch,
       whiteSpace: 'nowrap',
     },
-    gaugeValue: {
-      fontSize: n(compact ? 13 : 16),
-      color: '#e8d5b7',
-      fontWeight: 'bold',
-      whiteSpace: 'nowrap',
+
+    // ── Left cluster ────────────────────────────────────────────────────
+    primary: {
+      position: 'absolute',
+      left: `calc(${n(10) + leverClearance}px + ${safeL})`,
+      bottom: `calc(${n(8)}px + ${safeB})`,
+      display: 'flex', alignItems: 'flex-end', gap: n(7),
+      pointerEvents: 'none',
     },
-    varioTrack: {
+    varioRail: {
       position: 'relative',
-      width: compact ? n(9) : n(13),
-      height: compact ? n(20) : n(30),
-      background: '#241a0c',
+      width: n(4),
+      height: n(compact ? 44 : 58),
+      background: 'rgba(20,16,9,0.55)',
       borderRadius: 2,
       overflow: 'hidden',
     },
     varioZero: {
       position: 'absolute', left: 0, right: 0, top: '50%',
-      height: 1, background: '#6a5a3a',
+      height: 1, background: 'rgba(200,184,136,0.45)',
     },
-    varioNeedle: {
-      position: 'absolute', left: 1, right: 1,
-      borderRadius: 1,
+    varioFill: {
+      position: 'absolute', left: 0, right: 0, borderRadius: 2,
       transition: 'height 0.12s linear, top 0.12s linear',
     },
-    barBg: { width: compact ? n(30) : n(56), height: compact ? 2 : 3, background: '#241a0c', borderRadius: 2, overflow: 'hidden' },
-    barFill: { height: '100%', borderRadius: 2 },
-
-    toggles: {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: compact ? 0 : 4,
-      fontSize: n(compact ? 9 : 13),
+    primaryStack: { display: 'flex', flexDirection: 'column', gap: n(-1) },
+    bigRow: { display: 'flex', alignItems: 'baseline', gap: n(3) },
+    bigNum: {
       fontFamily: 'monospace',
-      lineHeight: 1.25,
-      whiteSpace: 'nowrap',
-      marginLeft: compact ? 0 : 'auto',
-      paddingRight: `calc(${n(4)}px + env(safe-area-inset-right, 0px))`,
+      // The scale jump IS the hierarchy now that the boxes are gone
+      fontSize: n(compact ? 26 : 34),
+      fontWeight: 'bold',
+      lineHeight: 1,
+      color: '#e8d5b7',
+      textShadow: etch,
+      letterSpacing: -1,
+    },
+    bigNumAlt: { fontSize: n(compact ? 20 : 26), color: '#c8b888' },
+    unit: {
+      fontFamily: 'monospace', fontSize: n(compact ? 8 : 9),
+      color: '#8a7a5a', textShadow: etch, letterSpacing: 1,
+    },
+    vs: {
+      fontFamily: 'monospace', fontSize: n(compact ? 10 : 12),
+      textShadow: etch, letterSpacing: 1, marginTop: n(1),
     },
 
-    modalBackdrop: {
+    // ── Right cluster ───────────────────────────────────────────────────
+    rightCluster: {
       position: 'absolute',
-      inset: 0,
-      background: 'rgba(0,0,0,0.75)',
-      display: 'flex',
-      // On a phone a centred box is the wrong shape: it fights the on-screen
-      // controls for the middle of a 390 px-tall screen. A bottom sheet uses
-      // the edge nobody is flying with.
-      alignItems: compact ? 'flex-end' : 'center',
-      justifyContent: 'center',
-      zIndex: 300,
-      padding: compact ? 0 : n(12),
-      pointerEvents: 'auto',
+      right: `calc(${n(10) + (touch ? Math.round(72 * s) : 0)}px + ${safeR})`,
+      bottom: `calc(${n(8)}px + ${safeB})`,
+      display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
+      gap: n(3), pointerEvents: 'none',
     },
-    modal: {
-      background: 'linear-gradient(180deg, #1d1509 0%, #140f07 100%)',
-      border: '1px solid #6b5624',
-      borderWidth: compact ? '1px 0 0' : 1,
-      // Instrument-panel bezel: a lit top edge and a deep drop shadow
-      boxShadow: 'inset 0 1px 0 rgba(255,214,140,0.18), 0 14px 40px rgba(0,0,0,0.7)',
-      padding: compact
-        ? `${n(9)}px ${n(13)}px calc(${n(10)}px + env(safe-area-inset-bottom, 0px))`
-        : `${n(20)}px ${n(26)}px ${n(22)}px`,
-      maxWidth: compact ? '100%' : n(560),
-      width: compact ? '100%' : '92%',
-      maxHeight: compact ? '58%' : '86%',
-      overflowY: 'auto',
+    barRow: { display: 'flex', alignItems: 'center', gap: n(5) },
+    miniRow: { display: 'flex', alignItems: 'center', gap: n(5) },
+    barLabel: {
+      fontFamily: 'monospace', fontSize: n(compact ? 7.5 : 8.5),
+      color: '#6a5a3a', letterSpacing: 1.5, textShadow: etch,
+      minWidth: n(compact ? 22 : 26), textAlign: 'right',
+    },
+    barTrack: {
+      width: n(compact ? 44 : 62), height: n(3),
+      background: 'rgba(20,16,9,0.6)', borderRadius: 2, overflow: 'hidden',
+    },
+    barFill: { height: '100%', borderRadius: 2, transition: 'width 0.15s linear' },
+    barValue: {
+      fontFamily: 'monospace', fontSize: n(compact ? 11 : 13),
+      fontWeight: 'bold', textShadow: etch,
+      minWidth: n(compact ? 20 : 24), textAlign: 'right',
+    },
+    configRow: {
+      display: 'flex', gap: n(7), marginTop: n(1),
+      fontFamily: 'monospace', fontSize: n(compact ? 8 : 9),
+      letterSpacing: 1, textShadow: etch,
+    },
+
+    // ── The radio call ──────────────────────────────────────────────────
+    radioStrip: {
+      position: 'absolute',
+      top: `calc(${n(10)}px + ${safeT})`,
+      left: '50%', transform: 'translateX(-50%)',
+      width: compact ? 'calc(100% - 20px)' : 'min(620px, 82%)',
+      // A wash rather than a panel: dark enough to read on, transparent
+      // enough that the aeroplane behind it is never hidden.
+      background: 'linear-gradient(180deg, rgba(14,10,5,0.90) 0%, rgba(14,10,5,0.72) 100%)',
+      borderLeft: '2px solid #ffd080',
+      borderRadius: 3,
+      padding: `${n(6)}px ${n(10)}px ${n(7)}px`,
       fontFamily: 'monospace',
-      borderRadius: compact ? '10px 10px 0 0' : 3,
+      pointerEvents: 'auto',
+      zIndex: 300,
+      boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
     },
-    // ── Channel strip: this came in over the radio, so it says so ────────
-    modalChannel: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: n(7),
-      marginBottom: n(compact ? 6 : 10),
-    },
-    modalLive: {
-      width: n(6), height: n(6), borderRadius: '50%',
-      background: '#ff4a3a', boxShadow: '0 0 6px #ff4a3a',
-      flexShrink: 0,
+    radioHead: { display: 'flex', alignItems: 'center', gap: n(6) },
+    radioLive: {
+      width: n(5), height: n(5), borderRadius: '50%',
+      background: '#ff4a3a', boxShadow: '0 0 6px #ff4a3a', flexShrink: 0,
       animation: 'aa-live 1.6s steps(1, end) infinite',
     },
-    modalChannelText: {
-      fontSize: n(compact ? 8 : 9),
-      letterSpacing: 2,
-      color: '#8a7a5a',
-      whiteSpace: 'nowrap',
+    radioFrom: {
+      fontSize: n(compact ? 10 : 11), letterSpacing: 2,
+      color: '#ffd080', textTransform: 'uppercase', fontWeight: 'bold',
     },
-    modalChannelRule: { flex: 1, height: 1, background: 'linear-gradient(90deg,#5a4a20,transparent)' },
-    modalTitle: {
-      color: '#ffd080',
-      fontSize: n(compact ? 15 : 21),
-      letterSpacing: compact ? 0.5 : 1.5,
-      textTransform: 'uppercase',
-      lineHeight: 1.2,
-      marginBottom: n(compact ? 5 : 9),
-      textShadow: '0 0 14px rgba(255,208,128,0.25)',
-    },
-    modalDesc: {
-      color: '#bdae8c',
-      fontSize: n(compact ? 11 : 14),
-      lineHeight: compact ? 1.45 : 1.6,
-      marginBottom: n(compact ? 10 : 18),
-    },
-    choices: { display: 'flex', flexDirection: 'column', gap: n(compact ? 6 : 9) },
-    choiceBtn: {
-      // A switch on the panel, not a web button: a numbered key plate, the
-      // action, and underneath it exactly what throwing it will cost.
-      display: 'flex',
-      alignItems: 'stretch',
-      gap: n(10),
-      background: 'rgba(255,214,140,0.035)',
-      border: '1px solid #4a3c1a',
-      borderLeft: '3px solid #8a6a2a',
-      color: '#e8d5b7',
-      fontFamily: 'monospace',
-      minHeight: 44,
-      padding: `${n(compact ? 7 : 9)}px ${n(11)}px`,
-      cursor: 'pointer',
-      textAlign: 'left',
-      borderRadius: 2,
-    },
-    choiceKey: {
-      flexShrink: 0,
-      width: n(18), height: n(18),
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      border: '1px solid #6b5624',
-      borderRadius: 2,
-      color: '#ffd080',
-      fontSize: n(compact ? 9 : 11),
-      alignSelf: 'center',
-    },
-    choiceBody: { display: 'flex', flexDirection: 'column', gap: n(2), minWidth: 0 },
-    choiceLabel: {
-      fontSize: n(compact ? 12 : 14),
-      lineHeight: 1.3,
-      color: '#f0e2c4',
-    },
-    choiceCost: {
-      fontSize: n(compact ? 9 : 10.5),
+    radioBody: {
+      color: '#c8b888',
+      fontSize: n(compact ? 10.5 : 12.5),
       lineHeight: 1.35,
-      color: '#8a7a5a',
+      margin: `${n(3)}px 0 ${n(6)}px`,
     },
+    radioChoices: { display: 'flex', flexWrap: 'wrap', gap: n(5) },
+    radioChip: {
+      display: 'flex', alignItems: 'center', gap: n(6),
+      background: 'rgba(255,214,140,0.07)',
+      border: '1px solid #5a4a20',
+      borderRadius: 2,
+      color: '#f0e2c4',
+      fontFamily: 'monospace',
+      fontSize: n(compact ? 10.5 : 12),
+      textAlign: 'left',
+      // Still a comfortable tap target even though it is now a chip
+      minHeight: 38,
+      padding: `${n(4)}px ${n(9)}px`,
+      cursor: 'pointer',
+      flex: compact ? '1 1 100%' : '0 1 auto',
+    },
+    radioChipKey: {
+      flexShrink: 0,
+      width: n(15), height: n(15),
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      border: '1px solid #6b5624', borderRadius: 2,
+      color: '#ffd080', fontSize: n(9),
+    },
+    radioChipText: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 },
+    radioChipCost: { fontSize: n(9), color: '#8a7a5a', lineHeight: 1.3 },
   };
 }

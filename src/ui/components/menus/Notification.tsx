@@ -20,11 +20,15 @@ export function GlobalNotification(): React.ReactElement | null {
       // absolute, not fixed: it belongs to the canvas rect like the rest of the
       // overlay, so it stays registered with the game inside any letterbox.
       position: 'absolute',
-      // Everything that stacks down the top of the screen shares one running
-      // order — route strip (8), notification, annunciators — and the compact
-      // numbers are spaced so no two can ever land on each other, or on a
-      // scene's own header text underneath.
-      top: `calc(${n(vp.isCompact ? 38 : 48)}px + env(safe-area-inset-top, 0px))`,
+      /*
+       * Bottom centre, not top.
+       *
+       * The top of the screen belongs to the radio strip and the caution
+       * chips; a toast there landed straight through an incoming call. The
+       * HUD redesign left the bottom centre completely clear, so that is
+       * where transient messages go — nothing else ever occupies it.
+       */
+      bottom: `calc(${n(vp.isCompact ? 30 : 40)}px + env(safe-area-inset-bottom, 0px))`,
       left: '50%',
       transform: 'translateX(-50%)',
       maxWidth: '88vw',

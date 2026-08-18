@@ -187,7 +187,7 @@ export class FlightScene extends Phaser.Scene {
     this.world?.resize(width, height, groundY);
     this.fx?.resize(width, height);
     this.approachText?.setPosition(width / 2, height / 2 - 30);
-    this.keyHintText?.setPosition(width - 12, 12);
+    this.keyHintText?.setPosition(width / 2, this.cameras.main.height - 4);
   }
 
   create(): void {
@@ -321,15 +321,16 @@ export class FlightScene extends Phaser.Scene {
       backgroundColor: '#00000099', padding: { x: 14, y: 6 },
     }).setOrigin(0.5).setDepth(10).setAlpha(0);
 
-    // Keyboard legend, TOP right. The bottom of the canvas belongs to the
-    // React instrument panel, whose height in design units varies with the
-    // display scale — anything anchored to the bottom edge disappears behind
-    // it on some screens and not others. The top-right corner is always free.
-    this.keyHintText = this.add.text(width - 12, 12,
+    // Keyboard legend, bottom CENTRE. It moved to the top-right when the HUD
+    // had an instrument panel along the bottom; now the panel is gone and the
+    // top belongs to the radio strip, so the bottom edge is free again — and
+    // the legend is reference text that should sit as far out of the way as
+    // it can get.
+    this.keyHintText = this.add.text(width / 2, height - 4,
       'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine/Restart   T: Time   M: Mute   ESC: Abort',
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
-    ).setOrigin(1, 0).setDepth(10).setVisible(!isTouchDevice());
+    ).setOrigin(0.5, 1).setDepth(10).setVisible(!isTouchDevice());
 
     this.warpText = this.add.text(14, 14, '»» TIME ×4', {
       fontSize: '15px', color: '#ffd080', fontFamily: 'monospace', fontStyle: 'bold',

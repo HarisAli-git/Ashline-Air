@@ -625,40 +625,82 @@ class SoundEngineClass {
     hiss.start(start);
     hiss.stop(start + total + 0.1);
 
-    // ── The voice: pulse carrier through three moving formants ────────────
+    // ── The voice: a glottal source through PARALLEL formants ─────────────
+    //
+    // The formants must be in parallel, each with its own gain, summed. The
+    // first version chained them in series, and a series of narrow bandpasses
+    // at 700 / 1220 / 2600 Hz passes almost nothing but their overlap — which
+    // is exactly why it came out as a thin beep instead of a voice.
+    //
+    // Vowels alone still sound like a synthesiser humming. What makes it read
+    // as SPEECH is the consonants between them: a short burst of filtered
+    // noise before most syllables, which is what the ear uses to segment a
+    // stream of sound into words.
+    const VOWELS: Array<[number, number, number]> = [
+      [730, 1090, 2440],  // "ah"
+      [530, 1840, 2480],  // "eh"
+      [270, 2290, 3010],  // "ee"
+      [570,  840, 2410],  // "aw"
+      [440, 1020, 2240],  // "uh"
+      [300,  870, 2240],  // "oo"
+    ];
+
     for (let i = 0; i < syllables; i++) {
-      const t0 = start + 0.05 + i * rate;
-      const dur = rate * (0.62 + Math.random() * 0.24);
-      // Sentence melody: drifts down, lifts on the last syllable like a query
-      const droop = 1 - (i / syllables) * 0.18;
-      const f0 = basePitch * droop * (0.92 + Math.random() * 0.16);
+      const t0 = start + 0.06 + i * rate;
+      const dur = rate * (0.60 + Math.random() * 0.22);
+
+      // ── Consonant: a brief noise burst that opens the syllable ──────────
+      // Alternating plosive (low, short) and fricative (high, longer) keeps
+      // the stream from sounding like one repeated sound.
+      if (i > 0 || Math.random() < 0.6) {
+        const fric = Math.random() < 0.45;
+        this.burstInto(bus, t0 - 0.018,
+          fric ? 0.045 : 0.022,
+          fric ? 3800 + Math.random() * 1800 : 900 + Math.random() * 700,
+          fric ? 0.045 : 0.075,
+          fric ? 'highpass' : 'bandpass', fric ? 0.7 : 2.5);
+      }
+
+      // ── Glottal source ──────────────────────────────────────────────────
+      // Sentence melody: drifts down through the call, lifts at the very end
+      // the way a real transmission signs off.
+      const last = i === syllables - 1;
+      const droop = 1 - (i / syllables) * 0.22 + (last ? 0.14 : 0);
+      const f0 = basePitch * droop * (0.94 + Math.random() * 0.12);
 
       const osc = ctx.createOscillator();
       osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(f0, t0);
-      osc.frequency.linearRampToValueAtTime(f0 * (0.94 + Math.random() * 0.12), t0 + dur);
+      // Intonation inside the syllable — a flat pitch reads as a machine
+      osc.frequency.linearRampToValueAtTime(f0 * (0.93 + Math.random() * 0.14), t0 + dur);
 
-      // Three formants ≈ a vowel. Moving them between syllables is what stops
-      // it sounding like a buzzer and starts it sounding like a mouth.
-      const vowel = [
-        [700, 1220, 2600], [400, 1900, 2550], [320, 900, 2400],
-        [640, 1200, 2400], [500, 1700, 2500],
-      ][Math.floor(Math.random() * 5)];
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(0.26, t0 + dur * 0.18);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      // Glide between two vowels: this is what a diphthong is, and it does
+      // more for intelligibility-of-cadence than any single steady vowel.
+      const vA = VOWELS[Math.floor(Math.random() * VOWELS.length)];
+      const vB = VOWELS[Math.floor(Math.random() * VOWELS.length)];
 
-      let node: AudioNode = osc;
+      // Syllable envelope, shared by every formant branch
+      const env = ctx.createGain();
+      env.gain.setValueAtTime(0.0001, t0);
+      env.gain.exponentialRampToValueAtTime(0.30, t0 + dur * 0.16);
+      env.gain.setValueAtTime(0.30, t0 + dur * 0.62);
+      env.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      env.connect(bus);
+
+      // Three resonators IN PARALLEL, weighted the way a vocal tract is:
+      // F1 carries the body, F2 the identity, F3 just the brightness.
+      const fGain = [1.0, 0.62, 0.22];
       for (let k = 0; k < 3; k++) {
         const bp = ctx.createBiquadFilter();
         bp.type = 'bandpass';
-        bp.frequency.setValueAtTime(vowel[k], t0);
-        bp.frequency.linearRampToValueAtTime(vowel[k] * (0.9 + Math.random() * 0.2), t0 + dur);
-        bp.Q.value = 6 - k * 1.4;
-        node = node.connect(bp);
+        bp.frequency.setValueAtTime(vA[k], t0);
+        bp.frequency.linearRampToValueAtTime(vB[k], t0 + dur);
+        bp.Q.value = 9 - k * 2;
+        const gk = ctx.createGain();
+        gk.gain.value = fGain[k];
+        osc.connect(bp).connect(gk).connect(env);
       }
-      node.connect(g).connect(bus);
+
       osc.start(t0);
       osc.stop(t0 + dur + 0.02);
     }
