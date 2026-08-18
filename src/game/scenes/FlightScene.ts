@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { AircraftController, type FlightInput } from '../entities/aircraft/AircraftController';
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
+import { specFor } from '../entities/aircraft/render/AircraftVisualSpec';
 import { CrashSequence } from '../entities/aircraft/CrashSequence';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { WeatherHazards } from '../entities/weather/WeatherHazards';
@@ -94,6 +95,8 @@ export class FlightScene extends Phaser.Scene {
   private airTurb = 0;
   /** The cell standing in the way, for the annunciator. */
   private weatherAhead: { kind: string; km: number } | null = null;
+  /** The cell we have already called on the radio, so it is warned once. */
+  private warnedCell: unknown = null;
   /** Traffic passed inside 30 m without hitting it — paid out on delivery. */
   private closeCalls = 0;
   private notifiedApproach = false;
@@ -262,7 +265,9 @@ export class FlightScene extends Phaser.Scene {
     // has a voice attached to it rather than being a silent number on the HUD.
     this.world.traffic.onRadio = msg => {
       EventBus.emit('ui:show-notification', { message: `📻 ${msg}`, type: 'info' });
-      SoundEngine.click();
+      // The caption carries the words; the synthesised voice carries the
+      // cadence. Without it a radio call reads as a UI toast.
+      SoundEngine.radio(msg, { urgency: 0.35 });
     };
     // Threading a needle is the most satisfying thing in the flight, so it is
     // recognised and paid for. Anything under 30 m counts; under 12 m is a
@@ -286,6 +291,27 @@ export class FlightScene extends Phaser.Scene {
     if (faction) this.world.setFactionColor(parseInt(faction.color.replace('#', ''), 16));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
     this.rig = new CameraRig(this.cameras.main, this.controller.vStall, this.controller.vMax);
+
+    // The engine you hear is the engine you can see. Style, count and blade
+    // count all come from the airframe's own visual spec, so a single radial
+    // crop duster and a four-engine turboprop heavy cannot sound the same.
+    {
+      const vs = specFor(definition.id);
+      // ALL of them, not just the near-side ones: `far` is a DRAWING flag for
+      // which engines render behind the fuselage, and filtering on it made
+      // every twin in the fleet sound like a single.
+      const engines = Math.max(1, vs.engines.length);
+      SoundEngine.setEngineProfile({
+        kind: vs.engineStyle,
+        blades: vs.prop.bladePairs * 2,
+        count: engines,
+        // A bigger aeroplane swings a bigger, slower propeller, so it sits
+        // lower. Keyed to stall speed as a proxy for size, and centred so the
+        // fleet actually spreads across the range instead of piling up at the
+        // clamp: 60 km/h → 1.45, 130 km/h → 0.70.
+        pitch: Phaser.Math.Clamp(90 / Math.max(45, definition.stats.stallSpeed), 0.70, 1.45),
+      });
+    }
     this.crash    = new CrashSequence(this, this.aircraft, groundY);
     this.fx       = new WeatherFX(this, width, height);
 
@@ -363,6 +389,10 @@ export class FlightScene extends Phaser.Scene {
       this.eventUnsubs.forEach(u => u());
       this.eventUnsubs = [];
       SoundEngine.stopFlightLoop();
+    SoundEngine.stopWeatherBed();
+    SoundEngine.stopTraffic();
+      SoundEngine.stopWeatherBed();
+      SoundEngine.stopTraffic();
       this.crash.destroy();
     });
     SoundEngine.unlock();
@@ -530,9 +560,30 @@ export class FlightScene extends Phaser.Scene {
     this.weatherAhead = wx.ahead && wx.distanceToEdge < 26000 && wx.ahead.kind !== 'clear'
       ? { kind: wx.ahead.kind, km: wx.distanceToEdge / (WORLD_PX_PER_M * 1000) }
       : null;
+
+    // Somebody calls the weather ahead over the air, once per cell, while
+    // there is still time to route around it. Silence about a storm you can
+    // already see would be the strangest thing in the sky.
+    if (wx.ahead && wx.ahead !== this.warnedCell
+      && wx.distanceToEdge < 14000 && wx.distanceToEdge > 0
+      && (wx.ahead.kind === 'thunderstorm' || wx.ahead.kind === 'dust_storm'
+        || wx.ahead.kind === 'blizzard')) {
+      this.warnedCell = wx.ahead;
+      const km = (wx.distanceToEdge / (WORLD_PX_PER_M * 1000)).toFixed(1);
+      const what = wx.ahead.kind === 'thunderstorm' ? 'a cell'
+        : wx.ahead.kind === 'dust_storm' ? 'a dust wall' : 'a snow band';
+      const call = `Ashline flight, ${what} on your nose, ${km} kilometres. Advise you go round it.`;
+      EventBus.emit('ui:show-notification', { message: `📻 ${call}`, type: 'warning' });
+      SoundEngine.radio(call, { urgency: 0.6, pitch: 96 });
+    }
     this.airVertical = air.vertical;
     this.inThermal = air.inThermal;
     this.airTurb = air.turbulence;
+
+    // ── Continuous audio: the weather you are inside, and the air itself ──
+    SoundEngine.setWeather(this.weather.current.condition, Math.max(wx.intensity, 0.0), sdt);
+    // Audio vario: hunt a thermal by ear while looking where you are going.
+    SoundEngine.setVario(air.vertical, sdt);
 
     // ── Physics (fixed-step, frame-rate independent) ───────────────────────
     this.state = this.controller.update(this.state, input, sdt, windX, air.vertical);
@@ -683,6 +734,13 @@ export class FlightScene extends Phaser.Scene {
     const worldX = this.scrollX + AIRCRAFT_X;
     this.updateHazards(worldX, sdt);
 
+    // Another aeroplane you can HEAR closing is the oldest traffic alert there
+    // is — and the pitch dropping as it goes past is the whole effect.
+    {
+      const near = this.world.traffic.nearest(worldX, this.state.altitude);
+      SoundEngine.setTraffic(near.proximity, near.closure);
+    }
+
     // ── Other traffic: advisories, then the midair if you ignored them ────
     this.updateTraffic(worldX, sdt);
     if (this.landed) return;
@@ -738,6 +796,7 @@ export class FlightScene extends Phaser.Scene {
       Math.max((this.state.engineTemp - 0.7) / 0.3, (60 - this.state.integrity) / 60), 0, 1,
     );
     SoundEngine.updateFlight({
+      dt: sdt,
       rpm,
       throttle: this.engineRunning ? this.state.throttle : 0,
       speedFrac: clamp(this.state.speed / 60, 0, 1),
@@ -891,7 +950,11 @@ export class FlightScene extends Phaser.Scene {
         this.disengageWarp('taking ground fire');
       }
     }
-    if (fire.shots > 0) SoundEngine.gunfire();
+    // Each weapon has its own voice and distance dulls it, so you can hear
+    // what is shooting and roughly how far off it is.
+    if (fire.shots > 0 && fire.firedKind) {
+      SoundEngine.gunshot(fire.firedKind, fire.firedDist);
+    }
     if (fire.hit) {
       SoundEngine.bulletHit();
       this.aircraft.notifyHit();

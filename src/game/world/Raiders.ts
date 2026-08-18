@@ -118,6 +118,16 @@ export interface RaiderFireReport {
   clearAltitudeM: number;
   /** Bursts that went off this frame — for the sound engine. */
   shots: number;
+  /**
+   * What fired and how far off it was.
+   *
+   * One flat gunfire sample meant a rifle over sandbags and an autocannon
+   * three kilometres out were the same sound, so the player could never tell
+   * by ear what was shooting at them or how much trouble they were in.
+   */
+  firedKind: 'small' | 'marksman' | 'heavy' | 'aa' | null;
+  /** 0 = right underneath you, 1 = at the edge of that weapon's reach. */
+  firedDist: number;
   /** Integrity damage taken this frame. */
   damage: number;
   /** True if any round connected, so the camera can be kicked. */
@@ -368,6 +378,8 @@ export class Raiders {
     let clearAlt = 0;
     let shots = 0;
     let damage = 0;
+    let firedKind: 'small' | 'marksman' | 'heavy' | 'aa' | null = null;
+    let firedDist = 1;
     let hit = false;
 
     // Only the nearest few weapons that can actually bear get to shoot; the
@@ -403,9 +415,17 @@ export class Raiders {
 
     if (engaged) this.observe(target.altM, dt);
 
-    for (const { e, w } of inPlay.slice(0, MAX_SIMULTANEOUS)) {
+    for (const { e, w, d } of inPlay.slice(0, MAX_SIMULTANEOUS)) {
       e.cool -= dt;
       if (e.cool > 0) continue;
+      // Remember the nearest thing that actually fired — that is the one the
+      // player hears over the others.
+      const voice: 'small' | 'marksman' | 'heavy' | 'aa' =
+        e.kind === 'aa' ? 'aa'
+          : e.kind === 'technical' ? 'heavy'
+            : e.kind === 'tower' ? 'marksman' : 'small';
+      const rel = Math.min(1, d / w.rangePx);
+      if (firedKind === null || rel < firedDist) { firedKind = voice; firedDist = rel; }
       e.cool = w.cadence * (0.75 + Math.random() * 0.5);
 
       // Height is the whole defence, and it works by spoiling their aim: on
@@ -427,7 +447,10 @@ export class Raiders {
     this.pendingDamage = 0;
     this.pendingHits = 0;
 
-    return { engaged, label: worst?.label ?? null, clearAltitudeM: clearAlt, shots, damage, hit };
+    return {
+      engaged, label: worst?.label ?? null, clearAltitudeM: clearAlt,
+      shots, damage, hit, firedKind, firedDist,
+    };
   }
 
   /** One weapon lets go a burst at the aircraft. */

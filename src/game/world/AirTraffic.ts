@@ -330,6 +330,34 @@ export class AirTraffic {
     return best;
   }
 
+  /**
+   * The nearest live aircraft, as the ear hears it.
+   *
+   * `proximity` folds horizontal and vertical separation into one 0–1 number
+   * so the sound engine does not have to know about world units, and `closure`
+   * is signed so the pitch can rise on the way in and drop as it goes past —
+   * which is the entire point of hearing traffic at all.
+   */
+  nearest(planeWorldX: number, planeAlt: number): { proximity: number; closure: number } {
+    let proximity = 0;
+    let closure = 0;
+    for (const p of this.list) {
+      if (p.doom !== null) continue;
+      const dx = Math.abs(p.wx - planeWorldX);
+      const dAlt = Math.abs(p.alt - planeAlt);
+      // Audible out to about 1.8 km horizontally and 120 m vertically
+      const h = Math.max(0, 1 - dx / 1600);
+      const v = Math.max(0, 1 - dAlt / 120);
+      const prox = h * h * v;
+      if (prox <= proximity) continue;
+      proximity = prox;
+      // Positive while it is still coming toward us
+      closure = Math.sign(p.wx - planeWorldX) * Math.sign(-p.vx) >= 0 ? 1 : -1;
+      if (p.wx < planeWorldX) closure = -1;
+    }
+    return { proximity, closure };
+  }
+
   /** Knock one out of the sky — used when we hit it. */
   doom(p: TrafficPlane): void {
     if (p.doom !== null) return;
