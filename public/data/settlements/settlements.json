@@ -5,8 +5,8 @@
     "description": "A fortified trading post built in a dried river basin. The Republic's main western hub, known for its fuel depot and reliable repair crews.",
     "factionId": "republic",
     "position": {
-      "x": 220,
-      "y": 340
+      "x": 150,
+      "y": 350
     },
     "population": 1800,
     "securityLevel": 7,
@@ -58,8 +58,8 @@
     "description": "A nomad encampment carved into red sandstone cliffs. Water is scarce here and medicine rarer still.",
     "factionId": "nomads",
     "position": {
-      "x": 780,
-      "y": 410
+      "x": 245,
+      "y": 300
     },
     "population": 450,
     "securityLevel": 4,
@@ -108,11 +108,11 @@
   {
     "id": "irongate_station",
     "name": "Irongate Station",
-    "description": "A Merchants Guild stronghold built around a pre-war rail depot. Bustling and lawless \u2014 if you have coin, you can buy anything.",
+    "description": "A Merchants Guild stronghold built around a pre-war rail depot. Bustling and lawless — if you have coin, you can buy anything.",
     "factionId": "merchants_guild",
     "position": {
-      "x": 500,
-      "y": 200
+      "x": 600,
+      "y": 480
     },
     "population": 3200,
     "securityLevel": 5,
@@ -164,8 +164,8 @@
     "factionId": "nomads",
     "description": "A drowned port town on stilts above the tidal flats. The nomads run salvage barges out of it and trade what the sea gives back.",
     "position": {
-      "x": 150,
-      "y": 130
+      "x": 350,
+      "y": 470
     },
     "population": 900,
     "securityLevel": 3,
@@ -217,8 +217,8 @@
     "factionId": "raiders",
     "description": "A warlord holding built in the crater of a burned refinery. They pay well and ask no questions; the approach is over their guns.",
     "position": {
-      "x": 860,
-      "y": 170
+      "x": 815,
+      "y": 200
     },
     "population": 1400,
     "securityLevel": 2,
@@ -270,8 +270,8 @@
     "factionId": "republic",
     "description": "A mountaintop comms relay the Republic never let go of. Thin air, a short strip, and the only working long-range transmitter left.",
     "position": {
-      "x": 430,
-      "y": 520
+      "x": 205,
+      "y": 455
     },
     "population": 400,
     "securityLevel": 8,

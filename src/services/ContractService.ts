@@ -10,10 +10,11 @@ import type {
 import { generateId } from '../game/utils/idGenerator';
 import { randomBetween, randomInt, distance, pixelsToKm } from '../game/utils/math';
 import { EventBus } from '../game/utils/EventBus';
+import { KM_PER_PIXEL, routeBlock } from './RouteService';
 
 const CONTRACTS_PER_SETTLEMENT = 3;
 const CONTRACT_TTL_MINUTES = 240;  // in-game minutes before expiry
-const KM_PER_PIXEL = 0.5;
+
 
 // Contract type mix: mostly cargo, with rarer high-stakes work
 const TYPE_WEIGHTS: Array<[ContractType, number]> = [
@@ -92,7 +93,12 @@ class ContractServiceClass {
       distance(origin.position.x, origin.position.y, dest.position.x, dest.position.y),
       KM_PER_PIXEL
     );
-    const repGain = Math.max(1, Math.round(distKm / 50));
+    /*
+     * Two per delivery on the shortest leg, up to about thirteen on the
+     * longest. It was `distKm / 50` with a floor of 1, which meant the only
+     * route available at the start of the game paid exactly one point.
+     */
+    const repGain = Math.max(2, Math.round(distKm / 28));
 
     // Type-specific payload, pay and gating
     let payload: ContractPayload[];
@@ -213,6 +219,9 @@ class ContractServiceClass {
           s => s.id !== settlement.id && save.player.unlockedSettlementIds.includes(s.id)
         );
         if (destinations.length === 0) break;
+        // Deliberately NOT filtered by reach. A board showing only what you can
+        // already fly has nothing to want - the offers you cannot take yet are
+        // what make the next aircraft worth buying. The UI labels them.
         const dest = destinations[randomInt(0, destinations.length - 1)];
         const contract = this.buildContract(settlement, dest, save.player.reputation, now);
         if (contract) {
@@ -231,16 +240,38 @@ class ContractServiceClass {
     const capacity = activeDef?.stats.cargoCapacity ?? 200;
     const repFor = (factionId: string): number =>
       save.player.reputation.find(r => r.factionId === factionId)?.points ?? 0;
+    /*
+     * Reach: the route has to be inside the aircraft's fuel AND both ends have
+     * to have enough runway for it. Without this the board happily offered a
+     * heavy transport a 430 m mountain strip, and a crop duster a 350 km haul.
+     */
+    const canReach = (c: Contract): boolean => {
+      if (!activeDef) return true;
+      const o = settlements.find(x => x.id === c.originId);
+      const d = settlements.find(x => x.id === c.destinationId);
+      if (!o || !d) return true;
+      return routeBlock(activeDef, o, d) === null;
+    };
     const isAccessible = (c: Contract): boolean =>
       repFor(c.factionId) >= c.reputationRequirement &&
-      c.payload.reduce((s, p) => s + p.totalWeightKg, 0) <= capacity;
+      c.payload.reduce((s, p) => s + p.totalWeightKg, 0) <= capacity &&
+      canReach(c);
 
     for (const settlement of settlements) {
       if (!save.player.unlockedSettlementIds.includes(settlement.id)) continue;
       const destinations = settlements.filter(
         s => s.id !== settlement.id && save.player.unlockedSettlementIds.includes(s.id)
       );
-      if (destinations.length === 0) continue;
+      /*
+       * Only the ones the current aircraft could actually fly. Some pairs have
+       * no service at all - a 430 m strip cannot take anything with the legs to
+       * reach the far fields - and forcing a contract onto one of those would
+       * spin this loop eight times and put an unacceptable offer on the board.
+       */
+      const reachable = activeDef
+        ? destinations.filter(d => routeBlock(activeDef, settlement, d) === null)
+        : destinations;
+      if (reachable.length === 0) continue;
 
       let guard = 0;
       while (guard++ < 8) {
@@ -256,7 +287,7 @@ class ContractServiceClass {
           save.world.availableContracts = save.world.availableContracts.filter(c => c.id !== drop.id);
         }
 
-        const dest = destinations[randomInt(0, destinations.length - 1)];
+        const dest = reachable[randomInt(0, reachable.length - 1)];
         const forced = this.buildContract(settlement, dest, save.player.reputation, now, {
           forceType: 'cargo',
           maxWeightKg: capacity,

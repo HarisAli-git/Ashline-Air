@@ -93,7 +93,10 @@ export class WeatherField {
     // Three to five cells strewn down the route, never over either airfield —
     // taking off into a wall of dust you could not have avoided is not a
     // decision, it is a punishment.
-    const n = 3 + Math.floor(hash(this.seed) * 3);
+    // Roughly one cell per 9 km of route. A fixed three-to-five was dense on a
+    // short hop and left a long haul with nothing but the top-up spawner.
+    const n = Math.max(2, Math.min(7,
+      Math.round(routeEndPx / (9 * 1000 * 9)) + Math.floor(hash(this.seed) * 2)));
     const usable = routeEndPx * 0.72;
     for (let i = 0; i < n; i++) {
       const t = (i + 0.5) / n;

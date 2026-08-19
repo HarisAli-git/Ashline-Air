@@ -38,32 +38,48 @@ interface UnlockRule {
  * more completed runs and a bit more standing, so the map grows at roughly the
  * pace the hangar does and there is always a next thing to be working toward.
  */
+/*
+ * Ordered by what you can actually REACH, not by how far away it looks.
+ *
+ * The previous table was written before the map rework moved the settlements,
+ * and it ended up almost exactly inverted: Highreach — which the free crop
+ * duster can fly to on day one — was gated at 18 deliveries and 150
+ * reputation, while Irongate, which needs a 55,000 credit freighter to reach
+ * at all, opened at 3 and 10. Combined with 1 reputation per delivery on the
+ * only starting route, that made the first new destination ten round trips of
+ * the same leg.
+ *
+ * Now each gate sits where the aircraft that can serve it does: Highreach on
+ * the duster, Saltmarsh on the bush plane, Irongate on the freighter, Cinder
+ * on the heavy.
+ */
 const UNLOCKS: UnlockRule[] = [
   {
-    settlementId: 'irongate_station',
-    deliveries: 3,
-    reputation: 10,
-    blurb: 'The Guild has seen your manifests. Irongate Station will take your traffic.',
+    settlementId: 'highreach_relay',
+    deliveries: 2,
+    reputation: 0,
+    blurb: 'Highreach has cleared you for the mountain strip. Four hundred metres of it, cut into a ridge — take the little aeroplane.',
   },
   {
     settlementId: 'saltmarsh_docks',
-    deliveries: 7,
-    reputation: 45,
-    blurb: 'The barge crews have vouched for you. Saltmarsh Docks is on your chart.',
+    deliveries: 5,
+    reputation: 12,
+    blurb: 'The barge crews have vouched for you. Saltmarsh Docks is on your chart — mind the channels, they are not all empty.',
+  },
+  {
+    settlementId: 'irongate_station',
+    deliveries: 9,
+    reputation: 35,
+    blurb: 'The Guild has seen your manifests. Irongate Station will take your traffic — if you turn up in something that can carry it.',
   },
   {
     settlementId: 'cinder_flats',
-    deliveries: 12,
-    reputation: 90,
+    deliveries: 14,
+    reputation: 70,
     blurb: 'Word reached the Flats that you fly through trouble instead of around it. They want a word — and they pay.',
   },
-  {
-    settlementId: 'highreach_relay',
-    deliveries: 18,
-    reputation: 150,
-    blurb: 'Highreach has cleared you for the mountain strip. Short runway, thin air, and the best rates in the wasteland.',
-  },
 ];
+
 
 /** Best standing held with any single faction. */
 function bestReputation(save: SaveData): number {

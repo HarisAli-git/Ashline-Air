@@ -160,7 +160,13 @@ export const TUNING = {
    * with a never-exceed speed of 189. "Out of control" has to mean the nose
    * can actually drop, and that recovery is then a real problem.
    */
-  pitchMin: -72,            // airborne nose-down limit; a stall break needs room
+  /**
+   * Nose-down limit. Deliberately steep: at -72° the aeroplane could not be
+   * pointed hard enough at the ground to feel like it was falling, which is
+   * what "we can't control the plane, it is not free falling steeply" was
+   * describing. -85° is as near vertical as makes any difference.
+   */
+  pitchMin: -85,
   /**
    * Pitch disturbance that grows as the aircraft slows below flying speed.
    * Down there it stops flying and starts wallowing: the controls go soft
@@ -193,6 +199,48 @@ const MAX_FRAME_DT = 0.25;  // allows time warp up to ×8 at 30+ fps
 const MAX_SUBSTEPS = 32;
 
 // Controls input snapshot
+/**
+ * How thin the air is at a given height, relative to sea level.
+ *
+ * The model had NO altitude term at all: the wing made the same lift and the
+ * engine the same thrust at eight thousand metres as on the runway. That is
+ * why `maxAltitude` could only ever be a hard clamp - there was no physics to
+ * stop you, so the number had to. And it is most of why an engine-off descent
+ * felt weightless: nothing about the aeroplane changed with height.
+ *
+ * Standard atmosphere: 74% of sea-level density at 3000 m, 43% at 8000 m.
+ */
+/**
+ * Gameplay metres of altitude per real atmospheric metre.
+ *
+ * The vertical scale is compressed the same way the horizontal one is: a route
+ * is a fifth of its lore distance, and the sky is an eighth of its real depth.
+ * Without this the whole atmosphere would sit in the top 12% of the band and a
+ * ceiling of 1000 m would be indistinguishable from sea level.
+ *
+ * With it, 1000 gameplay metres is 8000 m of real air - 43% density - so a
+ * ceiling is once again something the aerodynamics produce rather than
+ * something a clamp asserts.
+ */
+const ALTITUDE_COMPRESSION = 8;
+
+export function densityRatio(altitudeM: number): number {
+  const real = altitudeM * ALTITUDE_COMPRESSION;
+  return Math.pow(Math.max(0.15, 1 - 2.25577e-5 * real), 4.2559);
+}
+
+/**
+ * Thrust falls off FASTER than density does.
+ *
+ * A normally-aspirated engine loses manifold pressure as well as mass flow, so
+ * its power drops roughly as density^1.3 while the drag it has to overcome
+ * drops only as density^1. That gap is what a service ceiling actually IS -
+ * the height where the two curves meet and the aeroplane stops climbing. With
+ * this in, the ceiling emerges from the aerodynamics instead of being a clamp
+ * bolted on top of them.
+ */
+const THRUST_LAPSE = 1.3;
+
 export interface FlightInput {
   throttleUp: boolean;
   throttleDown: boolean;
@@ -319,7 +367,9 @@ export class AircraftController {
     const tau = lever > s.enginePower ? TUNING.spoolUp : TUNING.spoolDown;
     s.enginePower += (lever - s.enginePower) * (1 - Math.exp(-dt / tau));
     const effThrottle = s.enginePower;
-    const aT = effThrottle * this.tMax * (1 - s.engineTemp * 0.3)
+    const sigma = densityRatio(s.altitude);
+    const aT = effThrottle * this.tMax * Math.pow(sigma, THRUST_LAPSE)
+      * (1 - s.engineTemp * 0.3)
       * (1 - clamp(1 - s.integrity / 100, 0, 1) * 0.45);
 
     // ── Flight-path angle and angle of attack ─────────────────────────────
@@ -359,7 +409,9 @@ export class AircraftController {
     const dmgDrag = 1 + dmg * 1.3;
     const dmgLift = 1 - dmg * 0.35;
 
-    const qK = this.K * s.speed * s.speed;   // ½ρV²S/m
+    // ½ρV²S/m — and ρ is now a real function of height, so the wing has less
+    // to work with up high exactly as the engine does.
+    const qK = this.K * sigma * s.speed * s.speed;
 
     // Ground effect: induced drag falls away close to the runway, which is
     // what makes a flared aeroplane float instead of thumping down.
@@ -518,7 +570,7 @@ export class AircraftController {
     s.pitchRate = clamp(s.pitchRate, -TUNING.maxPitchRate, TUNING.maxPitchRate);
     s.pitch += s.pitchRate * dt;
     const lo = onGround ? -4 : TUNING.pitchMin;
-    const hi = onGround ? 16 : 35;
+    const hi = onGround ? 16 : 48;   // and more room to haul the nose up
     if (s.pitch < lo || s.pitch > hi) {
       s.pitch = clamp(s.pitch, lo, hi);
       s.pitchRate *= 0.2;
@@ -554,7 +606,26 @@ export class AircraftController {
       // less than the weight component, the path bends downward. Always.
       const vSafe = Math.max(6, s.speed);
       const gammaDot = (aL + aT * Math.sin(alpha) - GRAVITY * Math.cos(gamma)) / vSafe;
-      const newGamma = clamp(gamma + gammaDot * dt, -1.35, 1.35);
+      let newGamma = clamp(gamma + gammaDot * dt, -1.35, 1.35);
+
+      /*
+       * `climbRate` was declared in the type and read by NOTHING - the hangar
+       * printed a number that had no effect on anything. Aircraft were in fact
+       * climbing at 34-93 m/s at a sustained 50° nose-up, which is why every
+       * airframe reached safety in five to thirteen seconds regardless of what
+       * it was.
+       *
+       * Capping the CLIMB ANGLE rather than the vertical speed keeps the model
+       * honest: V·sin(γ) ≤ climbRate is exactly the statement "this aeroplane
+       * has only so much excess power", and γ stays the integrated state that
+       * everything else is derived from. Descending is deliberately not capped
+       * — gravity is allowed to do whatever it likes.
+       */
+      const maxClimb = stats.climbRate;
+      if (newGamma > 0 && s.speed > 1) {
+        const gammaCap = Math.asin(clamp(maxClimb / s.speed, 0, 1));
+        if (newGamma > gammaCap) newGamma = gammaCap;
+      }
       s.flightPathAngle = newGamma;
 
       /**
@@ -573,7 +644,13 @@ export class AircraftController {
       const airSpeedVertical = s.speed * Math.sin(newGamma);
       s.verticalSpeed = airSpeedVertical + windUp;
       const wasAirborne = s.altitude > 0;
-      s.altitude = clamp(s.altitude + s.verticalSpeed * dt, 0, stats.maxAltitude);
+      /*
+       * No longer clamped at the data-sheet ceiling. The thinning air above
+       * makes the climb peter out on its own, and FlightScene starves the
+       * engine past it - a limit you fly into, rather than one you slide
+       * along. The absolute cap is only a backstop against nonsense.
+       */
+      s.altitude = clamp(s.altitude + s.verticalSpeed * dt, 0, stats.maxAltitude * 1.35);
       if (wasAirborne && s.altitude <= 0) {
         this.onTouchdown?.(s.verticalSpeed, s.speed);
         s.verticalSpeed = 0;
@@ -587,7 +664,21 @@ export class AircraftController {
     const burnPerSecond = (stats.fuelBurnRate * effThrottle * s.modifiers.fuelBurnMult) / 60;
     s.fuel = clamp(s.fuel - burnPerSecond * dt, 0, stats.fuelCapacity);
 
-    const tempTarget = effThrottle * 0.9;
+    /*
+     * ── There is no longer a free altitude ────────────────────────────────
+     *
+     * Thin air carries heat away worse, so the same power setting runs hotter
+     * the higher you are. This is real, and more to the point it is the fix
+     * for the shape of the game: climbing above the guns used to be free,
+     * permanent and total, which made "climb and wait" both the optimal play
+     * and the dullest one. Now height is a loan against the engine — you can
+     * take it, you cannot sit on it, and coming down is how you pay it back.
+     *
+     * At the ceiling this adds about a third to the target temperature, so a
+     * cruise up there overheats in a couple of minutes even at modest power.
+     */
+    const coolingPenalty = 1 + (1 - sigma) * 0.62;
+    const tempTarget = clamp(effThrottle * 0.9 * coolingPenalty, 0, 1);
     const tempRate = tempTarget > s.engineTemp ? TUNING.tempHeatRate : TUNING.tempCoolRate;
     s.engineTemp = clamp(
       s.engineTemp + (tempTarget - s.engineTemp) * (1 - Math.exp(-dt * tempRate)), 0, 1,

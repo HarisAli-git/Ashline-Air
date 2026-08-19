@@ -80,7 +80,10 @@ export function hudStyles(
        */
       top: `calc(${n(compact ? 14 : 18)
         + (radioChoices > 0
-          ? n(compact ? 64 : 72) + radioChoices * n(compact ? 36 : 42)
+          // Two chips per row on compact, so the strip grows by half a row per
+          // choice rather than a whole one. Derived from the real layout —
+          // a fixed offset breaks the moment a call has two options not three.
+          ? n(compact ? 48 : 72) + Math.ceil(radioChoices / (compact ? 2 : 1)) * n(compact ? 34 : 42)
           : 0)}px + ${safeT})`,
       left: '50%', transform: 'translateX(-50%)',
       display: 'flex', flexDirection: 'column', alignItems: 'center',
@@ -182,13 +185,18 @@ export function hudStyles(
       position: 'absolute',
       top: `calc(${n(10)}px + ${safeT})`,
       left: '50%', transform: 'translateX(-50%)',
-      width: compact ? 'calc(100% - 20px)' : 'min(620px, 82%)',
+      /*
+       * On a phone it stops short of both edges rather than running the full
+       * width — the systems drawer lives in the top-right corner and a
+       * full-bleed strip passed straight under it.
+       */
+      width: compact ? 'calc(100% - 104px)' : 'min(620px, 82%)',
       // A wash rather than a panel: dark enough to read on, transparent
       // enough that the aeroplane behind it is never hidden.
       background: 'linear-gradient(180deg, rgba(14,10,5,0.90) 0%, rgba(14,10,5,0.72) 100%)',
       borderLeft: '2px solid #ffd080',
       borderRadius: 3,
-      padding: `${n(6)}px ${n(10)}px ${n(7)}px`,
+      padding: compact ? `${n(4)}px ${n(7)}px ${n(5)}px` : `${n(6)}px ${n(10)}px ${n(7)}px`,
       fontFamily: 'monospace',
       pointerEvents: 'auto',
       zIndex: 300,
@@ -206,11 +214,20 @@ export function hudStyles(
     },
     radioBody: {
       color: '#c8b888',
-      fontSize: n(compact ? 10.5 : 12.5),
-      lineHeight: 1.35,
-      margin: `${n(3)}px 0 ${n(6)}px`,
+      fontSize: n(compact ? 10 : 12.5),
+      lineHeight: 1.3,
+      margin: compact ? `${n(2)}px 0 ${n(4)}px` : `${n(3)}px 0 ${n(6)}px`,
+      /*
+       * Clamped on a phone. A three-line description on a 390 px-tall screen
+       * costs more than the choices it is describing — the caption exists to
+       * say what the call was about, not to be read like a paragraph.
+       */
+      ...(compact ? {
+        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const,
+        overflow: 'hidden',
+      } : {}),
     },
-    radioChoices: { display: 'flex', flexWrap: 'wrap', gap: n(5) },
+    radioChoices: { display: 'flex', flexWrap: 'wrap', gap: n(compact ? 4 : 5) },
     radioChip: {
       display: 'flex', alignItems: 'center', gap: n(6),
       background: 'rgba(255,214,140,0.07)',
@@ -221,19 +238,32 @@ export function hudStyles(
       fontSize: n(compact ? 10.5 : 12),
       textAlign: 'left',
       // Still a comfortable tap target even though it is now a chip
-      minHeight: 38,
-      padding: `${n(4)}px ${n(9)}px`,
+      minHeight: compact ? 32 : 38,
+      padding: compact ? `${n(2)}px ${n(6)}px` : `${n(4)}px ${n(9)}px`,
       cursor: 'pointer',
-      flex: compact ? '1 1 100%' : '0 1 auto',
+      /*
+       * Two per row on a phone, not one.
+       *
+       * Full-width rows meant three choices cost three 38 px bands — with the
+       * header and caption on top, the call took a third of a 390 px screen.
+       * Pairing them halves that, and a landscape phone has width to spare
+       * even when it has no height at all.
+       */
+      flex: compact ? '1 1 46%' : '0 1 auto',
+      minWidth: 0,
     },
     radioChipKey: {
       flexShrink: 0,
-      width: n(15), height: n(15),
+      width: n(compact ? 13 : 15), height: n(compact ? 13 : 15),
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       border: '1px solid #6b5624', borderRadius: 2,
       color: '#ffd080', fontSize: n(9),
     },
-    radioChipText: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 },
+    radioChipText: {
+      display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0,
+      // Long labels shorten rather than forcing the chip to wrap to two lines
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: compact ? 'nowrap' : 'normal',
+    },
     radioChipCost: { fontSize: n(9), color: '#8a7a5a', lineHeight: 1.3 },
   };
 }

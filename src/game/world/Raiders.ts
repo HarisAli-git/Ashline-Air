@@ -82,7 +82,7 @@ export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
   // Pintle-mounted heavy MG. Reaches a normal cruise height.
   technical: { ceilingM: 165, rangePx: 2500, rounds: 2, spread: 0.034, damage: 4.5, cadence: 1.10, flak: false, label: 'HEAVY MG' },
   // Wheeled twin autocannon with fused shells. This is the one you climb for.
-  aa:        { ceilingM: 340, rangePx: 3200, rounds: 2, spread: 0.026, damage: 9.0, cadence: 1.60, flak: true,  label: 'AA BATTERY' },
+  aa:        { ceilingM: 420, rangePx: 3200, rounds: 2, spread: 0.026, damage: 9.0, cadence: 1.60, flak: true,  label: 'AA BATTERY' },
   camp:      null,
 };
 
