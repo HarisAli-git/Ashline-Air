@@ -285,6 +285,12 @@ export class FlightScene extends Phaser.Scene {
     this.world    = new ParallaxWorld(this, width, height, groundY);
     // Obstacles and raider ground are deterministic per contract, so a route
     // you have flown before hands you the same threats.
+    /*
+     * Biomes first: setRoute lays out the raiders, and a stretch over the
+     * tidal channels has to come out as gun barges rather than sandbag nests.
+     * The layout can only know that if it already knows what country it is in.
+     */
+    this.world.setBiomes(this.originBiome, this.destBiome);
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
     // Weather becomes a set of places on this route rather than a global mood.
     this.world.weatherField.reset(
@@ -337,8 +343,6 @@ export class FlightScene extends Phaser.Scene {
       });
       SoundEngine.chime();
     };
-    // The land itself changes between the two settlements
-    this.world.setBiomes(this.originBiome, this.destBiome);
     // The garrison at both fields flies the destination faction's colours
     const destSettlement = window.gameData.settlements.find(s => s.id === contract?.destinationId);
     const faction = window.gameData.factions.find(f => f.id === destSettlement?.factionId);

@@ -19,7 +19,7 @@ import { drawFighter, drawMuzzleFlash, RAIDER_PALETTE, type FighterPose } from '
  * flying over a fight that was already happening before you arrived.
  */
 
-export type EmplacementKind = 'nest' | 'technical' | 'aa' | 'tower' | 'camp';
+export type EmplacementKind = 'nest' | 'technical' | 'aa' | 'tower' | 'camp' | 'gunboat';
 
 interface Emplacement {
   x: number;            // world px
@@ -83,6 +83,15 @@ export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
   technical: { ceilingM: 165, rangePx: 2500, rounds: 2, spread: 0.034, damage: 4.5, cadence: 1.10, flak: false, label: 'HEAVY MG' },
   // Wheeled twin autocannon with fused shells. This is the one you climb for.
   aa:        { ceilingM: 420, rangePx: 3200, rounds: 2, spread: 0.026, damage: 9.0, cadence: 1.60, flak: true,  label: 'AA BATTERY' },
+  /*
+   * A gun barge in the tidal channels. Between a technical and a battery: it
+   * reaches higher than anything else that is not proper AA, and it is the
+   * only weapon you meet over water — there is nowhere to put a sandbag nest
+   * on a drowned coast, so the marsh fights from boats or not at all.
+   *
+   * A moving platform aims worse, which is the trade for the reach.
+   */
+  gunboat:   { ceilingM: 250, rangePx: 2900, rounds: 2, spread: 0.042, damage: 5.5, cadence: 1.25, flak: false, label: 'GUN BARGE' },
   camp:      null,
 };
 
@@ -168,6 +177,7 @@ function pivotOf(kind: EmplacementKind): { x: number; y: number; len: number } {
     case 'technical': return { x: 4,  y: -23, len: 17 };
     case 'aa':        return { x: 0,  y: -15, len: 23 };
     case 'tower':     return { x: 1,  y: -37, len: 13 };
+    case 'gunboat':   return { x: 2,  y: -20, len: 19 };
     default:          return { x: 0,  y: -6,  len: 0 };
   }
 }
@@ -259,7 +269,16 @@ export class Raiders {
   }
 
   /** Lay out positions inside each hostile stretch. Deterministic per route. */
-  layout(zones: ReadonlyArray<readonly [number, number]>, seed: number): void {
+  /**
+   * @param isWater tells the layout which positions are standing water. A
+   *   position over a channel becomes a gun barge instead of a ground
+   *   emplacement — you cannot dig a sandbag nest into a tidal flat, so the
+   *   marsh fights from boats or it does not fight at all.
+   */
+  layout(
+    zones: ReadonlyArray<readonly [number, number]>, seed: number,
+    isWater: (worldX: number) => boolean = () => false,
+  ): void {
     this.list = [];
     this.tracers = [];
     this.sparks = [];
@@ -288,15 +307,25 @@ export class Raiders {
       for (let i = 0; i < n; i++) {
         const id = seed * 977 + z * 131 + i * 29;
         const r = rnd(id);
+        const x = a + span * ((i + 0.5) / n) + (rnd(id + 3) - 0.5) * (span / n) * 0.5;
         // The camp furniture anchors each end; weapons fill the middle.
         let kind: EmplacementKind;
-        if (i === 0 || i === n - 1) kind = 'camp';
+        if (isWater(x)) {
+          /*
+           * Standing water. Nothing here can be dug in, so the whole position
+           * is afloat: barges where the guns would be, and no camp furniture
+           * because there is no ground to pitch it on.
+           */
+          kind = r < 0.72 ? 'gunboat' : 'camp';
+        } else if (i === 0 || i === n - 1) kind = 'camp';
         else if (i === aaSlot) kind = 'aa';
         else if (r < 0.45) kind = 'nest';
         else if (r < 0.78) kind = 'technical';
         else kind = 'tower';
+        // A barge that came out as camp furniture is just flotsam - drop it
+        if (kind === 'camp' && isWater(x)) continue;
         this.list.push({
-          x: a + span * ((i + 0.5) / n) + (rnd(id + 3) - 0.5) * (span / n) * 0.5,
+          x,
           kind, seed: id, aim: -1.2, flash: 0, recoil: 0, cool: rnd(id + 7) * 0.8,
         });
       }
@@ -638,6 +667,7 @@ export class Raiders {
         case 'technical': this.drawTechnical(g, sx, baseY, t, e, dl); break;
         case 'aa':        this.drawAA(g, sx, baseY, t, e, dl); break;
         case 'tower':     this.drawTower(g, sx, baseY, t, e, dl); break;
+        case 'gunboat':   this.drawGunboat(g, sx, baseY, t, e, dl); break;
       }
     }
   }
@@ -746,6 +776,62 @@ export class Raiders {
   }
 
   /** Gun truck: pickup with a heavy weapon on a pintle in the bed. */
+  /**
+   * A gun barge in the channels.
+   *
+   * Riding low with a wake either side, because the thing that sells a boat is
+   * that it is IN the water rather than standing on it. It rolls on its own
+   * slow period and the roll is independent of the recoil, so a barge that has
+   * just fired pitches rather than simply jumping the way a wheeled gun does.
+   */
+  private drawGunboat(
+    g: Phaser.GameObjects.Graphics, sx: number, baseY: number,
+    t: number, e: Emplacement, dl: number,
+  ): void {
+    const face: 1 | -1 = rnd(e.seed + 9) > 0.5 ? 1 : -1;
+    const hull = 0x2a2f2c;
+    const rust = 0x5a3a24;
+    // Slow roll, plus a shove from the last shot
+    const roll = Math.sin(t * 0.9 + e.seed) * 1.6 + e.recoil * 2.2;
+    const y = baseY - roll * 0.4;
+
+    // Wake — two pale wedges lying on the surface either side of the hull
+    for (const s2 of [-1, 1]) {
+      g.fillStyle(0xbfd2d8, 0.16);
+      g.fillEllipse(sx + s2 * 26, baseY + 4, 34, 5);
+    }
+    // Reflection under the hull, before the hull so it reads as beneath it
+    g.fillStyle(0x101c22, 0.4);
+    g.fillEllipse(sx, baseY + 7, 46, 7);
+
+    // Hull: a low flat-bottomed barge, waterline right at the ground line
+    g.fillStyle(hull, 1);
+    g.beginPath();
+    g.moveTo(sx - 30, y);
+    g.lineTo(sx + 30, y);
+    g.lineTo(sx + 24 * face, y + 9);
+    g.lineTo(sx - 24 * face, y + 9);
+    g.closePath();
+    g.fillPath();
+    // Rust along the waterline — the one warm note on a cold hull
+    g.fillStyle(rust, 0.55);
+    g.fillRect(sx - 28, y + 6, 56, 2.2);
+
+    // Wheelhouse, set aft
+    g.fillStyle(0x3a423e, 1);
+    g.fillRect(sx - 16 * face, y - 11, 15, 11);
+    g.fillStyle(0x0c1216, 1);
+    g.fillRect(sx - 13 * face, y - 8, 8, 5);
+
+    // Gun tub forward, and the crew standing in it
+    g.fillStyle(0x1e2320, 1);
+    g.fillRect(sx + 8 * face - 7, y - 7, 14, 7);
+    this.rebel(g, sx + 10 * face, y - 7, t, e.seed + 4, 0.9, face, 'aimUp', e.aim, dl);
+    if (e.flash > 0) {
+      drawMuzzleFlash(g, sx + 2 * face, y - 20, e.aim, e.flash, face);
+    }
+  }
+
   private drawTechnical(
     g: Phaser.GameObjects.Graphics, sx: number, baseY: number,
     t: number, e: Emplacement, dl: number,

@@ -9,7 +9,7 @@ import { drawUndead, drawCorpse, drawHorde, undeadKindFor, type CrowdStyle } fro
 import {
   drawFighter, drawMuzzleFlash, drawWireFence, drawBarrier, garrisonPalette,
 } from './Figures';
-import { blendBiome, type BiomeId, type BiomeShape } from './Biomes';
+import { blendBiome, BIOMES, type BiomeId, type BiomeShape } from './Biomes';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -189,6 +189,9 @@ export class ParallaxWorld {
 
   private pal: Palette = resolve('clear');   // final: biome + weather + daylight
   private shape: BiomeShape = blendBiome('ashland', 'ashland', 0).shape;
+  /** Route seed, so the channels are in the same place every time you fly it. */
+  private routeSeed = 1;
+  private routeEndPx = 1;
   private prevWeather: WeatherCondition = 'clear';
   private curWeather: WeatherCondition = 'clear';
   private blendT = 1;
@@ -257,9 +260,13 @@ export class ParallaxWorld {
 
   /** Lay out the route's obstacles, hostile stretches and the militia in them. */
   setRoute(routeKm: number, seed: number): void {
+    this.routeSeed = seed;
+    this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
     const destPx = Math.max(2000 * WORLD_PX_PER_M, routeKm * 1000 * WORLD_PX_PER_M);
     this.hazards.generate(450 * WORLD_PX_PER_M, destPx - 300 * WORLD_PX_PER_M, seed);
-    this.raiders.layout(this.hazards.zones, seed);
+    // The layout needs to know which positions are afloat, so a stretch over
+    // the channels comes out as gun barges rather than sandbag nests.
+    this.raiders.layout(this.hazards.zones, seed, x => this.waterAt(x) > 0.25);
     // The air has to know what it is flowing around, or there is no rotor.
     this.air.reset(seed);
     this.air.setObstacles(this.hazards.all.map(h => ({ x: h.x, heightM: h.heightM })));
@@ -1173,6 +1180,54 @@ export class ParallaxWorld {
     }
   }
 
+  /**
+   * How much standing water is at a point on the route, 0 = dry, 1 = mid-channel.
+   *
+   * The drowned coast is the only country with a real amount of it (`water`
+   * 0.62), and because the biome blends along the route the channels thin out
+   * and disappear as you leave it — you fly out of the marsh rather than off
+   * the edge of a texture.
+   *
+   * Two octaves so the channels vary in width, and deterministic from the
+   * route seed so the same leg has the same coastline every time.
+   */
+  waterAt(worldX: number): number {
+    /*
+     * Coverage comes from where this POINT is on the route, not from the
+     * camera's current blend. Water is a property of the place — the raider
+     * layout runs once at the start of the flight and has to agree with what
+     * the ground layer will draw minutes later.
+     *
+     * Only the water term is blended; running the full palette lerp a couple
+     * of hundred times a frame to read one number would be absurd.
+     */
+    const p = Math.min(1, Math.max(0, worldX / this.routeEndPx));
+    const wMid = Math.sin(Math.PI * p) * 0.16;
+    const wA = (1 - p) * (1 - wMid), wB = p * (1 - wMid);
+    const cover = (
+      BIOMES[this.biomeFrom].shape.water * wA
+      + BIOMES[this.biomeTo].shape.water * wB
+      + BIOMES.ashland.shape.water * wMid
+    ) / Math.max(1e-6, wA + wB + wMid);
+    if (cover <= 0.02) return 0;
+    /*
+     * Channel wavelength ~330 m, broken up by a ~80 m ripple.
+     *
+     * The first version used frequencies ten times lower, which put a full
+     * cycle every 3.3 km — so a screen showed five percent of one and the
+     * marsh came out as huge solid expanses of either water or land rather
+     * than as a maze of channels. You want two or three crossings in view.
+     */
+    const k = this.routeSeed * 0.37;
+    const n =
+      0.55 + 0.30 * Math.sin(worldX * 0.0021 + k)
+           + 0.15 * Math.sin(worldX * 0.0087 + k * 2.7);
+    // Water wherever the field dips below the biome's coverage. The distance
+    // below the threshold becomes depth, which is what shades the shoreline.
+    const d = (cover * 1.15) - n;
+    return d <= 0 ? 0 : Math.min(1, d / 0.30);
+  }
+
   private drawGround(scrollX: number, sink: number, f: WorldFrame): void {
     const g = this.groundGfx;
     g.clear();
@@ -1210,6 +1265,73 @@ export class ParallaxWorld {
     }
     g.lineStyle(2, this.pal.groundLine, 1);
     g.lineBetween(0, gy, this.width, gy);
+
+    /*
+     * ── Tidal channels ───────────────────────────────────────────────────
+     *
+     * Drawn as contiguous runs rather than per-column strips, so each channel
+     * gets one shoreline at each end instead of a shimmering edge every eight
+     * pixels. Water is darker and colder than the dirt around it and takes a
+     * band of sky reflection along its length, which is what separates it
+     * from "a patch of different-coloured ground".
+     */
+    if (BIOMES[this.biomeFrom].shape.water > 0.02 || BIOMES[this.biomeTo].shape.water > 0.02) {
+      const STEP = 6;
+      /*
+       * Water has to be COOL against warm ground or it reads as shadow.
+       *
+       * The first version reflected the palette's own sky, which on the marsh
+       * is a pale tan — so the channels came out as muddy patches you could
+       * mistake for a dip in the dirt. Pulling the reflection hard toward a
+       * blue-green keeps it recognisably water under any of the six palettes
+       * while still picking up some of the local light.
+       */
+      const skyRefl = lerpColor(lerpColor(this.pal.skyBot, 0x2e7d92, 0.62), 0x0a1622, 0.18);
+      const deepWater = 0x0b2430;
+      let runStart = -1;
+      let runDepth = 0;
+      const flush = (endX: number): void => {
+        if (runStart < 0) return;
+        const w = endX - runStart;
+        if (w > 4) {
+          const dep = Math.min(1, runDepth);
+          // The body of the channel, receding the same way the ground does
+          const bodyH = 26 + dep * 44;
+          for (let i = 0; i < 5; i++) {
+            const t = i / 4;
+            g.fillStyle(lerpColor(skyRefl, deepWater, t), 0.92);
+            g.fillRect(runStart, gy + t * bodyH * 0.9, w, bodyH * 0.3 + 2);
+          }
+          // Wet shoreline — the bright line where land meets water is most of
+          // what sells it, so it gets the sun rather than the ground colour
+          g.fillStyle(lerpColor(this.pal.glow, 0xffffff, 0.35), 0.9);
+          g.fillRect(runStart, gy - 1.5, w, 3);
+          // Darker mud right at each bank, so the edge is not a hard cut
+          g.fillStyle(0x1a2418, 0.5);
+          g.fillRect(runStart, gy + 1.5, 5, bodyH * 0.5);
+          g.fillRect(runStart + w - 5, gy + 1.5, 5, bodyH * 0.5);
+          // Flat sun glitter lying along the surface
+          for (let i = 0; i < 4; i++) {
+            const hy = gy + 5 + i * (bodyH * 0.2);
+            const hx = runStart + ((this.routeSeed * 37 + i * 53 + runStart) % Math.max(1, w * 0.6));
+            g.fillStyle(lerpColor(this.pal.glow, 0xffffff, 0.5), 0.22 - i * 0.04);
+            g.fillRect(hx, hy, Math.min(w - (hx - runStart), w * 0.42), 1.6);
+          }
+        }
+        runStart = -1;
+        runDepth = 0;
+      };
+      for (let x = 0; x <= this.width; x += STEP) {
+        const d = this.waterAt(scrollX + x);
+        if (d > 0) {
+          if (runStart < 0) runStart = x;
+          runDepth = Math.max(runDepth, d);
+        } else {
+          flush(x);
+        }
+      }
+      flush(this.width);
+    }
 
     // ── Undulating dirt shoulder: the ground line is dead straight because
     // the aircraft has to land on it, so the RELIEF goes just underneath it.
