@@ -7,7 +7,7 @@ import { AirMass } from './AirMass';
 import { WeatherField, type WeatherCell } from './WeatherField';
 import { drawUndead, drawCorpse, drawHorde, undeadKindFor, type CrowdStyle } from './Crowds';
 import {
-  drawFighter, drawMuzzleFlash, drawWireFence, drawBarrier, garrisonPalette,
+  drawFighter, drawMuzzleFlash, drawWireFence, drawBarrier, garrisonPalette, RAIDER_PALETTE,
 } from './Figures';
 import { blendBiome, BIOMES, type BiomeId, type BiomeShape } from './Biomes';
 
@@ -189,6 +189,16 @@ export class ParallaxWorld {
 
   private pal: Palette = resolve('clear');   // final: biome + weather + daylight
   private shape: BiomeShape = blendBiome('ashland', 'ashland', 0).shape;
+  /**
+   * True while the aircraft is still on the apron being loaded.
+   *
+   * The departure used to begin with a fully laden aeroplane sitting on an
+   * empty strip: the cargo you are paid to carry never physically existed and
+   * nobody ever put it aboard. Set by FlightScene and cleared the moment the
+   * engine turns over.
+   */
+  loading = false;
+
   /** Route seed, so the channels are in the same place every time you fly it. */
   private routeSeed = 1;
   private routeEndPx = 1;
@@ -1440,6 +1450,7 @@ export class ParallaxWorld {
     // The fortifications face open country: outbound from the origin field,
     // back down the route from the destination's.
     this.drawAirfield(g, 10, scrollX, gy, 1);
+    if (this.loading) this.drawLoading(g, 10, scrollX, gy);
     this.drawAirfield(g, dstFrom + 60, scrollX, gy, -1);
     this.drawSettlement(g, oriFrom - 60, scrollX, gy, -1);
     this.drawSettlement(g, dstTo + 60, scrollX, gy, 1);
@@ -1470,6 +1481,70 @@ export class ParallaxWorld {
    * `dir` points from the airfield toward open country: the fortifications
    * face that way, and so do the guards.
    */
+  /**
+   * A crew walking your cargo out to the aeroplane.
+   *
+   * Runs only while the engine is off on the apron, and the pile shrinks as
+   * the loop goes round — so the pre-flight is a thing you WATCH happening
+   * rather than a loading bar, and starting the engine is visibly the moment
+   * you decide they are done.
+   */
+  private drawLoading(
+    g: Phaser.GameObjects.Graphics, startPx: number, scrollX: number, gy: number,
+  ): void {
+    if (startPx - scrollX < -400) return;
+    const t = this.t;
+    const dl = this.dl;
+
+    /*
+     * Anchored to the AEROPLANE, not to the airfield gate.
+     *
+     * The crew has to walk to the thing they are loading. Anchoring the stack
+     * to the field's start put them shuttling back and forth two hundred
+     * pixels away from the aircraft, loading nothing.
+     */
+    const planeX = 300;              // AIRCRAFT_X — the parked aircraft's screen x
+    const sx = planeX - 52;          // the cargo door, aft of the wing
+    const stackX = sx - 104;         // pallets stacked clear of the propeller
+    const carried = Math.floor(t / 3.4) % 5;      // how many have gone so far
+    const left = 6 - carried;
+    for (let i = 0; i < left; i++) {
+      const row = Math.floor(i / 3), col = i % 3;
+      const cx = stackX + col * 15;
+      const cy = gy - 9 - row * 12;
+      g.fillStyle(lerpColor(0x5a4526, 0x000000, 0.35 * (1 - dl)), 1);
+      g.fillRect(cx, cy, 13, 11);
+      g.fillStyle(lerpColor(0x7a6136, 0xffffff, 0.10 * dl), 1);
+      g.fillRect(cx + 1, cy + 1, 11, 3);
+      g.lineStyle(1, 0x2a2010, 0.8);
+      g.strokeRect(cx, cy, 13, 11);
+    }
+
+    /*
+     * Two loaders shuttling between the stack and the hold, half a cycle
+     * apart so there is always one of them walking each way.
+     */
+    for (let k = 0; k < 2; k++) {
+      const phase = ((t / 3.4) + k * 0.5) % 1;
+      // Out to the stack empty, back to the aeroplane loaded
+      const outbound = phase < 0.5;   // empty toward the pallets, loaded back
+      const p2 = outbound ? phase * 2 : (1 - phase) * 2;
+      const px = sx + (stackX - sx) * p2;
+      const bob = Math.abs(Math.sin(t * 5 + k * 2)) * 1.6;
+      // The crate on his shoulder, only on the way back
+      if (!outbound) {
+        g.fillStyle(0x5a4526, 1);
+        g.fillRect(px - 6, gy - 26 - bob, 12, 9);
+        g.lineStyle(1, 0x2a2010, 0.8);
+        g.strokeRect(px - 6, gy - 26 - bob, 12, 9);
+      }
+      drawFighter(
+        g, px, gy - bob, t, 900 + k * 31, 0.95,
+        outbound ? 1 : -1, outbound ? 'patrol' : 'work', -1.2, dl, RAIDER_PALETTE,
+      );
+    }
+  }
+
   private drawAirfield(
     g: Phaser.GameObjects.Graphics,
     startPx: number,

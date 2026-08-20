@@ -100,7 +100,15 @@ export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
  * was never that there was too little fire, it was that there was far too much
  * of it and none of it meant anything.
  */
-const MAX_SIMULTANEOUS = 2;
+/**
+ * How many weapons may engage at once.
+ *
+ * Two was tuned when a route was five kilometres and a crossing was most of
+ * the flight; across a sixty-kilometre leg with crossings a few seconds apart
+ * it read as almost nothing coming up at you. Three is enough for a position
+ * to feel manned without going back to the wall of meaningless tracer.
+ */
+const MAX_SIMULTANEOUS = 3;
 
 /**
  * The aircraft's hit box for incoming rounds, in px — matched to the drawn
@@ -294,7 +302,7 @@ export class Raiders {
       const [a, b] = zones[z];
       const span = b - a;
       // Positions are sparser than they were: one every ~1100 px, 3–6 a zone.
-      const n = Phaser.Math.Clamp(Math.round(span / 1100), 3, 6);
+      const n = Phaser.Math.Clamp(Math.round(span / 850), 4, 8);
 
       // An AA battery is a real piece of ordnance, not standard kit. At most
       // ONE per zone and only in some zones — previously every middle

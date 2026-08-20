@@ -202,14 +202,14 @@ export function hudStyles(
       zIndex: 300,
       boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
     },
-    radioHead: { display: 'flex', alignItems: 'center', gap: n(6) },
+    radioHead: { display: 'flex', alignItems: 'center', gap: n(compact ? 4 : 6) },
     radioLive: {
       width: n(5), height: n(5), borderRadius: '50%',
       background: '#ff4a3a', boxShadow: '0 0 6px #ff4a3a', flexShrink: 0,
       animation: 'aa-live 1.6s steps(1, end) infinite',
     },
     radioFrom: {
-      fontSize: n(compact ? 10 : 11), letterSpacing: 2,
+      fontSize: n(compact ? 8.5 : 11), letterSpacing: compact ? 1 : 2,
       color: '#ffd080', textTransform: 'uppercase', fontWeight: 'bold',
     },
     radioBody: {
@@ -223,7 +223,7 @@ export function hudStyles(
        * say what the call was about, not to be read like a paragraph.
        */
       ...(compact ? {
-        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const,
+        display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical' as const,
         overflow: 'hidden',
       } : {}),
     },

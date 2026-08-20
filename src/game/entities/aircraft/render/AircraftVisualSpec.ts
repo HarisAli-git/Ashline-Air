@@ -256,8 +256,17 @@ const RAW_SPECS: Record<string, RawSpec> = {
     engineStyle: 'radial',
     engines: [{ frac: 0, nose: true, dy: 2, cowlLen: 22, cowlH: 24 }],
     prop:  { r: 21, bladePairs: 1 },
-    // STOL bush ship: oversize tundra tyres, sprung steel legs, tailwheel.
-    gear:  { fixed: true, mainX: 22, noseX: null, tailWheelX: -60, strutLen: 18, wheelR: 12, hingeY: 11 },
+    /*
+     * STOL bush ship: sprung steel legs, tailwheel, tundra tyres.
+     *
+     * The tyre was wheelR 12 against a crop duster's 8 — half again as big on
+     * an airframe that is nowhere near half again as large — and it read as
+     * a cartoon wheel bolted to an aeroplane. What actually characterises a
+     * bush machine (a Super Cub, a Helio Courier) is not enormous tyres but
+     * LONG LEGS: deep prop clearance and a lot of travel to soak up a gravel
+     * bar. So the tyre comes down and the strut goes up.
+     */
+    gear:  { fixed: true, mainX: 24, noseX: null, tailWheelX: -60, strutLen: 23, wheelR: 9.5, hingeY: 11 },
     flap:  { maxDeflectDeg: 35 },
     beacon: { x: -62, y: -38 },
     exhaust: { x: 44, y: 12 },

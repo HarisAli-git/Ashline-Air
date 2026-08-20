@@ -112,6 +112,15 @@ export class FlightScene extends Phaser.Scene {
   private overspeedWarnAt = -99;
   private ceilingWarnAt  = -99;   // last service-ceiling caution
   /**
+   * Seconds of loading left on the apron.
+   *
+   * The crew used to work in an endless loop until you started the engine,
+   * which made it wallpaper — nothing was ever finished and nothing was
+   * waited for. A short, finite load gives the departure a beat with a end to
+   * it: they finish, they tell you, and then it is your aeroplane.
+   */
+  private loadingLeft = 3.2;
+  /**
    * Projected fuel in the tank when you arrive, 0-1. Smoothed.
    *
    * This is the number that gives the cruise something to do. Every decision
@@ -241,6 +250,23 @@ export class FlightScene extends Phaser.Scene {
     this.state.integrity   = owned.integrity;
     this.state.engineTemp  = owned.engineTemp;
 
+    /*
+     * ── You start cold, with the flaps already set ────────────────────────
+     *
+     * The flight used to open with the engine running, so the most
+     * characteristic sound an aeroplane makes was one the player only ever
+     * heard by deliberately shutting down mid-air. Starting cold gives the
+     * departure a beginning: starter, catch, run up, roll.
+     *
+     * The flaps, on the other hand, are set FOR you. A pilot walks out to an
+     * aeroplane already configured for the departure, and making the player
+     * remember a checkbox before every takeoff is admin, not gameplay — the
+     * decision that matters is when to bring them UP.
+     */
+    this.engineRunning = false;
+    this.state.flapsDeployed = true;
+    this.state.gearDown = true;
+
     // Stall buffet shakes the camera; touchdown captures true impact values
     this.controller.onBuffet = () => {
       if (this.shakeDuration < 50) SoundEngine.stallBuffet();
@@ -348,6 +374,15 @@ export class FlightScene extends Phaser.Scene {
     const faction = window.gameData.factions.find(f => f.id === destSettlement?.factionId);
     if (faction) this.world.setFactionColor(parseInt(faction.color.replace('#', ''), 16));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
+    // Cold and quiet on the apron — the prop is stopped until the player
+    // turns it over. See the note where engineRunning is set false.
+    this.world.loading = true;
+    this.loadingLeft = 3.2;
+    this.aircraft.stopEngine();
+    EventBus.emit('ui:show-notification', {
+      message: '📦 Loading cargo — flaps and gear are set for departure',
+      type: 'info',
+    });
     this.rig = new CameraRig(this.cameras.main, this.controller.vStall, this.controller.vMax);
 
     // The engine you hear is the engine you can see. Style, count and blade
@@ -476,6 +511,20 @@ export class FlightScene extends Phaser.Scene {
   // ── Main loop ─────────────────────────────────────────────────────────────
 
   update(time: number, delta: number): void {
+    // ── Loading, on the apron ──────────────────────────────────────────────
+    if (this.loadingLeft > 0) {
+      this.loadingLeft -= delta / 1000;
+      if (this.loadingLeft <= 0) {
+        this.loadingLeft = 0;
+        this.world.loading = false;
+        SoundEngine.chime();
+        EventBus.emit('ui:show-notification', {
+          message: '📦 Cargo aboard and secured — press E to start the engine',
+          type: 'success',
+        });
+      }
+    }
+
     if (this.crashing) { this.updateCrashSlide(delta / 1000); return; }
     if (this.landed || this.eventModalOpen) return;
 
@@ -518,20 +567,35 @@ export class FlightScene extends Phaser.Scene {
     }
 
     if ((Phaser.Input.Keyboard.JustDown(this.keys.E) || TouchInput.consume('engine'))) {
-      if (this.engineFailed) {
+      if (this.loadingLeft > 0) {
+        EventBus.emit('ui:show-notification', {
+          message: `Still loading — ${this.loadingLeft.toFixed(1)}s`,
+          type: 'warning',
+        });
+      } else if (this.engineFailed) {
         // A failed engine needs cranking — it does not just snap back on
         if (this.restartHoldFor <= 0) {
-          this.restartHoldFor = 2.2;
-          SoundEngine.engineSputter();
+          this.restartHoldFor = 2.8;
+          SoundEngine.engineCrank(2.8);
           EventBus.emit('ui:show-notification', { message: 'Cranking…', type: 'warning' });
         }
+      } else if (!this.engineRunning) {
+        /*
+         * Starting is an EVENT, not a switch.
+         *
+         * The starter drags the prop round for a couple of seconds, a cylinder
+         * or two fires and misses, and then it catches. Instant ignition made
+         * the most characterful moment in the aeroplane into a light switch —
+         * and it removed the one bit of pre-flight ritual the game had.
+         */
+        if (this.restartHoldFor <= 0) {
+          this.restartHoldFor = 2.6;
+          SoundEngine.engineCrank(2.6);
+          EventBus.emit('ui:show-notification', { message: 'Starter engaged…', type: 'info' });
+        }
       } else {
-        this.engineRunning = !this.engineRunning;
-        if (this.engineRunning) {
-          this.aircraft.startEngine();
-          SoundEngine.engineStart();
-          EventBus.emit('ui:show-notification', { message: 'Engine started.', type: 'success' });
-        } else {
+        this.engineRunning = false;
+        {
           this.aircraft.stopEngine();
           SoundEngine.engineStop();
           EventBus.emit('ui:show-notification', { message: 'Engine shut down.', type: 'warning' });
@@ -1159,6 +1223,8 @@ export class FlightScene extends Phaser.Scene {
       if (this.restartHoldFor <= 0) {
         this.engineFailed = false;
         this.engineRunning = true;
+        // The crew clear away the moment the prop turns
+        this.world.loading = false;
         this.aircraft.startEngine();
         this.state.engineTemp = Math.max(0, this.state.engineTemp - 0.15);
         SoundEngine.engineStart();

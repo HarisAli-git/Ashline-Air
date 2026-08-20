@@ -134,6 +134,26 @@ class ProgressionServiceClass {
 
       save.player.unlockedSettlementIds.push(rule.settlementId);
       opened.push(def);
+      /*
+       * Make room for the new destination.
+       *
+       * The board is only ever topped UP, so a settlement already holding its
+       * full complement of offers would never generate one to the place that
+       * just opened — the reward for unlocking somewhere was a board that
+       * carried on ignoring it until the old offers timed out.
+       */
+      for (const originId of save.player.unlockedSettlementIds) {
+        const here = save.world.availableContracts.filter(
+          c => c.originId === originId && c.status === 'available',
+        );
+        // Drop the oldest offer at each field; maintainBoard refills toward
+        // the least-represented destination, which is now the new one.
+        if (here.length >= 3) {
+          const oldest = here.reduce((a2, c) => (c.expiresAt < a2.expiresAt ? c : a2), here[0]);
+          save.world.availableContracts =
+            save.world.availableContracts.filter(c => c.id !== oldest.id);
+        }
+      }
       EventBus.emit('player:settlement-unlocked', { settlementId: def.id, name: def.name });
     }
     return opened;

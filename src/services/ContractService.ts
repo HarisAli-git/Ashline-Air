@@ -12,7 +12,14 @@ import { randomBetween, randomInt, distance, pixelsToKm } from '../game/utils/ma
 import { EventBus } from '../game/utils/EventBus';
 import { KM_PER_PIXEL, routeBlock } from './RouteService';
 
-const CONTRACTS_PER_SETTLEMENT = 3;
+/**
+ * Offers standing at each settlement.
+ *
+ * Three was too few to show a wasteland with six places in it: a hub has five
+ * possible destinations, so three slots filled at random could — and usually
+ * did — come out as the same one or two places over and over.
+ */
+const CONTRACTS_PER_SETTLEMENT = 5;
 const CONTRACT_TTL_MINUTES = 240;  // in-game minutes before expiry
 
 
@@ -219,10 +226,29 @@ class ContractServiceClass {
           s => s.id !== settlement.id && save.player.unlockedSettlementIds.includes(s.id)
         );
         if (destinations.length === 0) break;
-        // Deliberately NOT filtered by reach. A board showing only what you can
-        // already fly has nothing to want - the offers you cannot take yet are
-        // what make the next aircraft worth buying. The UI labels them.
-        const dest = destinations[randomInt(0, destinations.length - 1)];
+        /*
+         * Pick the destination this board has LEAST of, not one at random.
+         *
+         * Uniform random meant a settlement's offers clustered on whatever
+         * came up — so the two places unlocked at the start stayed the whole
+         * game's worth of flying long after four more had opened. Filling the
+         * least-represented destination first guarantees the board shows the
+         * map rather than a sample of it.
+         *
+         * Deliberately still NOT filtered by reach: a board showing only what
+         * you can already fly has nothing to want, and the offers you cannot
+         * take yet are what make the next aircraft worth buying. The UI
+         * labels those.
+         */
+        const onBoard = save.world.availableContracts.filter(
+          c => c.originId === settlement.id && c.status === 'available',
+        );
+        const usage = new Map<string, number>();
+        for (const dst of destinations) usage.set(dst.id, 0);
+        for (const c of onBoard) usage.set(c.destinationId, (usage.get(c.destinationId) ?? 0) + 1);
+        const fewest = Math.min(...usage.values());
+        const starved = destinations.filter(dst => (usage.get(dst.id) ?? 0) === fewest);
+        const dest = starved[randomInt(0, starved.length - 1)];
         const contract = this.buildContract(settlement, dest, save.player.reputation, now);
         if (contract) {
           save.world.availableContracts.push(contract);

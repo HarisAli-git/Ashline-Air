@@ -152,8 +152,13 @@ export function FlightHUD(): React.ReactElement | null {
           * whether you are in lift or sink all move it. Without something like
           * it, level flight has no feedback at all and there is nothing to do
           * between the climb-out and the approach.
+          *
+          * Hidden on the ground: a projection built from the burn you are
+          * achieving reads 0% while you are parked with the engine off, which
+          * is true and completely useless — an alarming red bar before you
+          * have even started.
           */}
-        {status && (
+        {status && state.altitude > 2 && (
           <Bar s={styles} label="ARR" frac={status.fuelAtArrival}
             tone={status.fuelAtArrival < 0.08 ? '#ff4a3a'
               : status.fuelAtArrival < 0.2 ? '#ff8844' : '#9fe8b0'}

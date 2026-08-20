@@ -103,8 +103,8 @@ export class Hazards {
      * guns effectively vanished from the game. One stretch per ~4.5 km keeps
      * a crossing every half-minute or so whatever the aircraft.
      */
-    const PX_PER_ZONE = 4.5 * 1000 * 9;   // 4.5 km at WORLD_PX_PER_M
-    const zoneCount = Math.max(1, Math.min(14, Math.round(span / PX_PER_ZONE)));
+    const PX_PER_ZONE = 3.2 * 1000 * 9;   // 3.2 km at WORLD_PX_PER_M
+    const zoneCount = Math.max(2, Math.min(18, Math.round(span / PX_PER_ZONE)));
 
     /*
      * And they must be SPREAD. The previous version fed `z` to the hash but

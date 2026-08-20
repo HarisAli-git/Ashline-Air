@@ -48,7 +48,21 @@ export const TUNING = {
   stallWidth: 11 * DEG,     // AoA past the critical angle to a full stall
   stallCD: 0.22,            // extra drag from a fully separated wing
   inducedK: 0.07,           // induced-drag factor (k·CL²)
-  CD0: 0.105,               // parasitic drag — also sets max-speed thrust
+  /**
+   * Parasitic drag — and, because thrust is SOLVED from it to make the quoted
+   * top speed true, the thing that sets how hard the engine pulls.
+   *
+   * At 0.105 (a real light aircraft is nearer 0.03) the aeroplane needed
+   * enormous thrust to reach its own vMax, and at low speed, where there is
+   * almost no drag to spend it on, all of that arrived as acceleration:
+   * measured 5.9-13.1 m/s² on the ground, which is 0.6-1.3g. Cargo aircraft
+   * do about 0.25g. That is why every take-off used a fifth of the runway and
+   * every strip looked absurdly long.
+   *
+   * Lowering it fixes the glide at the same time — the two complaints had one
+   * cause.
+   */
+  CD0: 0.115,
   /**
    * Drag added by a windmilling propeller, on top of CD0.
    *
@@ -182,7 +196,11 @@ export const TUNING = {
   trimLowFactor: 1.55,
 
   // ── Ground ──
-  rollingFriction: 0.45,    // m/s² rolling resistance
+  /**
+   * Rolling resistance, m/s². Raised with Vr (see the ground branch): a
+   * take-off should spend a real fraction of the strip, not a fifth of it.
+   */
+  rollingFriction: 0.7,
   brakeFriction: 4.5,       // m/s² extra once rolling out after landing
   rotateSpeedFactor: 0.7,   // elevator bites from this fraction of stall speed
 
@@ -368,7 +386,27 @@ export class AircraftController {
     s.enginePower += (lever - s.enginePower) * (1 - Math.exp(-dt / tau));
     const effThrottle = s.enginePower;
     const sigma = densityRatio(s.altitude);
-    const aT = effThrottle * this.tMax * Math.pow(sigma, THRUST_LAPSE)
+    /*
+     * Propeller efficiency.
+     *
+     * Thrust is solved from CD0 so the quoted top speed comes out true, which
+     * means a draggy airframe gets a very powerful engine — and at low speed,
+     * where there is almost no drag to spend it on, all of that arrived as
+     * acceleration. Last pass I fixed that by halving CD0, which bought a sane
+     * take-off at the cost of the two things drag is actually FOR: the
+     * aeroplane no longer decelerated when you closed the throttle, and it
+     * glided far too well with the engine stopped.
+     *
+     * The two were never really coupled — that was an artifact of deriving
+     * thrust from drag alone. A fixed-pitch propeller is genuinely poor at
+     * low airspeed (the blades are close to stalled), so it makes well under
+     * half its cruise thrust standing still. Modelling that lets the drag go
+     * back up where it belongs while the ground roll stays honest.
+     *
+     * At and above cruise the factor is 1, so vMax and the climb are untouched.
+     */
+    const propEff = 0.42 + 0.58 * clamp(s.speed / this.vCruise, 0, 1);
+    const aT = effThrottle * this.tMax * propEff * Math.pow(sigma, THRUST_LAPSE)
       * (1 - s.engineTemp * 0.3)
       * (1 - clamp(1 - s.integrity / 100, 0, 1) * 0.45);
 
@@ -584,10 +622,22 @@ export class AircraftController {
       const friction = TUNING.rollingFriction + (this.braking ? TUNING.brakeFriction : 0);
       s.speed = clamp(s.speed + (aT - aD - friction) * dt, 0, vne);
 
-      // The aeroplane leaves the ground the instant the wing carries it —
-      // no special case, no scripted lift-off. Rotate, lift exceeds weight,
-      // and the whole aircraft rises.
-      if (aL > GRAVITY) {
+      /*
+       * Rotation speed.
+       *
+       * The wing carrying the weight is necessary but not sufficient — a
+       * tailwheel sitting on the deck has no elevator authority to rotate
+       * with, and until it does the aeroplane simply rolls faster. Without
+       * this the aircraft unstuck the moment lift crossed weight, which put
+       * every take-off roll at 13-21% of the shortest runway the aeroplane was
+       * even allowed to use. Every strip in the game looked absurdly long
+       * because none of them was ever needed.
+       *
+       * Vr at 1.3x the stall is the usual rule of thumb, and because roll
+       * distance goes as v² it is most of what sets the length.
+       */
+      const vRotate = this.vStall * 1.3;
+      if (aL > GRAVITY && s.speed >= vRotate) {
         s.verticalSpeed += (aL - GRAVITY) * dt;
         s.altitude = Math.max(0, s.altitude + s.verticalSpeed * dt);
         // Hand a matching flight path to the airborne integrator
