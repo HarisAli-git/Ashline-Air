@@ -10,7 +10,20 @@ function saveKey(): string {
   return ProfileService.saveKeyFor(ProfileService.ensureActive().id);
 }
 // v3: the player now has a position on the map, and settlements unlock
-const SAVE_VERSION = 3;
+const SAVE_VERSION = 4;
+
+/**
+ * Airframes removed in v4, and what a save holding one gets instead.
+ *
+ * Both map UPWARDS. The old cargo aircraft carried 1500 kg and the twin
+ * turboprop 2500, so the nearest survivor by capability is a promotion in
+ * both cases - and charging an existing player for a change they did not ask
+ * for would be the wrong way round.
+ */
+const RETIRED_AIRCRAFT: Record<string, string> = {
+  old_cargo_aircraft: 'regional_freighter',
+  twin_turboprop: 'military_transport',
+};
 
 function makeDefaultSave(): SaveData {
   return {
@@ -143,6 +156,14 @@ class SaveServiceClass {
           ?? data.player?.unlockedSettlementIds?.[0]
           ?? defaults.player.currentLocationId,
         activeContractId: null, // old contract shapes are discarded below
+        // v4 cut the fleet from six airframes to four. A save owning one of
+        // the retired two is re-equipped with its nearest survivor rather than
+        // left holding an aircraft the game can no longer describe - which
+        // would fall through specFor() and silently fly as a crop duster.
+        ownedAircraft: (data.player?.ownedAircraft ?? defaults.player.ownedAircraft)
+          .map(o => RETIRED_AIRCRAFT[o.definitionId]
+            ? { ...o, definitionId: RETIRED_AIRCRAFT[o.definitionId] }
+            : o),
       },
       world: {
         ...defaults.world,

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { TouchInput, type HeldControl, type PulseControl } from '../../../game/utils/touchInput';
-import { useFlightState, useGearFlaps } from '../../store/gameStore';
+import { useFlightState, useGearFlaps, useFlightStatus } from '../../store/gameStore';
 import { useViewport } from '../../viewport';
 import { hudPanelHeight } from './hudStyles';
 
@@ -36,6 +36,7 @@ export function TouchControls(): React.ReactElement | null {
   const vp = useViewport();
   const state = useFlightState();
   const { gearDown, flapsDeployed } = useGearFlaps();
+  const status = useFlightStatus();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   // Any held control must be dropped if the component goes away mid-press
@@ -54,6 +55,16 @@ export function TouchControls(): React.ReactElement | null {
   // rather than fixed.
   // Budgeted as a FRACTION of the screen rather than a fixed pixel length, so
   // it can never take the display over the way the old 190 px lever did.
+  /*
+   * Which systems are worth a permanent button right now.
+   *
+   * 130 m rather than "on the ground": the gear and the flaps matter through
+   * the whole of a departure and the whole of an approach, not just while the
+   * wheels are touching.
+   */
+  const nearGround = state.altitude < 130;
+  const engineOut = status?.engineFailed === true || state.enginePower < 0.02;
+
   const leverH = Math.max(84, Math.min(Math.round(vp.canvas.height * 0.34), Math.round(150 * s)));
   const stickSize = Math.max(48, Math.min(Math.round(62 * s), Math.round((vp.canvas.height - deck - pad(70)) / 2)));
 
@@ -62,8 +73,22 @@ export function TouchControls(): React.ReactElement | null {
       <ThrottleLever scale={s} throttle={state.throttle} height={leverH} deck={deck} />
       <PitchStick scale={s} size={stickSize} deck={deck} />
 
-      {/* Discrete systems: tucked into a drawer so they cannot be hit by the
-          thumb that is flying the aeroplane. */}
+      {/*
+        * ── Systems: what you need NOW, not everything you might ever need ──
+        *
+        * All six controls used to live behind a drawer, so lowering the gear on
+        * final meant taking a thumb off the stick, opening a menu, hunting a
+        * button and closing it again — on approach, which is the one moment
+        * you cannot spare the attention.
+        *
+        * A bigger grid is not the answer either; a phone has no room for six
+        * permanent buttons that will not foul the flying thumb. But these
+        * controls are CONTEXTUAL: gear and flaps only matter near the ground,
+        * time warp only in the cruise, and the starter only when the engine is
+        * off. Showing the two or three that apply right now gets each of them
+        * to one tap, and leaves the drawer for the things you touch once a
+        * flight if at all.
+        */}
       <div
         style={{
           position: 'absolute',
@@ -76,6 +101,24 @@ export function TouchControls(): React.ReactElement | null {
           pointerEvents: 'auto',
         }}
       >
+        {/* The engine being out overrides everything — nothing else matters */}
+        {engineOut && (
+          <PulseButton label="▶ START" scale={s} control="engine" wide danger />
+        )}
+
+        {/* Near the ground: the two things a takeoff or an approach needs */}
+        {!engineOut && nearGround && (
+          <>
+            <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
+            <PulseButton label={flapsDeployed ? 'FLAP ▼' : 'FLAP ▲'} scale={s} control="flaps" wide />
+          </>
+        )}
+
+        {/* Settled in the cruise: the only control worth a permanent slot */}
+        {!engineOut && !nearGround && (
+          <PulseButton label="TIME ⏩" scale={s} control="time" wide />
+        )}
+
         <PulseButton
           label={drawerOpen ? '✕' : '☰'}
           scale={s}
@@ -83,6 +126,7 @@ export function TouchControls(): React.ReactElement | null {
         />
         {drawerOpen && (
           <>
+            {/* Everything, always — the contextual set is a shortcut, not a cage */}
             <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
             <PulseButton label={flapsDeployed ? 'FLAP ▼' : 'FLAP ▲'} scale={s} control="flaps" wide />
             <PulseButton label="ENGINE" scale={s} control="engine" wide />

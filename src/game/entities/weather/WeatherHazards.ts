@@ -122,7 +122,13 @@ export class WeatherHazards {
     const gritRate = GRIT[condition] ?? 0;
     if (gritRate > 0 && engineRunning) {
       // Sand is worst near the deck where the storm is picking it up
-      const lowFactor = clamp(1 - state.altitude / 260, 0.25, 1);
+      /*
+       * Sand is worst near the deck, but it does not stop at 260 m any more —
+       * that threshold was written when the ceiling was 3000 m and a cruise
+       * was well above it. Against a 400-1000 m band it meant climbing two
+       * hundred metres put you almost entirely clear of a dust storm.
+       */
+      const lowFactor = clamp(1 - state.altitude / 700, 0.3, 1);
       this.grit = clamp(this.grit + gritRate * lowFactor * state.throttle * dt, 0, 1);
     } else {
       this.grit = clamp(this.grit - 0.045 * dt, 0, 1);

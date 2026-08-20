@@ -19,6 +19,7 @@ import { clamp, distance, pixelsToKm } from '../utils/math';
 import type { ApproachKind, FlightAction } from '../../types';
 import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
+import { routeKmBetween } from '../../services/RouteService';
 import { Director } from '../ai/Director';
 import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
@@ -109,6 +110,27 @@ export class FlightScene extends Phaser.Scene {
   private underFire      = false;
   private hazardAlertAt  = -99;   // last obstacle klaxon
   private overspeedWarnAt = -99;
+  private ceilingWarnAt  = -99;   // last service-ceiling caution
+  /**
+   * Seconds of loading left on the apron.
+   *
+   * The crew used to work in an endless loop until you started the engine,
+   * which made it wallpaper — nothing was ever finished and nothing was
+   * waited for. A short, finite load gives the departure a beat with a end to
+   * it: they finish, they tell you, and then it is your aeroplane.
+   */
+  private loadingLeft = 3.2;
+  /**
+   * Projected fuel in the tank when you arrive, 0-1. Smoothed.
+   *
+   * This is the number that gives the cruise something to do. Every decision
+   * moves it — throttle, height, whether you are riding lift or grinding
+   * through sink, how much you detoured around that cell — and it moves every
+   * second, so there is always something to be getting on with between the
+   * take-off and the approach.
+   */
+  private fuelAtArrival = 1;
+  private arrivalWarnAt = -99;
   private trafficAlertAt = -99;   // last traffic advisory
   private threatAlertAt  = -99;   // last "hostile ground ahead" call
   /** What is shooting at us and the altitude that clears it. */
@@ -228,6 +250,23 @@ export class FlightScene extends Phaser.Scene {
     this.state.integrity   = owned.integrity;
     this.state.engineTemp  = owned.engineTemp;
 
+    /*
+     * ── You start cold, with the flaps already set ────────────────────────
+     *
+     * The flight used to open with the engine running, so the most
+     * characteristic sound an aeroplane makes was one the player only ever
+     * heard by deliberately shutting down mid-air. Starting cold gives the
+     * departure a beginning: starter, catch, run up, roll.
+     *
+     * The flaps, on the other hand, are set FOR you. A pilot walks out to an
+     * aeroplane already configured for the departure, and making the player
+     * remember a checkbox before every takeoff is admin, not gameplay — the
+     * decision that matters is when to bring them UP.
+     */
+    this.engineRunning = false;
+    this.state.flapsDeployed = true;
+    this.state.gearDown = true;
+
     // Stall buffet shakes the camera; touchdown captures true impact values
     this.controller.onBuffet = () => {
       if (this.shakeDuration < 50) SoundEngine.stallBuffet();
@@ -250,10 +289,7 @@ export class FlightScene extends Phaser.Scene {
       const origin = window.gameData.settlements.find(s => s.id === contract.originId);
       const dest   = window.gameData.settlements.find(s => s.id === contract.destinationId);
       if (origin && dest) {
-        const loreKm = pixelsToKm(
-          distance(origin.position.x, origin.position.y, dest.position.x, dest.position.y), 0.5,
-        );
-        this.routeKm = clamp(1.8 + loreKm / 110, 1.8, 5);
+        this.routeKm = routeKmBetween(origin, dest);
         destinationName = dest.name;
         this.originRunwayM = origin.field?.runwayM ?? 600;
         this.destRunwayM = dest.field?.runwayM ?? 600;
@@ -275,6 +311,12 @@ export class FlightScene extends Phaser.Scene {
     this.world    = new ParallaxWorld(this, width, height, groundY);
     // Obstacles and raider ground are deterministic per contract, so a route
     // you have flown before hands you the same threats.
+    /*
+     * Biomes first: setRoute lays out the raiders, and a stretch over the
+     * tidal channels has to come out as gun barges rather than sandbag nests.
+     * The layout can only know that if it already knows what country it is in.
+     */
+    this.world.setBiomes(this.originBiome, this.destBiome);
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
     // Weather becomes a set of places on this route rather than a global mood.
     this.world.weatherField.reset(
@@ -327,13 +369,20 @@ export class FlightScene extends Phaser.Scene {
       });
       SoundEngine.chime();
     };
-    // The land itself changes between the two settlements
-    this.world.setBiomes(this.originBiome, this.destBiome);
     // The garrison at both fields flies the destination faction's colours
     const destSettlement = window.gameData.settlements.find(s => s.id === contract?.destinationId);
     const faction = window.gameData.factions.find(f => f.id === destSettlement?.factionId);
     if (faction) this.world.setFactionColor(parseInt(faction.color.replace('#', ''), 16));
     this.aircraft = new AircraftSprite(this, AIRCRAFT_X, groundY, definition);
+    // Cold and quiet on the apron — the prop is stopped until the player
+    // turns it over. See the note where engineRunning is set false.
+    this.world.loading = true;
+    this.loadingLeft = 3.2;
+    this.aircraft.stopEngine();
+    EventBus.emit('ui:show-notification', {
+      message: '📦 Loading cargo — flaps and gear are set for departure',
+      type: 'info',
+    });
     this.rig = new CameraRig(this.cameras.main, this.controller.vStall, this.controller.vMax);
 
     // The engine you hear is the engine you can see. Style, count and blade
@@ -462,6 +511,20 @@ export class FlightScene extends Phaser.Scene {
   // ── Main loop ─────────────────────────────────────────────────────────────
 
   update(time: number, delta: number): void {
+    // ── Loading, on the apron ──────────────────────────────────────────────
+    if (this.loadingLeft > 0) {
+      this.loadingLeft -= delta / 1000;
+      if (this.loadingLeft <= 0) {
+        this.loadingLeft = 0;
+        this.world.loading = false;
+        SoundEngine.chime();
+        EventBus.emit('ui:show-notification', {
+          message: '📦 Cargo aboard and secured — press E to start the engine',
+          type: 'success',
+        });
+      }
+    }
+
     if (this.crashing) { this.updateCrashSlide(delta / 1000); return; }
     if (this.landed || this.eventModalOpen) return;
 
@@ -504,20 +567,35 @@ export class FlightScene extends Phaser.Scene {
     }
 
     if ((Phaser.Input.Keyboard.JustDown(this.keys.E) || TouchInput.consume('engine'))) {
-      if (this.engineFailed) {
+      if (this.loadingLeft > 0) {
+        EventBus.emit('ui:show-notification', {
+          message: `Still loading — ${this.loadingLeft.toFixed(1)}s`,
+          type: 'warning',
+        });
+      } else if (this.engineFailed) {
         // A failed engine needs cranking — it does not just snap back on
         if (this.restartHoldFor <= 0) {
-          this.restartHoldFor = 2.2;
-          SoundEngine.engineSputter();
+          this.restartHoldFor = 2.8;
+          SoundEngine.engineCrank(2.8);
           EventBus.emit('ui:show-notification', { message: 'Cranking…', type: 'warning' });
         }
+      } else if (!this.engineRunning) {
+        /*
+         * Starting is an EVENT, not a switch.
+         *
+         * The starter drags the prop round for a couple of seconds, a cylinder
+         * or two fires and misses, and then it catches. Instant ignition made
+         * the most characterful moment in the aeroplane into a light switch —
+         * and it removed the one bit of pre-flight ritual the game had.
+         */
+        if (this.restartHoldFor <= 0) {
+          this.restartHoldFor = 2.6;
+          SoundEngine.engineCrank(2.6);
+          EventBus.emit('ui:show-notification', { message: 'Starter engaged…', type: 'info' });
+        }
       } else {
-        this.engineRunning = !this.engineRunning;
-        if (this.engineRunning) {
-          this.aircraft.startEngine();
-          SoundEngine.engineStart();
-          EventBus.emit('ui:show-notification', { message: 'Engine started.', type: 'success' });
-        } else {
+        this.engineRunning = false;
+        {
           this.aircraft.stopEngine();
           SoundEngine.engineStop();
           EventBus.emit('ui:show-notification', { message: 'Engine shut down.', type: 'warning' });
@@ -583,7 +661,21 @@ export class FlightScene extends Phaser.Scene {
     this.weather.update(
       delta * this.timeScale, this.scrollX + AIRCRAFT_X, this.director.pressure,
     );
-    const windX = this.weather.windX() * 0.4;
+    /*
+     * Wind aloft.
+     *
+     * The second half of "there is no free altitude": the higher you go the
+     * harder the air pushes back. Height buys you safety from the ground and
+     * costs you ground speed, so the fast way across and the safe way across
+     * are different altitudes and you have to keep choosing between them.
+     *
+     * Applied as a headwind component that grows with height — a tailwind at
+     * altitude would just make climbing correct again.
+     */
+    const altFrac = Phaser.Math.Clamp(
+      this.state.altitude / Math.max(1, SaveService.getActiveAircraft().def.stats.maxAltitude), 0, 1,
+    );
+    const windX = this.weather.windX() * 0.4 - altFrac * altFrac * 14;
 
     // ── The air the aeroplane is flying through ───────────────────────────
     // Sampled at the aircraft's own world position, then handed to the
@@ -957,7 +1049,18 @@ export class FlightScene extends Phaser.Scene {
     // so the call always lands with enough room to out-climb the obstacle.
     // Range set so the call always lands with room to out-climb the tallest
     // obstacle in the mix (masts now reach 78 m).
-    const ahead = hz.ahead(worldX, 3600);
+    /*
+     * Look-ahead is a TIME, not a distance.
+     *
+     * A flat 3600 px gave the crop duster seven seconds to react and the heavy
+     * transport under three at the same warning - the faster the aircraft, the
+     * less warning it got, which is exactly backwards. Scaling by ground speed
+     * gives every airframe the same seconds to do something about it.
+     */
+    const lookAhead = (seconds: number): number => Math.max(
+      2200, this.state.groundSpeed * seconds * WORLD_PX_PER_M,
+    );
+    const ahead = hz.ahead(worldX, lookAhead(7));
     // Height over whatever is actually below, not over sea level. A mast in
     // the way means the ground has effectively risen to meet you, and that is
     // exactly how it should feel to the Director.
@@ -1029,7 +1132,8 @@ export class FlightScene extends Phaser.Scene {
 
     // Advance call on the next stretch, so there is room to climb over it.
     // Only worth saying if their guns actually out-reach our current height.
-    const threat = this.world.threatAhead(worldX, 5200);
+    // Ten seconds: a climb over an AA ceiling takes longer than a dodge.
+    const threat = this.world.threatAhead(worldX, lookAhead(10));
     if (threat && alt < threat.ceilingM &&
         this.state.elapsedSeconds - this.threatAlertAt > 8) {
       this.threatAlertAt = this.state.elapsedSeconds;
@@ -1043,6 +1147,52 @@ export class FlightScene extends Phaser.Scene {
         type: 'warning',
       });
       this.disengageWarp('hostile ground ahead');
+    }
+
+    /*
+     * ── The service ceiling ───────────────────────────────────────────────
+     *
+     * `maxAltitude` used to be a hard clamp inside the integrator: you slid
+     * along it like a shelf, with everything else about the aeroplane exactly
+     * as it was on the runway. Now the air genuinely thins (see densityRatio),
+     * the climb dies away on its own approaching the ceiling, and past it the
+     * engine starves.
+     *
+     * Announced twice - a caution in the last 6% and then the flame-out - so
+     * it is a limit you fly into knowingly, not one that just happens to you.
+     */
+    {
+      const ceiling = SaveService.getActiveAircraft().def.stats.maxAltitude;
+      if (alt > ceiling * 0.94 && !this.engineFailed
+          && this.state.elapsedSeconds - this.ceilingWarnAt > 8) {
+        this.ceilingWarnAt = this.state.elapsedSeconds;
+        SoundEngine.warn();
+        EventBus.emit('ui:show-notification', {
+          message: `▲ SERVICE CEILING ${Math.round(ceiling)} m — the air is too thin up here`,
+          type: 'warning',
+        });
+        this.disengageWarp('service ceiling');
+      }
+      if (alt > ceiling && this.engineRunning && !this.engineFailed) {
+        this.engineFailed = true;
+        this.engineRunning = false;
+        this.aircraft.stopEngine();
+        SoundEngine.engineSputter();
+        SoundEngine.radio('Ashline flight, you are above your ceiling and the engine has quit. Get the nose down.',
+          { kind: 'warning', station: 'ASHLINE CONTROL' });
+        EventBus.emit('ui:show-notification', {
+          message: '✖ FLAMED OUT ABOVE THE CEILING — descend, then hold E to relight',
+          type: 'danger',
+        });
+        this.disengageWarp('flamed out');
+      }
+      /*
+       * A relight needs air. Without this you could hold E at the ceiling and
+       * the engine would catch in the same air that just starved it.
+       */
+      if (this.restartHoldFor > 0 && alt > ceiling * 0.98) {
+        this.restartHoldFor = Math.max(this.restartHoldFor, 0.4);
+      }
     }
 
     // ── Engine reliability: tired engines quit, and you can restart them ──
@@ -1073,6 +1223,8 @@ export class FlightScene extends Phaser.Scene {
       if (this.restartHoldFor <= 0) {
         this.engineFailed = false;
         this.engineRunning = true;
+        // The crew clear away the moment the prop turns
+        this.world.loading = false;
         this.aircraft.startEngine();
         this.state.engineTemp = Math.max(0, this.state.engineTemp - 0.15);
         SoundEngine.engineStart();
@@ -1128,6 +1280,50 @@ export class FlightScene extends Phaser.Scene {
         });
       }
 
+      /*
+       * Fuel at arrival, from the burn you are ACTUALLY achieving right now —
+       * not from a table. Sink, a headwind aloft and a heavy throttle all show
+       * up in it within a second or two, which is what makes it worth
+       * watching rather than a decoration.
+       */
+      {
+        const def = SaveService.getActiveAircraft().def;
+        const remainingKm = Math.max(0, this.routeKm - this.state.distanceTravelled);
+        const kmPerSec = Math.max(0.0005, this.state.groundSpeed / 1000);
+        const burnPerSec = (def.stats.fuelBurnRate * this.state.throttle) / 60;
+        const needed = (burnPerSec / kmPerSec) * remainingKm;
+        const projected = clamp(
+          (this.state.fuel - needed) / Math.max(1, def.stats.fuelCapacity), 0, 1,
+        );
+        // Heavily smoothed: this should read as a trend you can steer, not a
+        // needle that twitches on every gust.
+        this.fuelAtArrival += (projected - this.fuelAtArrival) * Math.min(1, sdt / 2.5);
+        /*
+         * Only call it in the CRUISE.
+         *
+         * The projection is computed from the burn you are achieving right
+         * now, so a full-power climb always reads badly — that is honest, and
+         * it is exactly what makes the number worth watching. But shouting
+         * about it during every departure would be crying wolf, so the call
+         * waits until you are a quarter of the way along and no longer
+         * climbing hard.
+         */
+        const settled = this.state.verticalSpeed < 3
+          && this.state.distanceTravelled > this.routeKm * 0.25;
+        if (settled && this.hasBeenAirborne && !this.landed && this.fuelAtArrival < 0.04
+            && this.state.elapsedSeconds - this.arrivalWarnAt > 25) {
+          this.arrivalWarnAt = this.state.elapsedSeconds;
+          SoundEngine.radio(
+            'Ashline flight, our numbers say you do not have the fuel for this at that power setting.',
+            { kind: 'warning', station: 'ASHLINE CONTROL' },
+          );
+          EventBus.emit('ui:show-notification', {
+            message: '⚠ YOU WILL NOT MAKE IT AT THIS RATE — ease the power or find lift',
+            type: 'danger',
+          });
+        }
+      }
+
       this.director.update(sdt, {
         routeFrac: clamp(this.scrollX / (this.routeKm * 1000 * WORLD_PX_PER_M), 0, 1),
         onGround: alt <= 0.5,
@@ -1160,6 +1356,7 @@ export class FlightScene extends Phaser.Scene {
       obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
       trafficDeltaM: this.trafficAdvisory,
       trafficAvoid: this.trafficAvoid,
+      fuelAtArrival: this.fuelAtArrival,
     });
   }
 
@@ -1659,7 +1856,7 @@ export class FlightScene extends Phaser.Scene {
     EventBus.emit('flight:status', {
       engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
       overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
-      weatherCaution: null, iceLoad: 0, avionicsOut: false,
+      weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1,
     });
     this.state.speed = 0;
     this.state.verticalSpeed = 0;

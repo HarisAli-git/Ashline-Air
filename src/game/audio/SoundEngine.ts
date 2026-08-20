@@ -517,6 +517,51 @@ class SoundEngineClass {
   // ── One-shots ─────────────────────────────────────────────────────────────
 
   /** Starter grind, catch, then settle. */
+  /**
+   * The starter motor turning over, before anything catches.
+   *
+   * A big radial does not simply switch on: the starter whines up, the
+   * prop drags round, a cylinder or two fires and misses, and only then does
+   * it settle. Played as a loop the scene can stop the moment it catches, so
+   * the sound and the two and a half seconds of cranking are the same event
+   * rather than a sample laid over a timer.
+   */
+  engineCrank(seconds: number): void {
+    if (!this.ctx || !this.master || !this.noiseBuffer) return;
+    const ctx = this.ctx;
+    const t0 = ctx.currentTime;
+    const bus = this.busEngine ?? this.master;
+
+    // Starter motor: a whine that climbs as it takes up the load
+    const whine = ctx.createOscillator();
+    whine.type = 'sawtooth';
+    whine.frequency.setValueAtTime(210, t0);
+    whine.frequency.linearRampToValueAtTime(430, t0 + seconds * 0.8);
+    const wf = ctx.createBiquadFilter();
+    wf.type = 'bandpass'; wf.frequency.value = 900; wf.Q.value = 3.5;
+    const wg = ctx.createGain();
+    wg.gain.setValueAtTime(0.0001, t0);
+    wg.gain.exponentialRampToValueAtTime(0.09, t0 + 0.12);
+    wg.gain.setValueAtTime(0.09, t0 + seconds - 0.15);
+    wg.gain.exponentialRampToValueAtTime(0.0001, t0 + seconds);
+    whine.connect(wf).connect(wg).connect(bus);
+    whine.start(t0); whine.stop(t0 + seconds + 0.05);
+
+    /*
+     * Compression pulses — the prop being dragged over. They speed up through
+     * the crank, which is the single cue that says "it is about to catch"
+     * rather than "this is a loop that will play for ever".
+     */
+    let t = t0 + 0.18;
+    let gap = 0.30;
+    while (t < t0 + seconds - 0.1) {
+      this.burstInto(bus, t, 0.09, 90 + Math.random() * 40, 0.16, 'lowpass', 1.4);
+      t += gap;
+      gap = Math.max(0.11, gap * 0.86);
+    }
+  }
+
+  /** It catches: one big cough and the engine picks up. */
   engineStart(): void {
     this.noiseBurst(0.55, 260, 0.14, 'bandpass', 2);
     this.blip(48, 0.5, 0.10, 'sawtooth', 96);

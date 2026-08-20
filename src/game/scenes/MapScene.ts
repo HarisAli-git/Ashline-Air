@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { KM_PER_PIXEL } from '../../services/RouteService';
 import { SaveService } from '../../services/SaveService';
 import { ProgressionService } from '../../services/ProgressionService';
 import { DevService } from '../../services/DevService';
@@ -10,7 +11,7 @@ import { distance, pixelsToKm } from '../utils/math';
 import type { SettlementDefinition } from '../../types';
 import { canOperate, fieldSummary } from '../../services/AirfieldService';
 
-const KM_PER_PIXEL = 0.5;
+
 
 interface Mote { x: number; y: number; alpha: number; sz: number; vx: number; vy: number; }
 

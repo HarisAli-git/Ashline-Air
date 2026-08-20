@@ -93,12 +93,34 @@ export class Hazards {
       x += minGap + hash(i++) * 3000;
     }
 
-    // Hostile stretches: raider-held bands wide enough to be a real crossing
-    // (~800–1400 m), not a sliver you clear before the warning lands.
-    const zoneCount = 1 + Math.floor(hash(seed * 7) * 2);
+    /*
+     * Hostile stretches: raider-held bands wide enough to be a real crossing
+     * (~600-900 m), not a sliver you clear before the warning lands.
+     *
+     * Density is a FRACTION OF THE ROUTE, not a count. A flat 1-2 zones was
+     * fine at five kilometres - it covered a fifth to a half of the leg - but
+     * the same rule on a sixty-kilometre haul covered six percent, and the
+     * guns effectively vanished from the game. One stretch per ~4.5 km keeps
+     * a crossing every half-minute or so whatever the aircraft.
+     */
+    const PX_PER_ZONE = 3.2 * 1000 * 9;   // 3.2 km at WORLD_PX_PER_M
+    const zoneCount = Math.max(2, Math.min(18, Math.round(span / PX_PER_ZONE)));
+
+    /*
+     * And they must be SPREAD. The previous version fed `z` to the hash but
+     * not to the position, so every stretch landed somewhere in the middle 44%
+     * of the route and they piled up on each other - a long haul was one messy
+     * knot of guns and then nothing at all either side.
+     *
+     * One zone per slice of the route, jittered inside its own slice, so they
+     * are irregular without ever clumping or leaving a huge dead run.
+     */
+    const slice = span / zoneCount;
     for (let z = 0; z < zoneCount; z++) {
-      const centre = startPx + span * (0.28 + 0.44 * hash(seed * 13 + z));
-      const half = 2400 + hash(seed * 17 + z) * 1800;
+      const half = 2700 + hash(seed * 17 + z) * 1400;
+      // Keep the jitter inside the slice, and clear of both airfields
+      const room = Math.max(0, slice / 2 - half);
+      const centre = startPx + slice * (z + 0.5) + (hash(seed * 13 + z) - 0.5) * 2 * room;
       this.hostile.push([centre - half, centre + half]);
     }
   }

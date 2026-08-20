@@ -1,6 +1,7 @@
 import { SaveService } from './SaveService';
 import { EventBus } from '../game/utils/EventBus';
 import type { SaveData, AircraftDefinition, OwnedAircraft } from '../types';
+import { routeBlock } from './RouteService';
 
 /**
  * Owning, buying and choosing aircraft.
@@ -21,7 +22,7 @@ const TIER_REPUTATION: Record<number, number> = {
 };
 
 export type AircraftAvailability =
-  | { state: 'owned'; active: boolean }
+  | { state: 'owned'; active: boolean; strandedHere: string | null }
   | { state: 'buyable'; cost: number }
   | { state: 'too-poor'; cost: number; short: number }
   | { state: 'locked'; reason: string };
@@ -52,15 +53,59 @@ class AircraftServiceClass {
     return save.player.reputation.reduce((m, r) => Math.max(m, r.points), 0);
   }
 
+  /**
+   * Would taking this airframe leave you stuck where you are standing?
+   *
+   * The whole fleet sits wherever the player is, so a light aircraft can end
+   * up parked at a field it could never have flown to - land the freighter at
+   * Irongate, switch to the crop duster, and every route out is four times its
+   * range. It can take off; it just has nowhere to go. That is a soft-lock
+   * reached through a menu, so the menu is where it gets refused.
+   *
+   * @returns the field name that would strand it, or null if it is fine
+   */
+  private strandedAt(def: AircraftDefinition, save: SaveData): string | null {
+    const here = window.gameData.settlements.find(x => x.id === save.player.currentLocationId);
+    if (!here) return null;
+    const anywhere = window.gameData.settlements.some(
+      d => d.id !== here.id
+        && save.player.unlockedSettlementIds.includes(d.id)
+        && routeBlock(def, here, d) === null,
+    );
+    return anywhere ? null : here.name;
+  }
+
   /** What the player can do with this airframe right now, and why. */
   availability(def: AircraftDefinition, save: SaveData = SaveService.get()): AircraftAvailability {
     const ownedIdx = save.player.ownedAircraft.findIndex(o => o.definitionId === def.id);
-    if (ownedIdx >= 0) return { state: 'owned', active: ownedIdx === this.activeIndex(save) };
+    if (ownedIdx >= 0) {
+      return {
+        state: 'owned',
+        active: ownedIdx === this.activeIndex(save),
+        strandedHere: this.strandedAt(def, save),
+      };
+    }
 
     const need = TIER_REPUTATION[def.tier] ?? 0;
     const rep = this.bestReputation(save);
     if (rep < need) {
       return { state: 'locked', reason: `Needs ${need} reputation with any faction (you have ${rep})` };
+    }
+    /*
+     * You cannot buy something that cannot leave the field you are standing on.
+     *
+     * Without this the heavy transport - 1150 m of runway - could be bought at
+     * a 430 m mountain strip, and the player would own an aircraft with no
+     * legal route out of where it is parked. That is a soft-lock you pay
+     * 140,000 for.
+     */
+    const here = window.gameData.settlements.find(x => x.id === save.player.currentLocationId);
+    const hereRunway = here?.field?.runwayM ?? 600;
+    if (here && hereRunway < def.stats.runwayM) {
+      return {
+        state: 'locked',
+        reason: `${here.name} has ${hereRunway} m of runway — the ${def.name} needs ${def.stats.runwayM} m. Buy it somewhere it can take off.`,
+      };
     }
     if (save.player.money < def.unlockCost) {
       return { state: 'too-poor', cost: def.unlockCost, short: def.unlockCost - save.player.money };
@@ -104,6 +149,17 @@ class AircraftServiceClass {
   select(index: number): boolean {
     const save = SaveService.get();
     if (!save.player.ownedAircraft[index]) return false;
+    const def = window.gameData.aircraft.find(
+      a => a.id === save.player.ownedAircraft[index].definitionId,
+    );
+    const stranded = def ? this.strandedAt(def, save) : null;
+    if (def && stranded) {
+      EventBus.emit('ui:show-notification', {
+        message: `The ${def.name} has nothing it can reach from ${stranded}. Fly out on something with the legs for it first.`,
+        type: 'warning',
+      });
+      return false;
+    }
     save.player.activeAircraftId = String(index);
     SaveService.save(save.player, save.world);
     EventBus.emit('player:fleet-changed', {

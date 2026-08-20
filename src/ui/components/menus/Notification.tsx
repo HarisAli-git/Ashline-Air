@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNotification } from '../../store/gameStore';
+import { useNotification, useInFlight } from '../../store/gameStore';
 import { useViewport } from '../../viewport';
 
 const COLOR: Record<string, string> = {
@@ -11,6 +11,7 @@ const COLOR: Record<string, string> = {
 
 export function GlobalNotification(): React.ReactElement | null {
   const note = useNotification();
+  const inFlight = useInFlight();
   const vp = useViewport();
   if (!note) return null;
   const s = vp.uiScale;
@@ -21,14 +22,18 @@ export function GlobalNotification(): React.ReactElement | null {
       // overlay, so it stays registered with the game inside any letterbox.
       position: 'absolute',
       /*
-       * Bottom centre, not top.
+       * Where it sits depends on what is underneath it.
        *
-       * The top of the screen belongs to the radio strip and the caution
-       * chips; a toast there landed straight through an incoming call. The
-       * HUD redesign left the bottom centre completely clear, so that is
-       * where transient messages go — nothing else ever occupies it.
+       * In flight the top belongs to the radio strip and the caution chips, and
+       * the HUD redesign left the bottom centre completely clear — so a toast
+       * goes there. Everywhere ELSE the bottom centre is exactly where the
+       * primary action button lives (FLY, ACCEPT, RETURN TO MAP), and a toast
+       * about the contract you just chose landed straight on top of the button
+       * you chose it with. Off the flight screen it goes to the top instead.
        */
-      bottom: `calc(${n(vp.isCompact ? 30 : 40)}px + env(safe-area-inset-bottom, 0px))`,
+      ...(inFlight
+        ? { bottom: `calc(${n(vp.isCompact ? 30 : 40)}px + env(safe-area-inset-bottom, 0px))` }
+        : { top: `calc(${n(vp.isCompact ? 46 : 58)}px + env(safe-area-inset-top, 0px))` }),
       left: '50%',
       transform: 'translateX(-50%)',
       maxWidth: '88vw',

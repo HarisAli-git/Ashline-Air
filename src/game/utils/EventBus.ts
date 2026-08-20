@@ -71,6 +71,15 @@ export interface GameEvents {
     trafficDeltaM: number | null;
     /** Which way to go to miss it: +1 climb, -1 descend. */
     trafficAvoid: 1 | -1 | null;
+    /**
+     * Fuel fraction projected to remain on arrival, 0-1.
+     *
+     * The cruise instrument. Level flight had no feedback of any kind, so once
+     * you were above the guns there was nothing to read and nothing to do —
+     * this answers "am I winning right now?" every second, and throttle,
+     * altitude, wind and the air mass all move it.
+     */
+    fuelAtArrival: number;
     /** Icing / sand / avionics caution from the weather, or null. */
     weatherCaution: string | null;
     /** 0–1 ice on the airframe, for the gauge. */

@@ -256,45 +256,23 @@ const RAW_SPECS: Record<string, RawSpec> = {
     engineStyle: 'radial',
     engines: [{ frac: 0, nose: true, dy: 2, cowlLen: 22, cowlH: 24 }],
     prop:  { r: 21, bladePairs: 1 },
-    // STOL bush ship: oversize tundra tyres, sprung steel legs, tailwheel.
-    gear:  { fixed: true, mainX: 22, noseX: null, tailWheelX: -60, strutLen: 18, wheelR: 12, hingeY: 11 },
+    /*
+     * STOL bush ship: sprung steel legs, tailwheel, tundra tyres.
+     *
+     * The tyre was wheelR 12 against a crop duster's 8 — half again as big on
+     * an airframe that is nowhere near half again as large — and it read as
+     * a cartoon wheel bolted to an aeroplane. What actually characterises a
+     * bush machine (a Super Cub, a Helio Courier) is not enormous tyres but
+     * LONG LEGS: deep prop clearance and a lot of travel to soak up a gravel
+     * bar. So the tyre comes down and the strut goes up.
+     */
+    gear:  { fixed: true, mainX: 24, noseX: null, tailWheelX: -60, strutLen: 23, wheelR: 9.5, hingeY: 11 },
     flap:  { maxDeflectDeg: 35 },
     beacon: { x: -62, y: -38 },
     exhaust: { x: 44, y: 12 },
     groundStanceDeg: 11,
   },
 
-  old_cargo_aircraft: {
-    scale: 0.95,
-    length: 185,
-    height: 32,
-    palette: {
-      hull: 0x8f8d84, hullShade: 0x615f57, hullLight: 0xaba99e,
-      accent: 0x7a4a2e, rust: 0x6b3a20,
-      canopy: 0x2b3740, canopyGlint: 0x9fc4d0,
-      prop: 0x26231f, metal: 0x7d7970,
-    },
-    wing:  { layout: 'low', rootX: 4, y: 10, chord: 56, span: 74, sweep: 22, drop: 9 },
-    // The classic late-war twin: a fine tapering tail cone swept well up, a
-    // rounded nose, and a round-section belly.
-    fuselage: { taperStart: 0.17, tailDepth: 0.20, upsweep: 0.26, noseFull: 0.52, bellyFlat: 0.10 },
-    tail:  { finHeight: 34, finSweep: 16, stabLen: 40 },
-    canopy: { style: 'windows', x: -36, w: 40 },
-    engineStyle: 'radial',
-    engines: [
-      { frac: 0.30, cowlLen: 34, cowlH: 22 },
-      { frac: 0.30, cowlLen: 34, cowlH: 22, far: true },
-    ],
-    prop:  { r: 24, bladePairs: 2 },
-    // Late-war twin: the mains fold up into the engine nacelles, so they sit
-    // directly under them, and it rests on its tailwheel.
-    gear:  { fixed: false, mainX: 34, noseX: null, tailWheelX: -78, strutLen: 24, wheelR: 11,
-             hingeY: 14, mainDual: true },
-    flap:  { maxDeflectDeg: 35 },
-    beacon: { x: -84, y: -52 },
-    exhaust: { x: 22, y: 22 },
-    groundStanceDeg: 9,
-  },
 
   // High-wing regional freighter — the ATR-shaped workhorse of the fleet:
   // a long slab-sided fuselage, a big T-tail, and the wing carried on the
@@ -332,33 +310,6 @@ const RAW_SPECS: Record<string, RawSpec> = {
     exhaust: { x: 16, y: 6 },
   },
 
-  twin_turboprop: {
-    scale: 0.95,
-    length: 190,
-    height: 28,
-    palette: {
-      hull: 0x5d6b74, hullShade: 0x3e4950, hullLight: 0x7c8c96,
-      accent: 0xc9a44a, rust: 0x54402c,
-      canopy: 0x222e36, canopyGlint: 0xaed4e0,
-      prop: 0x23201d, metal: 0x8f8a80,
-    },
-    wing:  { layout: 'low', rootX: 2, y: 8, chord: 50, span: 78, sweep: 26, drop: 8 },
-    fuselage: { taperStart: 0.16, tailDepth: 0.20, upsweep: 0.21, noseFull: 0.48, bellyFlat: 0.22 },
-    tail:  { finHeight: 36, finSweep: 20, stabLen: 38 },
-    canopy: { style: 'windows', x: -46, w: 38 },
-    engineStyle: 'turboprop',
-    engines: [
-      { frac: 0.28, cowlLen: 38, cowlH: 18 },
-      { frac: 0.28, cowlLen: 38, cowlH: 18, far: true },
-    ],
-    prop:  { r: 22, bladePairs: 2 },
-    // Low wing: the mains retract into the nacelles behind the engines.
-    gear:  { fixed: false, mainX: 18, noseX: 80, tailWheelX: null, strutLen: 22, wheelR: 9,
-             hingeY: 13, mainDual: true, noseDual: true, noseWheelR: 7 },
-    flap:  { maxDeflectDeg: 40 },
-    beacon: { x: -88, y: -54 },
-    exhaust: { x: 14, y: 16 },
-  },
 
   military_transport: {
     scale: 0.9,

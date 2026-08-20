@@ -15,6 +15,28 @@ export function useFlightState(): FlightState | null {
   return state;
 }
 
+/**
+ * Is a flight actually on screen right now?
+ *
+ * Needed because the two halves of the interface want opposite things from
+ * the same strip of screen: in flight the top belongs to the radio strip and
+ * the bottom centre is clear, while on the pre-flight and map screens the
+ * bottom centre is where the primary action button lives. A toast pinned to
+ * one of them is guaranteed to cover the other.
+ */
+export function useInFlight(): boolean {
+  const [flying, setFlying] = useState(false);
+  useEffect(() => {
+    const offs = [
+      EventBus.on('scene:start-flight', () => setFlying(true)),
+      EventBus.on('scene:flight-complete', () => setFlying(false)),
+      EventBus.on('scene:return-to-map', () => setFlying(false)),
+    ];
+    return () => offs.forEach(off => off?.());
+  }, []);
+  return flying;
+}
+
 export function useMoney(): number {
   const [money, setMoney] = useState<number>(() => SaveService.get().player.money);
   useEffect(() => {
@@ -48,6 +70,8 @@ export interface FlightStatus {
   obstacleAheadM: number | null;
   trafficDeltaM: number | null;
   trafficAvoid: 1 | -1 | null;
+  /** Projected fuel fraction left in the tank on arrival. See FlightScene. */
+  fuelAtArrival: number;
   weatherCaution: string | null;
   iceLoad: number;
   avionicsOut: boolean;

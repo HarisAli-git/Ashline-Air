@@ -144,6 +144,27 @@ export function FlightHUD(): React.ReactElement | null {
           text={`${Math.round(state.throttle * 100)}`} />
         <Bar s={styles} label="FUEL" frac={fuelFrac} tone={warnFuel ? '#ff4a3a' : '#c8b888'}
           text={`${state.fuel.toFixed(0)}`} alert={warnFuel} />
+        {/*
+          * What you will land with, not what you have.
+          *
+          * This is the readout the cruise is built around: it answers "am I
+          * winning right now?" every second, and throttle, height, wind and
+          * whether you are in lift or sink all move it. Without something like
+          * it, level flight has no feedback at all and there is nothing to do
+          * between the climb-out and the approach.
+          *
+          * Hidden on the ground: a projection built from the burn you are
+          * achieving reads 0% while you are parked with the engine off, which
+          * is true and completely useless — an alarming red bar before you
+          * have even started.
+          */}
+        {status && state.altitude > 2 && (
+          <Bar s={styles} label="ARR" frac={status.fuelAtArrival}
+            tone={status.fuelAtArrival < 0.08 ? '#ff4a3a'
+              : status.fuelAtArrival < 0.2 ? '#ff8844' : '#9fe8b0'}
+            text={`${Math.round(status.fuelAtArrival * 100)}`}
+            alert={status.fuelAtArrival < 0.08} />
+        )}
 
         {/* Only when they matter — see the note at the top of this file */}
         {warnTemp && <Mini s={styles} label="ENG" value={`${tempPct}%`} tone="#ff8844" />}

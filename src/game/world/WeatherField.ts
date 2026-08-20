@@ -93,7 +93,22 @@ export class WeatherField {
     // Three to five cells strewn down the route, never over either airfield —
     // taking off into a wall of dust you could not have avoided is not a
     // decision, it is a punishment.
-    const n = 3 + Math.floor(hash(this.seed) * 3);
+    /*
+     * Fewer cells, each of them enormous.
+     *
+     * A cell used to be a fixed 1400-4000 world px — about 300 m across — so at
+     * cruise you were inside a storm for between two and seventeen SECONDS.
+     * Icing needs tens of seconds to build, grit likewise, and lightning has a
+     * 26 s mean interval, so essentially none of the weather system could ever
+     * fire. That is why a storm could be flown straight through without
+     * trouble: you were never in it.
+     *
+     * Radius is now a fraction of the route (see makeCell), which makes a
+     * crossing 20-50 s whatever the aircraft, and the count comes down to
+     * match so weather is roughly a third of the leg rather than all of it.
+     */
+    const n = Math.max(2, Math.min(5,
+      Math.round(routeEndPx / (14 * 1000 * 9)) + Math.floor(hash(this.seed) * 2)));
     const usable = routeEndPx * 0.72;
     for (let i = 0; i < n; i++) {
       const t = (i + 0.5) / n;
@@ -120,7 +135,7 @@ export class WeatherField {
     const life = 90 + hash(seed + 3) * 150;
     return {
       x,
-      radius: 1400 + hash(seed + 5) * 2600,
+      radius: this.routeEndPx * (0.035 + hash(seed + 5) * 0.025),
       kind,
       // Start part-grown so the route is not uniformly calm at the first
       // second and uniformly angry a minute later.
@@ -144,17 +159,18 @@ export class WeatherField {
       c.x += c.drift * dt;
     }
     // Retire dead cells and anything that has drifted well behind
-    this.cells = this.cells.filter(c => c.age < c.life && c.x > playerX - 9000);
+    this.cells = this.cells.filter(c => c.age < c.life && c.x > playerX - this.routeEndPx * 0.12);
 
     // Keep the sky populated ahead of the aircraft. In a respite the ceiling
     // drops to two cells and the interval nearly doubles, which is what a
     // quiet stretch of sky actually is.
-    const maxCells = 2 + Math.round(Phaser.Math.Clamp(pressure, 0, 1) * 3);
+    const maxCells = 2 + Math.round(Phaser.Math.Clamp(pressure, 0, 1) * 2);
     this.spawnTimer -= dt;
     if (this.spawnTimer <= 0 && this.cells.length < maxCells) {
       const eagerness = 1.65 - Phaser.Math.Clamp(pressure, 0, 1) * 1.05;
       this.spawnTimer = (25 + hash(this.seed + Math.floor(playerX / 1000)) * 35) * eagerness;
-      const x = playerX + 14000 + hash(this.seed + this.cells.length * 17 + Math.floor(playerX)) * 12000;
+      const x = playerX + this.routeEndPx * 0.09
+        + hash(this.seed + this.cells.length * 17 + Math.floor(playerX)) * this.routeEndPx * 0.12;
       if (x < this.routeEndPx * 0.92) {
         this.cells.push(this.makeCell(x, this.seed + Math.floor(playerX / 500) * 7, pressure));
       }

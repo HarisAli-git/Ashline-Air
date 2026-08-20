@@ -6,6 +6,7 @@ import { EventBus } from '../../../game/utils/EventBus';
 import type { AircraftDefinition } from '../../../types';
 import { useViewport } from '../../viewport';
 import { panelChrome, tappable } from './panelChrome';
+import { maxRouteKm } from '../../../services/RouteService';
 
 /**
  * The hangar: the screen that turns money into capability.
@@ -135,7 +136,8 @@ function Row({ def, av, onBuy, onSelect, compact }: {
         <div style={styles.stats}>
           <Stat label="CARGO" value={`${s.cargoCapacity} kg`} />
           <Stat label="CRUISE" value={`${s.cruiseSpeed} km/h`} />
-          <Stat label="RANGE" value={`${Math.round(s.fuelCapacity / s.fuelBurnRate * 60)} min`} />
+          <Stat label="RANGE" value={`${Math.round(maxRouteKm(def))} km`} />
+          <Stat label="NEEDS" value={`${s.runwayM} m strip`} />
           <Stat label="STALL" value={`${s.stallSpeed} km/h`} />
           <Stat label="RELIABILITY" value={`${Math.round(s.engineReliability * 100)}%`} />
           <Stat label="HANDLING" value={`${11 - s.landingDifficulty}/10`} />
@@ -144,7 +146,15 @@ function Row({ def, av, onBuy, onSelect, compact }: {
 
       <div style={styles.rowAction}>
         {av.state === 'owned' && !av.active && (
-          <button style={styles.primaryBtn} onClick={onSelect}>FLY THIS</button>
+          av.strandedHere
+            ? (
+              // Say it before the click, not after. Switching to something with
+              // no route out of this field is a soft-lock reached by menu.
+              <span style={styles.lockedText}>
+                Nothing it can reach from {av.strandedHere}
+              </span>
+            )
+            : <button style={styles.primaryBtn} onClick={onSelect}>FLY THIS</button>
         )}
         {av.state === 'owned' && av.active && <span style={styles.ownedText}>IN SERVICE</span>}
         {av.state === 'buyable' && (
@@ -229,6 +239,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '6px 14px', cursor: 'pointer', fontFamily: 'monospace', fontSize: 12,
   },
   ownedText: { color: '#ffd080', fontSize: 12 },
+  lockedText: { color: '#8a7a5a', fontSize: 11, fontStyle: 'italic', textAlign: 'right' as const },
   costText: { color: '#c8b888', fontSize: 13 },
   shortText: { color: '#ff8844', fontSize: 10 },
   lockText: { color: '#6a5a3a', fontSize: 10, textAlign: 'right' },
