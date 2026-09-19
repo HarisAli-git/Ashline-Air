@@ -125,8 +125,60 @@ class ContractServiceClass {
       basePay = Math.round(seats * 180 * (1 + distKm / 500) * randomBetween(0.9, 1.2));
     } else {
       const pool = type === 'secret' ? illegalGoods : availableGoods;
-      const good = pool[randomInt(0, pool.length - 1)];
-      let quantity = randomInt(1, 5);
+      /*
+       * Size first, then pick something you would plausibly ship that much of.
+       *
+       * Deriving quantity from weight alone let a "bulk" job come out as
+       * fifteen hundred pre-war artifacts — 4500 kg of them at 800 apiece is
+       * one-point-two MILLION credits for a single flight. Heavy loads are
+       * drawn from the bulky goods only; the precious, light things stay
+       * parcel-sized, which is both the fix and what you would actually
+       * expect to find on a freight manifest.
+       */
+      const sizeRoll0 = Math.random();
+      const wantsBulk = sizeRoll0 >= 0.62;
+      const bulkPool = pool.filter(g => g.weightPerUnit >= 10);
+      const sized = wantsBulk && bulkPool.length > 0 ? bulkPool : pool;
+      const good = sized[randomInt(0, sized.length - 1)];
+      /*
+       * ── Load size ─────────────────────────────────────────────────────
+       *
+       * This was `randomInt(1, 5)`, clamped DOWN by the aircraft's capacity
+       * and never scaled up — so every airframe in the game carried the same
+       * one to five crates. A 4500 kg transport hauled a duster's load and
+       * burned 780 L doing it, which made the two large aircraft LOSE MONEY
+       * on every flight. Progression past the bush plane was not slow, it was
+       * arithmetically impossible.
+       *
+       * Contracts now come in sizes. A small parcel fits anything; a bulk
+       * consignment needs a real hold, and pays for one. The weight cap then
+       * does the filtering it was always meant to do: a crop duster simply
+       * cannot see the big jobs, and a freighter has something worth its fuel.
+       */
+      const sizeRoll = sizeRoll0;
+      const loadKg =
+        sizeRoll < 0.34 ? randomBetween(60, 200)        // parcel — anything can take it
+          : sizeRoll < 0.62 ? randomBetween(220, 450)   // light freight — bush plane up
+            : sizeRoll < 0.86 ? randomBetween(700, 2000) // proper freight — freighter
+              : randomBetween(2200, 4500);              // bulk — the heavy, and only it
+      /*
+       * Bounded by VALUE as well as by weight.
+       *
+       * Goods run from 2.5 credits a kilo (water) to 267 (a pre-war artifact),
+       * so a load sized purely by weight meant a hundred and fifty artifacts
+       * on a light-freight run — a hundred and eighty thousand credits, more
+       * than the entire fleet costs. A manifest is limited by what the
+       * consignor will trust to one aeroplane, not just by the hold.
+       */
+      const valueCap =
+        sizeRoll < 0.34 ? 3000
+          : sizeRoll < 0.62 ? 9000
+            : sizeRoll < 0.86 ? 30000
+              : 60000;
+      let quantity = Math.max(1, Math.min(
+        Math.round(loadKg / good.weightPerUnit),
+        Math.floor(valueCap / Math.max(1, good.baseValue)),
+      ));
       if (constraints?.maxWeightKg !== undefined) {
         quantity = Math.max(1, Math.min(quantity, Math.floor(constraints.maxWeightKg / good.weightPerUnit)));
       }
@@ -136,7 +188,17 @@ class ContractServiceClass {
         totalWeightKg: good.weightPerUnit * quantity,
         minimumCondition: good.fragile ? 60 : 0,
       }];
-      basePay = Math.round(good.baseValue * quantity * (1 + distKm / 500) * randomBetween(0.9, 1.2));
+      /*
+       * Bulk rate. Freight gets cheaper per unit the more of it you move —
+       * without that, pay scales linearly with a hold that scales by twenty
+       * times across the fleet and the largest aircraft trivialises the game
+       * in one flight.
+       */
+      const loadedKg = good.weightPerUnit * quantity;
+      const bulkRate = 1 / (1 + loadedKg / 3000);
+      basePay = Math.round(
+        good.baseValue * quantity * bulkRate * (1 + distKm / 500) * randomBetween(0.9, 1.2),
+      );
 
       if (type === 'emergency') {
         payMult = 2.2;

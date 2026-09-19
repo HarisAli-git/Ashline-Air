@@ -21,6 +21,7 @@ import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
 import { routeKmBetween } from '../../services/RouteService';
 import { Director } from '../ai/Director';
+import { FlightTutorial } from './FlightTutorial';
 import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
 
@@ -120,6 +121,12 @@ export class FlightScene extends Phaser.Scene {
    * it: they finish, they tell you, and then it is your aeroplane.
    */
   private loadingLeft = 3.2;
+  /**
+   * Teaches the controls on the first flight of a save and then never again.
+   * Null on every later flight, so it costs nothing to have around.
+   */
+  private tutorial: FlightTutorial | null = null;
+  private tutorialLine: string | null = null;
   /**
    * Projected fuel in the tank when you arrive, 0-1. Smoothed.
    *
@@ -378,6 +385,10 @@ export class FlightScene extends Phaser.Scene {
     // turns it over. See the note where engineRunning is set false.
     this.world.loading = true;
     this.loadingLeft = 3.2;
+    // First flight of this save gets taught; everyone else is left alone.
+    this.tutorial = SaveService.get().player.stats.totalFlights === 0
+      ? new FlightTutorial()
+      : null;
     this.aircraft.stopEngine();
     EventBus.emit('ui:show-notification', {
       message: '📦 Loading cargo — flaps and gear are set for departure',
@@ -419,8 +430,11 @@ export class FlightScene extends Phaser.Scene {
     // top belongs to the radio strip, so the bottom edge is free again — and
     // the legend is reference text that should sit as far out of the way as
     // it can get.
-    this.keyHintText = this.add.text(width / 2, height - 4,
-      'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine/Restart   T: Time   M: Mute   ESC: Abort',
+    // G only appears for an aeroplane that actually has a retractable one.
+    const keyLegend = this.aircraft.hasRetractableGear
+      ? 'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine/Restart   T: Time   M: Mute   ESC: Abort'
+      : 'W/S: Throttle   A/D: Pitch   F: Flaps   E: Engine/Restart   T: Time   M: Mute   ESC: Abort';
+    this.keyHintText = this.add.text(width / 2, height - 4, keyLegend,
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
     ).setOrigin(0.5, 1).setDepth(10).setVisible(!isTouchDevice());
@@ -1339,6 +1353,26 @@ export class FlightScene extends Phaser.Scene {
       });
     }
 
+    // ── Tutorial, first flight only ───────────────────────────────────────
+    if (this.tutorial) {
+      const line = this.tutorial.update(this.state, {
+        retractableGear: this.aircraft.hasRetractableGear,
+        engineRunning: this.engineRunning,
+        loadingLeft: this.loadingLeft,
+        remainingKm: Math.max(0, this.routeKm - this.state.distanceTravelled),
+        underFire: this.underFire,
+        airborne: this.hasBeenAirborne,
+      }, isTouchDevice());
+      if (line !== this.tutorialLine) {
+        this.tutorialLine = line;
+        EventBus.emit('flight:tutorial', { text: line });
+        // The legend and the teaching line share the bottom centre — only one
+        // of them may be there at a time.
+        this.keyHintText?.setVisible(line === null);
+      }
+      if (!this.tutorial.active) this.tutorial = null;
+    }
+
     // Annunciator panel state for the React HUD
     EventBus.emit('flight:status', {
       engineFailed: this.engineFailed,
@@ -1357,6 +1391,7 @@ export class FlightScene extends Phaser.Scene {
       trafficDeltaM: this.trafficAdvisory,
       trafficAvoid: this.trafficAvoid,
       fuelAtArrival: this.fuelAtArrival,
+      retractableGear: this.aircraft.hasRetractableGear,
     });
   }
 
@@ -1856,7 +1891,7 @@ export class FlightScene extends Phaser.Scene {
     EventBus.emit('flight:status', {
       engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
       overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
-      weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1,
+      weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true,
     });
     this.state.speed = 0;
     this.state.verticalSpeed = 0;

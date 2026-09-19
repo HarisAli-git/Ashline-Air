@@ -32,6 +32,11 @@ export interface GameEvents {
   'flight:route-info': { routeKm: number; destinationName: string };
 
   // Threat / systems status for the HUD annunciator panel
+  /**
+   * The current tutorial instruction, or null once there is nothing to say.
+   * Only ever populated on a save's first flight.
+   */
+  'flight:tutorial': { text: string | null };
   'flight:status': {
     engineFailed: boolean;
     underFire: boolean;
@@ -80,6 +85,8 @@ export interface GameEvents {
      * altitude, wind and the air mass all move it.
      */
     fuelAtArrival: number;
+    /** False for the two fixed-gear aircraft — no GEAR control should appear. */
+    retractableGear: boolean;
     /** Icing / sand / avionics caution from the weather, or null. */
     weatherCaution: string | null;
     /** 0–1 ice on the airframe, for the gauge. */

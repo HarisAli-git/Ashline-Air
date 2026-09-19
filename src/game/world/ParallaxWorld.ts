@@ -1860,8 +1860,14 @@ export class ParallaxWorld {
     // ── The deck, as a SURFACE rather than a line ───────────────────────
     // Banded from the far edge down to the near one so it reads as ground
     // receding away from the camera instead of a stripe painted on the world.
-    const DECK = 22;
-    const BANDS = 9;
+    /*
+     * Deeper than it was. At 22 px the deck read as a road: a thin dark band
+     * with a dashed line down it. A runway seen from the side is a wide slab,
+     * and the depth is what lets everything else on it — lights, markers,
+     * rubber — actually be seen.
+     */
+    const DECK = 34;
+    const BANDS = 11;
     for (let i = 0; i < BANDS; i++) {
       const t = i / (BANDS - 1);
       const c = Phaser.Display.Color.Interpolate.ColorWithColor(
@@ -1903,7 +1909,7 @@ export class ParallaxWorld {
         const tx = endX + i * 15;
         if (tx < -20 || tx > this.width + 20) continue;
         g.fillStyle(0xc8c0a8, 0.75);
-        g.fillRect(tx, gy + 3.5, 7, DECK - 6);
+        g.fillRect(tx, gy + 4, 7, DECK - 8);
       }
     }
 
@@ -1911,7 +1917,7 @@ export class ParallaxWorld {
     for (const ax of [x0 + 190, x1 - 265]) {
       if (ax > -60 && ax < this.width + 60) {
         g.fillStyle(0xd8d0b8, 0.6);
-        g.fillRect(ax, gy + 7, 34, 6);
+        g.fillRect(ax, gy + DECK * 0.32, 38, 7);
       }
     }
 
@@ -1923,6 +1929,58 @@ export class ParallaxWorld {
         g.fillStyle(0x0c0a08, 0.4);
         g.fillRect(rx, gy + 6 + propRand(i + 31) * 10, 16 + propRand(i + 41) * 14, 2.4);
       }
+    }
+
+    /*
+     * ── Edge lighting ─────────────────────────────────────────────────────
+     *
+     * The single cue that says "aerodrome" rather than "road", and the only
+     * part of a strip that is visible at all after dark. Paired down both
+     * shoulders, warm amber, and they come up as the light goes — at night
+     * they are the runway.
+     */
+    {
+      const spacing = 62;
+      const glow = 0.18 + (1 - this.dl) * 0.82;      // barely on by day, blazing at night
+      const first = Math.floor(Math.max(fromM, scrollX - 60) / spacing);
+      const last = Math.floor(Math.min(toM, scrollX + this.width + 60) / spacing);
+      for (let i = first; i <= last; i++) {
+        const wx = i * spacing;
+        if (wx < fromM + 10 || wx > toM - 10) continue;
+        const dx = wx - scrollX;
+        for (const ly of [gy - 1.5, gy + DECK + 1.5]) {
+          // Halo first so the lamp sits inside it
+          g.fillStyle(0xffb34a, 0.10 + glow * 0.28);
+          g.fillCircle(dx, ly, 4.2);
+          g.fillStyle(0xffd9a0, 0.45 + glow * 0.55);
+          g.fillCircle(dx, ly, 1.7);
+        }
+      }
+    }
+
+    /*
+     * Distance-remaining boards down the near shoulder. A pilot reads the
+     * runway left by these, and they are what makes a 430 m shelf feel
+     * different from an 1800 m apron from the air.
+     */
+    {
+      const every = 200 * WORLD_PX_PER_M / 9;        // roughly every 200 m of strip
+      for (let wx = fromM + every; wx < toM - every * 0.4; wx += every) {
+        const dx = wx - scrollX;
+        if (dx < -30 || dx > this.width + 30) continue;
+        g.fillStyle(0x12100c, 0.9);
+        g.fillRect(dx - 5, gy + DECK + 4, 10, 8);
+        g.fillStyle(0xd8cfa8, 0.8);
+        g.fillRect(dx - 3.5, gy + DECK + 5.5, 7, 1.6);
+      }
+    }
+
+    // Threshold bar: a solid painted band across the full deck at each end,
+    // which is where the usable surface actually begins.
+    for (const [tx, dir] of [[x0 + 6, 1], [x1 - 6, -1]] as Array<[number, number]>) {
+      if (tx < -40 || tx > this.width + 40) continue;
+      g.fillStyle(S.mark, S.loose ? 0.22 : 0.55);
+      g.fillRect(dir > 0 ? tx : tx - 6, gy + 2, 6, DECK - 3);
     }
 
     // Centreline dashes

@@ -174,7 +174,15 @@ class AircraftServiceClass {
     const { owned, def } = SaveService.getActiveAircraft();
     const fuelNeeded = def.stats.fuelCapacity - owned.fuel;
     const wear = 100 - owned.integrity;
-    const cost = Math.round(fuelNeeded * 3.2 + wear * def.stats.repairCostPerUnit);
+    /*
+     * Fuel at 1.4 a litre, not 3.2.
+     *
+     * At the old price a full tank cost a heavy transport more than the
+     * contract that emptied it, so servicing quietly ate the whole economy.
+     * This is a game about flying, not about a spreadsheet — turning the
+     * aeroplane round should be a cost you notice, not one you dread.
+     */
+    const cost = Math.round(fuelNeeded * 1.4 + wear * def.stats.repairCostPerUnit);
     if (cost <= 0) return { ok: false, message: 'Already fuelled and airworthy.', cost: 0 };
     if (save.player.money < cost) {
       return { ok: false, message: `Servicing costs ₢${cost.toLocaleString()} — you cannot cover it.`, cost };

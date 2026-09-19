@@ -30,10 +30,13 @@ export const KM_PER_PIXEL = 0.5;
  * length because nearly every route WAS the same length.
  *
  * A straight proportion instead, with the divisor set so the shortest hop is
- * about two and a half minutes in the aircraft that flies it and the longest
- * haul is about eight in the only aircraft that can reach the far end.
+ * about three minutes in the aircraft that flies it and the longest haul about
+ * eight in the only aircraft that can reach the far end.
+ *
+ * Raised from 5.6 when the speed table went up to real propeller figures — a
+ * faster fleet over the same distances would have shortened every flight.
  */
-export const GAMEPLAY_KM_PER_LORE_KM = 1 / 5.6;
+export const GAMEPLAY_KM_PER_LORE_KM = 1 / 4.5;
 
 /**
  * Fuel you are expected to still have when you arrive.
