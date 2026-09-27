@@ -109,6 +109,32 @@ export function routeBlock(
   return null;
 }
 
+/**
+ * Is there enough in the tank to actually fly this leg?
+ *
+ * Nothing checked. You could accept a contract, press FLY with a quarter tank
+ * and find out somewhere over the wasteland — which is not a decision, it is
+ * an ambush, and the fix is a line of text on the ground rather than a glider
+ * lesson in the air.
+ *
+ * `reserve` is deliberately generous: the projection assumes a still-air
+ * cruise, and a headwind or a detour around a cell has to fit inside it.
+ */
+export function fuelCheck(
+  def: AircraftDefinition, fuelOnBoard: number, routeKm: number,
+): { ok: boolean; neededL: number; haveL: number; shortL: number } {
+  const range = rangeKm(def);
+  const needFrac = range > 0 ? routeKm / range : 1;
+  // Plus the reserve the contract board already sizes routes against
+  const neededL = Math.ceil(def.stats.fuelCapacity * needFrac / (1 - FUEL_RESERVE));
+  return {
+    ok: fuelOnBoard >= neededL,
+    neededL,
+    haveL: Math.floor(fuelOnBoard),
+    shortL: Math.max(0, Math.ceil(neededL - fuelOnBoard)),
+  };
+}
+
 /** One line explaining a block, for the contract board and the hangar. */
 export function describeBlock(block: NonNullable<RouteBlock>): string {
   return block.reason === 'runway'

@@ -38,6 +38,38 @@ const DEV_WEATHER_KEYS: Record<string, WeatherCondition> = {
   '5': 'fog', '6': 'thunderstorm', '7': 'blizzard',
 };
 
+/**
+ * An alert that stops nagging.
+ *
+ * Every caution in the flight fired on a flat interval for as long as its
+ * condition held — obstacle every 2.5 s, overspeed every 3, traffic every 5 —
+ * so flying toward a mast for fifteen seconds meant six identical klaxons.
+ * The first one is information; the sixth is just noise, and it trains the
+ * player to stop hearing all of them.
+ *
+ * So each repeat waits longer than the last, and the moment the condition
+ * clears the whole thing resets. You get told promptly, reminded once or
+ * twice, and then left to fly the aeroplane.
+ */
+class Nag {
+  private nextAt = -1e9;
+  private step = 0;
+  private readonly base: number;
+  private readonly max: number;
+  constructor(base: number, max = 4) { this.base = base; this.max = max; }
+
+  /** True if it is time to speak up again. */
+  due(now: number): boolean {
+    if (now < this.nextAt) return false;
+    this.nextAt = now + this.base * Math.pow(1.9, Math.min(this.step, this.max));
+    this.step++;
+    return true;
+  }
+
+  /** The condition went away — next time starts fresh. */
+  clear(): void { this.step = 0; this.nextAt = -1e9; }
+}
+
 export class FlightScene extends Phaser.Scene {
   // ── Physics ───────────────────────────────────────────────────────────────
   private controller!: AircraftController;
@@ -112,6 +144,11 @@ export class FlightScene extends Phaser.Scene {
   private hazardAlertAt  = -99;   // last obstacle klaxon
   private overspeedWarnAt = -99;
   private ceilingWarnAt  = -99;   // last service-ceiling caution
+  // Cautions that back off rather than repeating forever. See Nag.
+  private nagObstacle = new Nag(2.5);
+  private nagThreat   = new Nag(8);
+  private nagOverspeed = new Nag(3);
+  private nagTraffic  = new Nag(5);
   /**
    * Seconds of loading left on the apron.
    *
@@ -1079,8 +1116,9 @@ export class FlightScene extends Phaser.Scene {
     // the way means the ground has effectively risen to meet you, and that is
     // exactly how it should feel to the Director.
     this.clearanceM = ahead ? Math.max(0, alt - ahead.hazard.heightM) : alt;
-    if (ahead && alt < ahead.hazard.heightM + 12 &&
-        this.state.elapsedSeconds - this.hazardAlertAt > 2.5) {
+    const obstacleThreat = ahead !== null && alt < ahead.hazard.heightM + 12;
+    if (!obstacleThreat) this.nagObstacle.clear();
+    if (obstacleThreat && this.nagObstacle.due(this.state.elapsedSeconds)) {
       this.hazardAlertAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
       EventBus.emit('ui:show-notification', {
@@ -1149,7 +1187,7 @@ export class FlightScene extends Phaser.Scene {
     // Ten seconds: a climb over an AA ceiling takes longer than a dodge.
     const threat = this.world.threatAhead(worldX, lookAhead(10));
     if (threat && alt < threat.ceilingM &&
-        this.state.elapsedSeconds - this.threatAlertAt > 8) {
+        this.nagThreat.due(this.state.elapsedSeconds)) {
       this.threatAlertAt = this.state.elapsedSeconds;
       const call = `Ashline flight, ${threat.label.toLowerCase()} in the next stretch. `
         + `Clear altitude ${Math.round(threat.ceilingM)} metres.`;
@@ -1257,7 +1295,8 @@ export class FlightScene extends Phaser.Scene {
     // integrity here with nothing on the panel to explain it.
     const vMax = SaveService.getActiveAircraft().def.stats.maxSpeed / 3.6;
     const overspeed = this.state.speed > vMax * 0.95;
-    if (overspeed && this.state.elapsedSeconds - this.overspeedWarnAt > 3) {
+    if (!overspeed) this.nagOverspeed.clear();
+    if (overspeed && this.nagOverspeed.due(this.state.elapsedSeconds)) {
       this.overspeedWarnAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
     }
@@ -1486,7 +1525,8 @@ export class FlightScene extends Phaser.Scene {
     const ra = traffic.advisory(worldX, this.state.altitude, speedPx);
     this.trafficAdvisory = ra ? Math.round(ra.dAltM) : null;
     this.trafficAvoid = ra ? ra.avoid : null;
-    if (ra && this.state.elapsedSeconds - this.trafficAlertAt > 5) {
+    if (!ra) this.nagTraffic.clear();
+    if (ra && this.nagTraffic.due(this.state.elapsedSeconds)) {
       this.trafficAlertAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
       const where = ra.dAltM >= 0 ? 'ABOVE' : 'BELOW';

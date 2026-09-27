@@ -135,8 +135,17 @@ class ContractServiceClass {
        * parcel-sized, which is both the fix and what you would actually
        * expect to find on a freight manifest.
        */
+      /*
+       * Weighted toward the small end.
+       *
+       * At an even-ish spread, two thirds of every board was heavier than a
+       * crop duster can lift — a new player opened the dispatch screen and
+       * three of five jobs said "won't fit". The big consignments should be
+       * the occasional prize that makes you want a bigger hold, not the
+       * default state of the board.
+       */
       const sizeRoll0 = Math.random();
-      const wantsBulk = sizeRoll0 >= 0.62;
+      const wantsBulk = sizeRoll0 >= 0.74;
       const bulkPool = pool.filter(g => g.weightPerUnit >= 10);
       const sized = wantsBulk && bulkPool.length > 0 ? bulkPool : pool;
       const good = sized[randomInt(0, sized.length - 1)];
@@ -157,9 +166,9 @@ class ContractServiceClass {
        */
       const sizeRoll = sizeRoll0;
       const loadKg =
-        sizeRoll < 0.34 ? randomBetween(60, 200)        // parcel — anything can take it
-          : sizeRoll < 0.62 ? randomBetween(220, 450)   // light freight — bush plane up
-            : sizeRoll < 0.86 ? randomBetween(700, 2000) // proper freight — freighter
+        sizeRoll < 0.48 ? randomBetween(60, 200)        // parcel — anything can take it
+          : sizeRoll < 0.74 ? randomBetween(220, 450)   // light freight — bush plane up
+            : sizeRoll < 0.90 ? randomBetween(700, 2000) // proper freight — freighter
               : randomBetween(2200, 4500);              // bulk — the heavy, and only it
       /*
        * Bounded by VALUE as well as by weight.
@@ -171,9 +180,9 @@ class ContractServiceClass {
        * consignor will trust to one aeroplane, not just by the hold.
        */
       const valueCap =
-        sizeRoll < 0.34 ? 3000
-          : sizeRoll < 0.62 ? 9000
-            : sizeRoll < 0.86 ? 30000
+        sizeRoll < 0.48 ? 3000
+          : sizeRoll < 0.74 ? 9000
+            : sizeRoll < 0.90 ? 30000
               : 60000;
       let quantity = Math.max(1, Math.min(
         Math.round(loadKg / good.weightPerUnit),
@@ -202,13 +211,19 @@ class ContractServiceClass {
 
       if (type === 'emergency') {
         payMult = 2.2;
-        repRequirement = 100;
+        /*
+         * 100 was unreachable at the start — you begin with zero standing and
+         * earn 2-13 a delivery, so the best-paying jobs on the first several
+         * boards were all locked. The premium work should arrive a few
+         * deliveries in, not a few hours in.
+         */
+        repRequirement = 25;
         ttl = randomInt(30, 45); // take it now or lose it
         title = `EMERGENCY — rush ${good.name} to ${dest.name}`;
         description = `${dest.name} is desperate for ${good.name.toLowerCase()} and paying over the odds. The offer won't last. Distance: ~${Math.round(distKm)} km.`;
       } else if (type === 'secret') {
         payMult = 1.8;
-        repRequirement = 250;
+        repRequirement = 90;
         penaltyMult = 0.8;
         title = `Discreet delivery to ${dest.name}`;
         description = `An unmarked crate of ${good.name.toLowerCase()}. No questions, no manifest, heavy penalty if it doesn't arrive. Distance: ~${Math.round(distKm)} km.`;

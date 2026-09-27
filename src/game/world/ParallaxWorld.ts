@@ -1868,6 +1868,18 @@ export class ParallaxWorld {
      */
     const DECK = 34;
     const BANDS = 11;
+    /*
+     * ── The strip straddles the contact line ──────────────────────────────
+     *
+     * The deck used to be drawn entirely BELOW `gy`, and the aeroplane sits
+     * exactly ON `gy` — so the wheels rested on the strip's far edge and it
+     * read as an aircraft parked on the dirt shoulder with a runway lying
+     * behind it. In a side-on view with any depth at all the far edge of a
+     * runway is ABOVE the point you are standing on it, so the deck has to
+     * extend past the contact line for the wheels to be on the surface.
+     */
+    const FAR = Math.round(DECK * 0.38);     // how much of the slab is beyond you
+    const top = gy - FAR;
     for (let i = 0; i < BANDS; i++) {
       const t = i / (BANDS - 1);
       const c = Phaser.Display.Color.Interpolate.ColorWithColor(
@@ -1876,18 +1888,18 @@ export class ParallaxWorld {
         100, Math.round(t * 100),
       );
       g.fillStyle(Phaser.Display.Color.GetColor(c.r, c.g, c.b), 1);
-      g.fillRect(sx0, gy + 1 + (DECK * i) / BANDS, sx1 - sx0, DECK / BANDS + 0.8);
+      g.fillRect(sx0, top + (DECK * i) / BANDS, sx1 - sx0, DECK / BANDS + 0.8);
     }
     // Shoulders: graded dirt either side of the hard surface
     g.fillStyle(lerpColor(S.deck, this.pal.ground ?? 0x4a3d28, 0.6), 0.85);
-    g.fillRect(sx0, gy - 3, sx1 - sx0, 4);
-    g.fillRect(sx0, gy + 1 + DECK, sx1 - sx0, 5);
+    g.fillRect(sx0, top - 4, sx1 - sx0, 4);
+    g.fillRect(sx0, top + DECK, sx1 - sx0, 5);
     // Painted edge lines, top and bottom of the deck
     g.lineStyle(1.2, S.mark, S.loose ? 0.10 : 0.34);
-    g.lineBetween(sx0, gy + 2.2, sx1, gy + 2.2);
-    g.lineBetween(sx0, gy + DECK - 1, sx1, gy + DECK - 1);
+    g.lineBetween(sx0, top + 1.2, sx1, top + 1.2);
+    g.lineBetween(sx0, top + DECK - 1, sx1, top + DECK - 1);
     g.lineStyle(1, 0x000000, 0.5);
-    g.lineBetween(sx0, gy + 1 + DECK, sx1, gy + 1 + DECK);
+    g.lineBetween(sx0, top + DECK, sx1, top + DECK);
 
     // Asphalt patchwork speckle
     {
@@ -1899,7 +1911,7 @@ export class ParallaxWorld {
         if (wx < fromM + 6 || wx > toM - 6) continue;
         const dx = wx - scrollX;
         g.fillStyle(propRand(i + 55) > 0.5 ? 0x000000 : 0x4a4a44, 0.25);
-        g.fillRect(dx, gy + 3 + propRand(i + 8) * (DECK - 7), 3 + propRand(i) * 6, 1.6);
+        g.fillRect(dx, top + 3 + propRand(i + 8) * (DECK - 7), 3 + propRand(i) * 6, 1.6);
       }
     }
 
@@ -1909,7 +1921,7 @@ export class ParallaxWorld {
         const tx = endX + i * 15;
         if (tx < -20 || tx > this.width + 20) continue;
         g.fillStyle(0xc8c0a8, 0.75);
-        g.fillRect(tx, gy + 4, 7, DECK - 8);
+        g.fillRect(tx, top + 4, 7, DECK - 8);
       }
     }
 
@@ -1917,7 +1929,7 @@ export class ParallaxWorld {
     for (const ax of [x0 + 190, x1 - 265]) {
       if (ax > -60 && ax < this.width + 60) {
         g.fillStyle(0xd8d0b8, 0.6);
-        g.fillRect(ax, gy + DECK * 0.32, 38, 7);
+        g.fillRect(ax, top + DECK * 0.32, 38, 7);
       }
     }
 
@@ -1927,7 +1939,7 @@ export class ParallaxWorld {
         const rx = endX + dir * (i * 26 + propRand(i + 61) * 18);
         if (rx < -40 || rx > this.width + 40) continue;
         g.fillStyle(0x0c0a08, 0.4);
-        g.fillRect(rx, gy + 6 + propRand(i + 31) * 10, 16 + propRand(i + 41) * 14, 2.4);
+        g.fillRect(rx, top + 6 + propRand(i + 31) * 10, 16 + propRand(i + 41) * 14, 2.4);
       }
     }
 
@@ -1948,7 +1960,7 @@ export class ParallaxWorld {
         const wx = i * spacing;
         if (wx < fromM + 10 || wx > toM - 10) continue;
         const dx = wx - scrollX;
-        for (const ly of [gy - 1.5, gy + DECK + 1.5]) {
+        for (const ly of [top - 2.5, top + DECK + 2.5]) {
           // Halo first so the lamp sits inside it
           g.fillStyle(0xffb34a, 0.10 + glow * 0.28);
           g.fillCircle(dx, ly, 4.2);
@@ -1969,9 +1981,9 @@ export class ParallaxWorld {
         const dx = wx - scrollX;
         if (dx < -30 || dx > this.width + 30) continue;
         g.fillStyle(0x12100c, 0.9);
-        g.fillRect(dx - 5, gy + DECK + 4, 10, 8);
+        g.fillRect(dx - 5, top + DECK + 5, 10, 8);
         g.fillStyle(0xd8cfa8, 0.8);
-        g.fillRect(dx - 3.5, gy + DECK + 5.5, 7, 1.6);
+        g.fillRect(dx - 3.5, top + DECK + 6.5, 7, 1.6);
       }
     }
 
@@ -1980,7 +1992,7 @@ export class ParallaxWorld {
     for (const [tx, dir] of [[x0 + 6, 1], [x1 - 6, -1]] as Array<[number, number]>) {
       if (tx < -40 || tx > this.width + 40) continue;
       g.fillStyle(S.mark, S.loose ? 0.22 : 0.55);
-      g.fillRect(dir > 0 ? tx : tx - 6, gy + 2, 6, DECK - 3);
+      g.fillRect(dir > 0 ? tx : tx - 6, top + 2, 6, DECK - 3);
     }
 
     // Centreline dashes
@@ -1989,7 +2001,7 @@ export class ParallaxWorld {
     for (let wx = fromM + 120; wx < toM - 110; wx += dashW + gap) {
       const dx = wx - scrollX;
       if (dx < -40 || dx > this.width + 40) continue;
-      g.fillRect(dx, gy + DECK * 0.5, dashW, 3);
+      g.fillRect(dx, top + DECK * 0.5, dashW, 3);
     }
 
     // Sequenced approach strobes leading in to the threshold ("the rabbit")

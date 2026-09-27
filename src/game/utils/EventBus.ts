@@ -6,6 +6,14 @@ import type { FlightState, LandingResult, Contract, FlightEventDefinition, Weath
  */
 export interface GameEvents {
   // Scene transitions
+  /**
+   * The dispatch board has committed to a job.
+   *
+   * Separate from `scene:start-flight` because the BOARD decides and the
+   * SCENE transitions — the button lives in React now, so the two halves
+   * have to talk rather than one owning both.
+   */
+  'scene:depart': { contractId: string };
   'scene:start-flight': { contractId: string };
   'scene:flight-complete': { result: LandingResult; contractId: string };
   'scene:return-to-map': void;
