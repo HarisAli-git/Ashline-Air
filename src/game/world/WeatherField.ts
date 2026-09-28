@@ -73,6 +73,20 @@ function hash(i: number): number {
 
 export class WeatherField {
   private cells: WeatherCell[] = [];
+  /** No cells and none spawning — the training circuit flies in still air. */
+  private calm = false;
+  /** The local odds of each kind of cell, by position — see Biomes.climateAt. */
+  private climate: ((worldX: number) => Partial<Record<string, number>>) | null = null;
+
+  /** Tie the weather to the country it forms over. Call before reset(). */
+  setClimate(fn: ((worldX: number) => Partial<Record<string, number>>) | null): void {
+    this.climate = fn;
+  }
+
+  setCalm(on: boolean): void {
+    this.calm = on;
+    if (on) this.cells = [];
+  }
   private seed = 1;
   private routeEndPx = 40000;
   private spawnTimer = 0;
@@ -128,9 +142,19 @@ export class WeatherField {
     // toward cloud and fog; at high pressure it is pulled up toward the two
     // kinds that actually cost you something.
     const r = Phaser.Math.Clamp(hash(seed) - (pressure - 0.5) * 0.34, 0, 1);
+    // The local climate reweights the table; the order (worst first) stays,
+    // so the Director's tilt still means "nastier" wherever you are.
+    const local = this.climate?.(x);
+    const table = KINDS.map(k => ({ kind: k.kind, weight: local ? (local[k.kind] ?? 0) : k.weight }));
+    const total = table.reduce((sum, k) => sum + k.weight, 0) || 1;
     let acc = 0;
     let kind: WeatherCondition = 'cloudy';
-    for (const k of KINDS) { acc += k.weight; if (r <= acc) { kind = k.kind; break; } }
+    for (const k of table) {
+      if (k.weight <= 0) continue;
+      acc += k.weight / total;
+      if (r <= acc) { kind = k.kind; break; }
+      kind = k.kind;
+    }
 
     const life = 90 + hash(seed + 3) * 150;
     return {
@@ -154,6 +178,7 @@ export class WeatherField {
    *   because a leg you cannot learn is a leg you cannot fly well.
    */
   update(dt: number, playerX: number, pressure = 0.5): void {
+    if (this.calm) return;
     for (const c of this.cells) {
       c.age += dt;
       c.x += c.drift * dt;

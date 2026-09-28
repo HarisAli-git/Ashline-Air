@@ -44,6 +44,8 @@ export interface PlayerStats {
   perfectLandings: number;
   /** Supply crates put on target, all time. Gates the first-time hint. */
   supplyDrops?: number;
+  /** Flight school finished (or skipped) — no more first-flight hand-holding. */
+  trainingDone?: boolean;
 }
 
 export interface WorldState {

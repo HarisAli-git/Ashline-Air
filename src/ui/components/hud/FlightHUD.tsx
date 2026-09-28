@@ -1,9 +1,11 @@
 import React from 'react';
 import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo, useFlightStatus, useTutorial } from '../../store/gameStore';
-import { EventBus } from '../../../game/utils/EventBus';
+import { EventBus, type DropZoneStatus } from '../../../game/utils/EventBus';
+import { press } from '../../../game/utils/controls';
 import { SaveService } from '../../../services/SaveService';
 import { useViewport } from '../../viewport';
 import { hudStyles, type HudStyles } from './hudStyles';
+import { TrainingPanel, TrainingDebrief } from './TrainingPanel';
 
 /**
  * The instrument panel was a slab.
@@ -38,7 +40,10 @@ export function FlightHUD(): React.ReactElement | null {
   if (!state) return null;
 
   const compact = vp.isCompact;
-  const styles = hudStyles(vp.uiScale, compact, vp.isTouch, event ? event.choices.length : 0);
+  const styles = hudStyles(
+    vp.uiScale, compact, vp.isTouch, event ? event.choices.length : 0,
+    compact && !!tutorial?.training,
+  );
 
   const { def } = SaveService.getActiveAircraft();
   const speedKmh = Math.round(state.speed * 3.6);
@@ -79,7 +84,7 @@ export function FlightHUD(): React.ReactElement | null {
       {status && (
         <div style={styles.cautions}>
           {status.engineFailed && (
-            <Chip s={styles} tone="#ff4a3a" text={compact ? 'ENGINE OUT' : 'ENGINE OUT — HOLD E'} />
+            <Chip s={styles} tone="#ff4a3a" text={compact ? 'ENGINE OUT' : `ENGINE OUT — ${press('engine').toUpperCase()}`} />
           )}
           {status.stall && <Chip s={styles} tone="#ff4a3a" text="STALL" />}
           {status.weatherCaution && (
@@ -106,9 +111,16 @@ export function FlightHUD(): React.ReactElement | null {
               text={status.rangedOn > 0.75 ? 'THEY HAVE YOUR NUMBER — JINK' : 'GUNNERS RANGING YOU'} />
           )}
           {status.obstacleAheadM !== null && (
-            <Chip s={styles} tone="#ffd080" text={`OBSTACLE ${Math.round(status.obstacleAheadM)}m`} />
+            <Chip s={styles} tone="#ffd080"
+              text={`${status.obstacleLabel ?? 'OBSTACLE'} ${Math.round(status.obstacleAheadM)}m — CLIMB`} />
           )}
         </div>
+      )}
+
+      {/* ── The next drop site, while somebody is calling ────────────────── */}
+      {/* On a phone a radio call spans the top, so the card steps aside for it */}
+      {status?.dropZone && !(compact && event) && (
+        <DropCard s={styles} zone={status.dropZone} compact={compact} touch={vp.isTouch} />
       )}
 
       {/* ── Left cluster: the two numbers you actually fly by ───────────── */}
@@ -192,15 +204,110 @@ export function FlightHUD(): React.ReactElement | null {
       </div>
 
       {/* ── The radio call ──────────────────────────────────────────────── */}
-      {event && <RadioStrip s={styles} event={event} compact={compact} />}
+      {event && <RadioStrip s={styles} event={event} compact={compact} touch={vp.isTouch} />}
       {/*
         * One line of teaching at the bottom centre — the only part of the
         * screen the HUD redesign left completely clear, and the same place
         * the keyboard legend sits (FlightScene hides that while this shows,
         * so they can never overlap).
         */}
-      {tutorial && <div style={styles.tutorial}>{tutorial}</div>}
+      {tutorial && (tutorial.training
+        ? <TrainingPanel lesson={tutorial} scale={vp.uiScale} compact={compact} touch={vp.isTouch} />
+        : <div style={styles.tutorial}>{tutorial.text}</div>)}
+      <TrainingDebrief scale={vp.uiScale} compact={compact} />
     </>
+  );
+}
+
+/**
+ * Where the next drop is, and what to do about it RIGHT NOW.
+ *
+ * The question the old drop never answered was "when do I bring it down?" —
+ * the flare went up five seconds out and that was all the warning you got.
+ * This card answers it in one line that changes as you fly: hold, start
+ * down, you are in the band, drop now, too low. The green band drawn across
+ * the sky is the same window, so the card and the world always agree.
+ */
+function DropCard({ s, zone, compact, touch }: {
+  s: HudStyles; zone: DropZoneStatus; compact: boolean; touch: boolean;
+}): React.ReactElement {
+  const what = zone.kind === 'rooftop' ? 'rooftop' : zone.kind === 'square' ? 'square' : '';
+  const place = `${zone.place}${what ? ` ${what}` : ''}`;
+  const band = `${zone.lo}–${zone.hi} m`;
+  const cue: Record<DropZoneStatus['cue'], { text: string; tone: string; pulse?: boolean }> = {
+    hold: {
+      text: zone.descendInKm > 0.05
+        ? `HOLD · start down in ${zone.descendInKm.toFixed(1)} km`
+        : `HOLD · then down to ${band}`,
+      tone: '#c8b888',
+    },
+    descend: { text: `▼ DESCEND to ${band}`, tone: '#ffd080', pulse: true },
+    window: { text: `IN THE BAND · wait for the pin`, tone: '#9fe8b0' },
+    release: { text: touch ? 'PIN ON THEM · DROP NOW' : 'PIN ON THEM · SPACE', tone: '#b8ffc8', pulse: true },
+    low: { text: `▲ TOO LOW · climb to ${zone.lo} m`, tone: '#ff8844', pulse: true },
+    late: { text: 'PAST THEM · release earlier next time', tone: '#8a7a5a' },
+  };
+  const c = cue[zone.cue];
+  return (
+    <div style={s.dropCard}>
+      <div style={s.dropHead}>
+        <span>📦 {compact ? place : `Drop · ${place}`}</span>
+        {zone.besieged && <span style={s.dropBadge}>UNDER FIRE</span>}
+      </div>
+      <div style={s.dropRow}>
+        <span style={s.dropKm}>{zone.km < 1 ? `${Math.round(zone.km * 1000)} m` : `${zone.km.toFixed(1)} km`}</span>
+        <span style={s.dropPips} aria-label={`${zone.got} of ${zone.need} crates`}>
+          {Array.from({ length: zone.need }, (_, i) => (
+            <span key={i} style={{
+              ...s.dropPip,
+              background: i < zone.got ? '#9fe8b0' : 'transparent',
+              border: `1px solid ${i < zone.got ? '#9fe8b0' : '#6a7a5a'}`,
+            }} />
+          ))}
+        </span>
+      </div>
+      <div style={{
+        ...s.dropCue, color: c.tone,
+        animation: c.pulse ? 'aa-pulse 0.9s ease-in-out infinite' : 'none',
+      }}>{c.text}</div>
+      {zone.gapM !== null && <DropMeter s={s} zone={zone} />}
+    </div>
+  );
+}
+
+/**
+ * The run-in, as a strip: the fixed line is where a crate would land if it
+ * went now, and the marker is the people, sliding in from the right as you
+ * close. Release when the marker is inside the green. It is readable from
+ * several seconds out — which the world itself is not, because at cruise the
+ * site crosses the whole screen in about a second.
+ */
+function DropMeter({ s, zone }: { s: HudStyles; zone: DropZoneStatus }): React.ReactElement {
+  const BEHIND = 60, AHEAD = 420;          // metres shown either side of the aim point
+  const span = BEHIND + AHEAD;
+  const at = (m: number): number => Math.max(0, Math.min(100, ((m + BEHIND) / span) * 100));
+  const gap = zone.gapM ?? 0;
+  const inWindow = Math.abs(gap) <= zone.windowM;
+  const passed = gap < -zone.windowM;
+  const tone = inWindow ? '#b8ffc8' : passed ? '#6a5a3a' : '#ffd080';
+  const secs = zone.releaseIn ?? 0;
+  return (
+    <div style={s.meterWrap}>
+      <div style={s.meterTrack}>
+        <div style={{
+          ...s.meterWindow,
+          left: `${at(-zone.windowM)}%`, width: `${at(zone.windowM) - at(-zone.windowM)}%`,
+          opacity: inWindow ? 1 : 0.55,
+        }} />
+        <div style={{ ...s.meterAim, left: `${at(0)}%` }} />
+        <div style={{
+          ...s.meterMark, left: `${at(gap)}%`, background: tone, boxShadow: `0 0 6px ${tone}`,
+        }} />
+      </div>
+      <span style={{ ...s.meterRead, color: tone }}>
+        {inWindow ? 'NOW' : passed ? 'PAST' : secs > 9.5 ? '···' : `${secs.toFixed(1)}s`}
+      </span>
+    </div>
   );
 }
 
@@ -239,8 +346,8 @@ interface EventLike {
  * is demoted to one quiet line under the label, and dropped entirely on a
  * phone where the room is not there.
  */
-function RadioStrip({ s, event, compact }: {
-  s: HudStyles; event: EventLike; compact: boolean;
+function RadioStrip({ s, event, compact, touch }: {
+  s: HudStyles; event: EventLike; compact: boolean; touch: boolean;
 }): React.ReactElement {
   return (
     <div style={s.radioStrip}>
@@ -259,7 +366,8 @@ function RadioStrip({ s, event, compact }: {
               style={s.radioChip}
               onClick={() => EventBus.emit('flight:apply-event-choice', { choiceId: choice.id })}
             >
-              <span style={s.radioChipKey}>{i + 1}</span>
+              {/* A number key means nothing to a finger */}
+              {!touch && <span style={s.radioChipKey}>{i + 1}</span>}
               <span style={s.radioChipText}>
                 <span>{choice.label}</span>
                 {cost && !compact && <span style={s.radioChipCost}>{cost}</span>}
@@ -294,7 +402,9 @@ function VarioRibbon({ s, air, inThermal }: {
 
 /** A caution, as a chip on the glass. */
 function Chip({ s, text, tone }: { s: HudStyles; text: string; tone: string }): React.ReactElement {
-  return <div style={{ ...s.chip, color: tone, borderColor: tone }}>{text}</div>;
+  // Three quick beats when it first appears — the caution is the alert now,
+  // not a toast underneath it saying the same thing
+  return <div style={{ ...s.chip, color: tone, borderColor: tone, animation: 'aa-chip 0.4s ease-in-out 3' }}>{text}</div>;
 }
 
 /** A thin quantity bar with its value beside it. */

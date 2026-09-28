@@ -4,6 +4,39 @@ import type { FlightState, LandingResult, Contract, FlightEventDefinition, Weath
  * Typed event map for all cross-system communication.
  * Adding a new event: declare it here, then emit/on with full type safety.
  */
+/** What the HUD needs to show about the next drop site. */
+export interface DropZoneStatus {
+  place: string;
+  kind: 'camp' | 'square' | 'rooftop';
+  /** Distance to it, km. */
+  km: number;
+  need: number;
+  got: number;
+  /** The drop window, metres. */
+  lo: number;
+  hi: number;
+  besieged: boolean;
+  /**
+   * hold     too early to start down
+   * descend  start down now
+   * window   in the band
+   * release  in the band and the pin is on them
+   * low      below the band — the roofs and wires are up here with you
+   * late     the aim point is already past them
+   */
+  cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late';
+  /** How far until you should start down, km. */
+  descendInKm: number;
+  /**
+   * The drop meter, once the flare is up: metres from where a crate would
+   * land now to the people (positive = still ahead of it), the half-width of
+   * the "on them" window, and seconds until the two meet.
+   */
+  gapM: number | null;
+  windowM: number;
+  releaseIn: number | null;
+}
+
 export interface GameEvents {
   // Scene transitions
   /**
@@ -44,7 +77,26 @@ export interface GameEvents {
    * The current tutorial instruction, or null once there is nothing to say.
    * Only ever populated on a save's first flight.
    */
-  'flight:tutorial': { text: string | null };
+  'flight:tutorial': {
+    text: string | null;
+    /** Flight school only: the step's heading, where it is, and the keys. */
+    title?: string;
+    step?: number;
+    total?: number;
+    keys?: string[];
+    training?: boolean;
+  };
+  /** Flight school's debrief: how it went, and what it paid. */
+  'flight:training-complete': {
+    passed: boolean;
+    reward: number;
+    landing: string;
+    onRunway: boolean;
+    crates: number;
+  };
+  /** The debrief's two buttons. */
+  'flight:training-exit': { again: boolean };
+  'flight:skip-training': void;
   'flight:status': {
     engineFailed: boolean;
     underFire: boolean;
@@ -80,6 +132,8 @@ export interface GameEvents {
     stall: boolean;
     overspeed: boolean;
     obstacleAheadM: number | null;
+    /** What it is — "TOWER BLOCK", "POWER LINES" — for the caution chip. */
+    obstacleLabel: string | null;
     /** Conflicting traffic's height minus ours, metres. Null when clear. */
     trafficDeltaM: number | null;
     /** Which way to go to miss it: +1 climb, -1 descend. */
@@ -98,6 +152,12 @@ export interface GameEvents {
     /** A survivor camp is signalling and a crate could be dropped on it. */
     dropReady: boolean;
     cratesLeft: number;
+    /**
+     * The next site that has called in: where, how far, the height band to
+     * drop from, and what to do about it right now. Null when nobody is
+     * calling or the hold is empty.
+     */
+    dropZone: DropZoneStatus | null;
     /** Icing / sand / avionics caution from the weather, or null. */
     weatherCaution: string | null;
     /** 0–1 ice on the airframe, for the gauge. */

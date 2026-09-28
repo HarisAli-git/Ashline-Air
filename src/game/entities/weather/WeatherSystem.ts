@@ -177,10 +177,9 @@ export class WeatherSystem {
       this.state.windSpeed = clamp(this.state.windSpeed + randomBetween(4, 12), 0, 25);
     }
 
-    EventBus.emit('ui:show-notification', {
-      message: `Weather changing: ${condition.replace('_', ' ')}`,
-      type: TURBULENCE[condition] >= 0.5 ? 'warning' : 'info',
-    });
+    // No toast: the weather-ahead chip calls a cell before you reach it and
+    // the sky shows it when you are in it. "Weather changing: cloudy" on
+    // every cell edge was the single noisiest line in the game.
     EventBus.emit('weather:changed', { state: { ...this.state } });
   }
 }

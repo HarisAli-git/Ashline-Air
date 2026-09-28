@@ -102,37 +102,45 @@ export class MenuScene extends Phaser.Scene {
     ruleGfx.lineBetween(cx - 160, height * 0.368, cx + 160, height * 0.368);
 
     // ── Buttons ─────────────────────────────────────────────────────────────
-    this.makeButton(cx, height * 0.485, 'NEW GAME', () => {
+    this.makeButton(cx, height * 0.45, 'NEW GAME', () => {
       SaveService.deleteSave();
       const save = SaveService.load();
       save.world.settlements = EconomyService.initialise(window.gameData.settlements);
       ContractService.maintainBoard(save);
       SaveService.save(save.player, save.world);
       // The backstory runs before the first flight — it is the setup for the
-      // walls, the gun trucks and why anyone pays a pilot at all.
-      fadeToScene(this, 'IntroScene', { next: 'MapScene' });
+      // walls, the gun trucks and why anyone pays a pilot at all — and then
+      // flight school, so the first contract is not also the first lesson.
+      fadeToScene(this, 'IntroScene', { next: 'FlightScene', training: true });
     });
 
     if (SaveService.hasSave()) {
-      this.makeButton(cx, height * 0.595, 'CONTINUE', () => {
+      this.makeButton(cx, height * 0.54, 'CONTINUE', () => {
         fadeToScene(this, 'MapScene');
       });
+      // Replayable any time: the lesson is worth having again after a break
+      this.makeButton(cx, height * 0.63, 'FLIGHT SCHOOL', () => {
+        EventBus.emit('scene:start-flight', { contractId: '' });
+        fadeToScene(this, 'FlightScene', { contractId: '', training: true });
+      });
     } else {
-      this.add.text(cx, height * 0.595, 'CONTINUE', {
-        fontSize: '22px',
-        color: '#2e2818',
-        fontFamily: 'monospace',
-      }).setOrigin(0.5);
+      for (const [y, label] of [[0.54, 'CONTINUE'], [0.63, 'FLIGHT SCHOOL']] as const) {
+        this.add.text(cx, height * y, label, {
+          fontSize: '22px',
+          color: '#2e2818',
+          fontFamily: 'monospace',
+        }).setOrigin(0.5);
+      }
     }
 
     // Replayable, so the setup is never lost behind a one-time cutscene
-    this.makeButton(cx, height * 0.685, 'THE STORY SO FAR', () => {
+    this.makeButton(cx, height * 0.72, 'THE STORY SO FAR', () => {
       fadeToScene(this, 'IntroScene', { next: 'MenuScene' });
     });
 
     // Whose progress this is. Several people can share a browser.
     const pilot = ProfileService.ensureActive();
-    this.makeButton(cx, height * 0.775, `PILOT: ${pilot.name.toUpperCase()}`, () => {
+    this.makeButton(cx, height * 0.81, `PILOT: ${pilot.name.toUpperCase()}`, () => {
       EventBus.emit('ui:open-profiles');
     });
 

@@ -1,5 +1,12 @@
 import Phaser from 'phaser';
 import { drawObstacle, type ObstacleKind, type ObstacleStyle } from './Obstacles';
+import { layoutCountryside, drawProp, type Prop } from './Countryside';
+import type { BiomeId } from './Biomes';
+import {
+  layoutSettlements, layoutTrainingSettlements, isBuilding, spanBand, townStyleFor,
+  DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, drawBuilding, drawTownGround, drawPole, drawSpan,
+  type BuildingKind, type Span, type Town,
+} from './Towns';
 
 /**
  * Everything along the route that can actually hurt you.
@@ -14,7 +21,7 @@ import { drawObstacle, type ObstacleKind, type ObstacleStyle } from './Obstacles
  * climbing is safe but costs fuel, time and airspeed.
  */
 
-export type HazardKind = ObstacleKind;
+export type HazardKind = ObstacleKind | BuildingKind;
 
 export interface Hazard {
   x: number;          // world px
@@ -34,6 +41,16 @@ export interface Hazard {
   damage?: number;
   /** Seconds since it was struck, for the fire and the smoke column. */
   hitAge?: number;
+  /** A flat roof a crate can land on, metres; null for a pitched or domed top. */
+  roofM?: number | null;
+  /** How a building is built where it stands — adobe, timber, stilts, brick. */
+  look?: import('./Towns').TownStyle;
+  /**
+   * Whether it gets the OBSTACLE AHEAD klaxon. A town is forty buildings;
+   * sounding the alarm for every shed on the way through would make the one
+   * call that matters — the tower block in front of you — unhearable.
+   */
+  warn?: boolean;
 }
 
 /*
@@ -43,7 +60,7 @@ export interface Hazard {
  */
 
 /** Height range in metres for each obstacle, and its collision footprint. */
-const HEIGHT_BAND: Record<HazardKind, [number, number]> = {
+const HEIGHT_BAND: Record<ObstacleKind, [number, number]> = {
   mast:    [34, 78],   // the one that genuinely makes you climb
   turbine: [36, 68],
   stack:   [26, 54],
@@ -52,7 +69,7 @@ const HEIGHT_BAND: Record<HazardKind, [number, number]> = {
   crane:   [16, 34],
 };
 
-const HALF_WIDTH: Record<HazardKind, number> = {
+const HALF_WIDTH: Record<ObstacleKind, number> = {
   mast: 11, turbine: 14, stack: 15, tower: 22, pylon: 20, crane: 30,
 };
 
@@ -64,33 +81,64 @@ function hash(i: number): number {
 export class Hazards {
   private list: Hazard[] = [];
   private hostile: Array<[number, number]> = [];
+  /** Per zone, the only weapons allowed in it (null = anything). */
+  private hostileOnly: Array<ReadonlyArray<string> | null> = [];
+  private spanList: Span[] = [];
+  private townList: Town[] = [];
+  private props: Prop[] = [];
 
-  /** Lay out obstacles and hostile ground between the two airfields. */
-  generate(startPx: number, endPx: number, seed: number): void {
+  /**
+   * Lay out towns, power lines, obstacles and hostile ground between the two
+   * airfields. `biomeAt` only decides how things LOOK — adobe or timber, a
+   * pumpjack or a barn — never where anything solid goes, so the dispatch
+   * board's preview (which does not pass it) lays out the same route.
+   */
+  generate(startPx: number, endPx: number, seed: number, biomeAt?: (x: number) => BiomeId): void {
     this.list = [];
+    this.props = [];
     this.hostile = [];
+    this.hostileOnly = [];
+    this.spanList = [];
+    this.townList = [];
     const span = endPx - startPx;
     if (span <= 0) return;
 
+    // Towns and the lines that feed them go down first; everything else
+    // has to find room around them.
+    const built = layoutSettlements(startPx, endPx, seed);
+    this.townList = built.towns;
+    this.spanList = built.spans;
+    for (const t of built.towns) this.list.push(...t.buildings);
+    for (const s of built.substations) this.list.push(s.hazard);
+    this.list.push(...built.pylons);
+
     // Obstacles: spaced with a guaranteed gap so the route is always flyable.
-    // These are WORLD PIXELS — at 6 px/m a 2400 px gap is ~400 m of flying.
+    // These are WORLD PIXELS — at 9 px/m a 2400 px gap is ~270 m of flying.
     const minGap = 2400;
     let x = startPx + 1800;
     let i = seed * 31;
     while (x < endPx - 400) {
       // Weighted so the tall ones — the masts and turbines that actually force
       // a climb — stay uncommon, and the low clutter is what you meet most.
+      // No lone pylons: a pylon with nothing either side of it was the
+      // "wires connected to air" problem. They only come in lines now.
       const r = hash(i++);
-      const kind: HazardKind =
-        r < 0.22 ? 'mast' :
-        r < 0.42 ? 'tower' :
-        r < 0.58 ? 'crane' :
-        r < 0.74 ? 'pylon' :
-        r < 0.89 ? 'stack' : 'turbine';
+      const kind: ObstacleKind =
+        r < 0.26 ? 'mast' :
+        r < 0.50 ? 'tower' :
+        r < 0.69 ? 'crane' :
+        r < 0.87 ? 'stack' : 'turbine';
       const band = HEIGHT_BAND[kind];
       const heightM = band[0] + hash(i++) * (band[1] - band[0]);
-      this.list.push({ x, kind, heightM, halfWidth: HALF_WIDTH[kind], seed: i });
+      const half = HALF_WIDTH[kind];
+      const clear = !built.reserved.some(([ra, rb]) => x + half + 200 > ra && x - half - 200 < rb);
+      if (clear) this.list.push({ x, kind, heightM, halfWidth: half, seed: i, warn: true });
       x += minGap + hash(i++) * 3000;
+    }
+    this.list.sort((p, q) => p.x - q.x);
+    if (biomeAt) {
+      for (const h of this.list) if (isBuilding(h.kind)) h.look = townStyleFor(biomeAt(h.x));
+      this.props = layoutCountryside(startPx, endPx, seed, built.reserved, biomeAt);
     }
 
     /*
@@ -115,14 +163,104 @@ export class Hazards {
      * One zone per slice of the route, jittered inside its own slice, so they
      * are irregular without ever clumping or leaving a huge dead run.
      */
+    /*
+     * ...and they must keep their guns off the drop runs.
+     *
+     * A drop pulls you down to rooftop height for the last kilometre, and the
+     * zones were laid out with no idea where the towns were — so the people
+     * you came down to help were routinely sitting inside a heavy MG's reach
+     * and the drop was a free kill. Every town's run-in and climb-out is now
+     * out of range of everything, and a zone that cannot fit in its slice
+     * without breaking that is dropped rather than squeezed in.
+     *
+     * The exception is deliberate: on a route with a few towns, one may be
+     * BESIEGED — riflemen dug in around it, and the drop card says so before
+     * you commit. That one is a choice with a bigger payout, not an ambush.
+     */
+    const towns = built.towns;
+    const runOf = (t: { x0: number; x1: number }): [number, number] =>
+      [t.x0 - DROP_RUN_BEFORE_PX - GUN_REACH_PX, t.x1 + DROP_RUN_AFTER_PX + GUN_REACH_PX];
+    const siegeOf = (t: { x0: number; x1: number }): [number, number] => [t.x0 - 220 * 9, t.x1 + 220 * 9];
+    let besieged = towns.length >= 2 && hash(seed * 91 + 7) < 0.55
+      ? towns[1 + Math.floor(hash(seed * 93 + 1) * (towns.length - 1))]
+      : null;
+    // The riflemen round a besieged town must not reach a neighbour's run
+    if (besieged) {
+      const [a, b] = siegeOf(besieged);
+      const safe = towns.every(t => t === besieged || runOf(t)[1] <= a || runOf(t)[0] >= b);
+      if (!safe) besieged = null;
+    }
+    if (besieged) besieged.besieged = true;
+    const keepOut: Array<[number, number]> = towns.filter(t => t !== besieged).map(runOf);
+    const clashes = (a: number, b: number): boolean => keepOut.some(([p, q]) => a < q && b > p);
+
     const slice = span / zoneCount;
+    const zones: Array<{ z: [number, number]; only: ReadonlyArray<string> | null }> = [];
     for (let z = 0; z < zoneCount; z++) {
       const half = 2700 + hash(seed * 17 + z) * 1400;
       // Keep the jitter inside the slice, and clear of both airfields
       const room = Math.max(0, slice / 2 - half);
-      const centre = startPx + slice * (z + 0.5) + (hash(seed * 13 + z) - 0.5) * 2 * room;
-      this.hostile.push([centre - half, centre + half]);
+      const ideal = startPx + slice * (z + 0.5) + (hash(seed * 13 + z) - 0.5) * 2 * room;
+      const lo = startPx + slice * z + half, hi = startPx + slice * (z + 1) - half;
+      const candidates = [ideal];
+      if (hi > lo) for (let k = 0; k <= 8; k++) candidates.push(lo + ((hi - lo) * k) / 8);
+      candidates.sort((p, q) => Math.abs(p - ideal) - Math.abs(q - ideal));
+      const centre = candidates.find(c => !clashes(c - half, c + half));
+      if (centre === undefined) continue;
+      zones.push({ z: [centre - half, centre + half], only: null });
     }
+    if (besieged) {
+      const z = siegeOf(besieged);
+      // Riflemen only, and nothing else overlapping them
+      for (let i = zones.length - 1; i >= 0; i--) {
+        if (zones[i].z[0] < z[1] + GUN_REACH_PX && zones[i].z[1] > z[0] - GUN_REACH_PX) zones.splice(i, 1);
+      }
+      zones.push({ z, only: ['nest'] });
+    }
+    zones.sort((p, q) => p.z[0] - q.z[0]);
+    this.hostile = zones.map(z => z.z);
+    this.hostileOnly = zones.map(z => z.only);
+  }
+
+  /** Per zone, the only weapon kinds it may field (aligned with `zones`). */
+  get zoneWeapons(): ReadonlyArray<ReadonlyArray<string> | null> { return this.hostileOnly; }
+
+  /**
+   * The training circuit, laid out by hand in the order the lesson needs:
+   * one mast, then a power line into a town with people waiting in it, then
+   * a short stretch of raider ground held by rifles only.
+   *
+   * Returns where each lesson lives, so the script can tell when it is done.
+   */
+  generateTraining(
+    routeKm: number, townName: string, biomeAt?: (x: number) => BiomeId,
+  ): { mastX: number; lineEndX: number; zone: [number, number] } {
+    const M = 9;
+    const km = (k: number): number => k * 1000 * M;
+    this.list = [];
+    this.hostile = [];
+    const mastX = km(Math.min(3.1, routeKm * 0.24));
+    this.list.push({ x: mastX, kind: 'mast', heightM: 46, halfWidth: HALF_WIDTH.mast, seed: 77, warn: true });
+    const t0 = km(routeKm * 0.44), t1 = t0 + km(0.5);
+    const built = layoutTrainingSettlements(t0, t1, 4242, townName);
+    this.townList = built.towns;
+    this.spanList = built.spans;
+    for (const t of built.towns) this.list.push(...t.buildings);
+    for (const s of built.substations) this.list.push(s.hazard);
+    this.list.push(...built.pylons);
+    this.list.sort((p, q) => p.x - q.x);
+    if (biomeAt) {
+      for (const h of this.list) if (isBuilding(h.kind)) h.look = townStyleFor(biomeAt(h.x));
+      this.props = layoutCountryside(km(0.9), km(routeKm - 1.4), 4242,
+        [...built.reserved, [mastX - 900, mastX + 900]], biomeAt);
+    } else {
+      this.props = [];
+    }
+    const zone: [number, number] = [km(routeKm * 0.64), km(routeKm * 0.64 + 0.7)];
+    this.hostile.push(zone);
+    this.hostileOnly = [['nest']];
+    const lineEndX = built.towns[0].poles[0].x;
+    return { mastX, lineEndX, zone };
   }
 
   /** The obstacle the aircraft is currently inside, if any. */
@@ -143,9 +281,10 @@ export class Hazards {
     h.heightM *= 1 - 0.34 * amount;
   }
 
-  /** Advance the burn on anything that has been hit. */
+  /** Advance the burn on anything that has been hit, and the swing of cut wires. */
   tickDamage(dt: number): void {
     for (const h of this.list) if (h.damage) h.hitAge = (h.hitAge ?? 0) + dt;
+    for (const s of this.spanList) if (s.cutT !== undefined) s.cutT += dt;
   }
 
   collisionAt(worldX: number, altitudeM: number): Hazard | null {
@@ -155,17 +294,114 @@ export class Hazards {
     return null;
   }
 
-  /** Nearest obstacle ahead of the aircraft, for the HUD warning. */
-  ahead(worldX: number, rangePx: number): { hazard: Hazard; distancePx: number } | null {
-    let best: { hazard: Hazard; distancePx: number } | null = null;
-    for (const h of this.list) {
-      const d = h.x - worldX;
-      if (d > 0 && d < rangePx && (!best || d < best.distancePx)) {
-        best = { hazard: h, distancePx: d };
-      }
+  /**
+   * Did the aircraft fly through a cable between the last frame and this one?
+   *
+   * A crossing test rather than a proximity test: a wire is a line with no
+   * thickness worth speaking of, and at 150 m/s with a warp on, a point test
+   * steps straight over it. Being inside the band of conductors counts, and so
+   * does ending up on the other side of it from where you started.
+   */
+  wireStrike(prevX: number, prevAlt: number, worldX: number, altM: number): Span | null {
+    const MARGIN = 1.2;
+    const side = (band: [number, number] | null, alt: number): number | null => {
+      if (!band) return null;
+      if (alt > band[1] + MARGIN) return 1;
+      if (alt < band[0] - MARGIN) return -1;
+      return 0;
+    };
+    for (const s of this.spanList) {
+      if (s.cutT !== undefined) continue;
+      if (worldX < s.a - 40 || worldX > s.b + 40) continue;
+      const now = side(spanBand(s, worldX), altM);
+      if (now === null) continue;
+      if (now === 0) return s;
+      const before = side(spanBand(s, prevX), prevAlt);
+      if (before !== null && before !== now) return s;
+    }
+    return null;
+  }
+
+  /** An aeroplane went through it: the span parts and hangs from its supports. */
+  cutSpan(s: Span, atX: number): void {
+    s.cutT = 0;
+    s.cutX = atX;
+  }
+
+  /**
+   * The highest surface a falling crate would come to rest on at `worldX`:
+   * a roof if there is a building under it, otherwise the ground.
+   */
+  surfaceAt(worldX: number): { altM: number; on: Hazard | null } {
+    let best: { altM: number; on: Hazard | null } = { altM: 0, on: null };
+    /*
+     * The list is sorted by x and nothing is wider than ~60 px either side,
+     * so a binary search to the left edge and a short scan is enough. The
+     * reticle calls this ninety times a frame; a full scan of a town was not
+     * going to survive that on a phone.
+     */
+    const from = worldX - 90;
+    let lo = 0, hi = this.list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.list[mid].x < from) lo = mid + 1; else hi = mid;
+    }
+    for (let i = lo; i < this.list.length; i++) {
+      const h = this.list[i];
+      if (h.x > worldX + 90) break;
+      if (!isBuilding(h.kind) || h.kind === 'substation') continue;
+      if (Math.abs(worldX - h.x) > h.halfWidth) continue;
+      const roof = h.roofM ?? h.heightM * 0.82;
+      if (roof > best.altM) best = { altM: roof, on: h };
     }
     return best;
   }
+
+  /**
+   * The tallest thing between two points, metres — buildings,
+   * pylons and cables alike. Used to tell the pilot how low they can safely
+   * come for a drop.
+   */
+  tallestBetween(x0: number, x1: number): number {
+    let top = 0;
+    for (const h of this.list) {
+      if (h.x + h.halfWidth >= x0 && h.x - h.halfWidth <= x1) top = Math.max(top, h.heightM);
+    }
+    for (const s of this.spanList) {
+      if (s.cutT !== undefined || s.b < x0 || s.a > x1) continue;
+      top = Math.max(top, s.topA, s.topB);
+    }
+    return top;
+  }
+
+  /**
+   * Nearest obstacle ahead worth a warning at this altitude.
+   *
+   * Skips what we are already comfortably above, so the klaxon names the
+   * thing we would actually hit rather than the shed in front of it.
+   */
+  ahead(worldX: number, rangePx: number, altM = -Infinity): { hazard: Hazard; distancePx: number } | null {
+    let best: { hazard: Hazard; distancePx: number } | null = null;
+    for (const h of this.list) {
+      if (h.warn === false) continue;
+      const d = h.x - worldX;
+      if (d <= 0 || d >= rangePx) continue;
+      if (altM > h.heightM + 12) continue;
+      if (!best || d < best.distancePx) best = { hazard: h, distancePx: d };
+    }
+    return best;
+  }
+
+  /** The town under a point, or starting within `aheadPx` of it. */
+  townAt(worldX: number, aheadPx = 0): Town | null {
+    for (const t of this.townList) {
+      if (worldX >= t.x0 - aheadPx && worldX <= t.x1) return t;
+    }
+    return null;
+  }
+
+  get towns(): ReadonlyArray<Town> { return this.townList; }
+  get spans(): ReadonlyArray<Span> { return this.spanList; }
 
   isHostile(worldX: number): boolean {
     return this.hostile.some(([a, b]) => worldX >= a && worldX <= b);
@@ -213,13 +449,33 @@ export class Hazards {
       }
     }
 
+    // The leftovers in the open country, first — everything else stands in front
+    for (const p of this.props) {
+      const sx = p.x - scrollX;
+      if (sx > -120 && sx < width + 120) drawProp(g, p, sx, baseY, pxPerM, t, style);
+    }
+    // Towns: the road and barricades, then the buildings standing on them
+    for (const town of this.townList) {
+      if (town.x1 - scrollX < -200 || town.x0 - scrollX > width + 200) continue;
+      drawTownGround(g, town, scrollX, baseY, width, style);
+    }
     for (const h of this.list) {
       const sx = h.x - scrollX;
       if (sx < -140 || sx > width + 140) continue;
       const topY = baseY - h.heightM * pxPerM;
-      drawObstacle(g, h.kind, sx, baseY, topY, h.halfWidth, h.seed, t, style);
+      if (isBuilding(h.kind)) drawBuilding(g, h, sx, baseY, pxPerM, t, style);
+      else drawObstacle(g, h.kind, sx, baseY, topY, h.halfWidth, h.seed, t, style);
       if (h.damage) this.drawStruck(g, h, sx, baseY, topY, t);
     }
+    // Poles, then every cable last so a conductor sits in front of its support
+    for (const town of this.townList) {
+      if (town.x1 - scrollX < -200 || town.x0 - scrollX > width + 200) continue;
+      for (const p of town.poles) {
+        const sx = p.x - scrollX;
+        if (sx > -30 && sx < width + 30) drawPole(g, p, sx, baseY, pxPerM, style.daylight);
+      }
+    }
+    for (const s of this.spanList) drawSpan(g, s, scrollX, baseY, pxPerM, width, t, style);
   }
 
   /**

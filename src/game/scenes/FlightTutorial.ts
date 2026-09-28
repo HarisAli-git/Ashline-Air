@@ -53,11 +53,12 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     id: 'throttle',
     text: 'Hold W to open the throttle all the way.',
     touch: 'Drag the throttle lever on the left all the way up.',
-    done: s => s.throttle > 0.9,
+    // Or you are already flying: a step that can never come true must not hold the rest
+    done: s => s.throttle > 0.85 || s.altitude > 5,
   },
   {
     id: 'rotate',
-    text: 'Let her build speed, then hold S to raise the nose and fly her off.',
+    text: 'Let her build speed, then hold A to raise the nose and fly her off.',
     touch: 'Let her build speed, then hold NOSE UP to fly her off.',
     done: s => s.altitude > 25,
   },
@@ -72,14 +73,14 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     id: 'clean',
     text: 'Flaps up with F once you are climbing away — they are pure drag now.',
     touch: 'Tap FLAP to bring them up once you are climbing away — pure drag now.',
-    done: s => !s.flapsDeployed,
+    done: (s, c) => !s.flapsDeployed || c.remainingKm < 6,
     skip: (_s, c) => c.retractableGear,
   },
   {
     id: 'clean-retract',
     text: 'Gear up with G and flaps up with F — both are pure drag once you are flying.',
     touch: 'Tap GEAR and FLAP to bring them up — both are pure drag once you are flying.',
-    done: s => !s.gearDown && !s.flapsDeployed,
+    done: (s, c) => (!s.gearDown && !s.flapsDeployed) || c.remainingKm < 6,
     skip: (_s, c) => !c.retractableGear,
   },
   {

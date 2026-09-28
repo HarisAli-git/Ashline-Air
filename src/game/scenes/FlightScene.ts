@@ -6,12 +6,12 @@ import { CrashSequence } from '../entities/aircraft/CrashSequence';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { WeatherHazards } from '../entities/weather/WeatherHazards';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
-import { biomeFor } from '../world/Biomes';
+import { biomeFor, climateAt } from '../world/Biomes';
 import { WeatherFX } from '../world/WeatherFX';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
 import { CargoHold } from '../entities/CargoHold';
-import { EventBus } from '../utils/EventBus';
+import { EventBus, type DropZoneStatus } from '../utils/EventBus';
 import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
@@ -22,7 +22,11 @@ import { CameraRig } from './CameraRig';
 import { routeKmBetween } from '../../services/RouteService';
 import { Director } from '../ai/Director';
 import { FlightTutorial } from './FlightTutorial';
-import { DROP_REWARD, cratesFor } from '../world/SupplyDrops';
+import { TrainingFlight, type TrainingView } from './TrainingFlight';
+import { DROP_REWARD, cratesFor, siteReply, type DropSite } from '../world/SupplyDrops';
+import { STRUCTURE_NAME } from '../world/Towns';
+import { routeSeed } from '../world/RoutePreview';
+import { press } from '../utils/controls';
 import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
 
@@ -32,7 +36,16 @@ const GROUND_Y_OFFSET = 110;  // px from screen bottom to ground line
 // all the moving — speed reads through scroll, never by sliding the sprite.
 const AIRCRAFT_X      = 300;
 
-interface FlightSceneData { contractId: string; }
+interface FlightSceneData {
+  contractId: string;
+  /** Flight school: the hand-laid circuit from home and back. See TrainingFlight. */
+  training?: boolean;
+}
+
+/** Gameplay length of the training circuit, km. */
+const TRAINING_KM = 13;
+/** Paid once, the first time the circuit is flown to the end. */
+const TRAINING_REWARD = 1000;
 
 const DEV_WEATHER_KEYS: Record<string, WeatherCondition> = {
   '1': 'clear', '2': 'cloudy', '3': 'strong_winds', '4': 'dust_storm',
@@ -165,8 +178,25 @@ export class FlightScene extends Phaser.Scene {
    */
   private tutorial: FlightTutorial | null = null;
   private tutorialLine: string | null = null;
+  /** Flight school, when this is the training circuit. */
+  private training = false;
+  private trainer: TrainingFlight | null = null;
+  private trainMarks: { mastX: number; lineEndX: number; zone: [number, number] } | null = null;
+  private trainViewKey = '';
+  private trainGuideFade = 0;
   /** Supply-drop tally for this flight, shown on the post-flight report. */
   private dropStats = { dropped: 0, hits: 0, earned: 0 };
+  /** The drop window, faded in while a site is calling. */
+  private dropGuideFade = 0;
+  /** What the HUD card says about the next site. See updateDrops. */
+  private dropZone: DropZoneStatus | null = null;
+  /** Sites we have already told to start down, so it is said once. */
+  private readonly descentCalled = new Set<DropSite>();
+  /** Slow-motion over the release, 1 = normal time. See updateDrops. */
+  private dropSlow = 1;
+  /** Last whole second of the run-in countdown that ticked. */
+  private dropTickAt = 99;
+  private dropWindowToned = false;
   /** Departure settlement id — drop reputation is credited to its faction. */
   private originId = '';
   /**
@@ -214,6 +244,9 @@ export class FlightScene extends Phaser.Scene {
   private fireHeat = 0;
   /** Ground clearance under the aircraft, obstacles included, in metres. */
   private clearanceM = 999;
+  /** Where the aircraft was last frame — a cable is crossed, not touched. */
+  private prevHazardX = 0;
+  private prevHazardAlt = 0;
 
   // ── Time warp ─────────────────────────────────────────────────────────────
   private timeScale = 1;
@@ -227,6 +260,11 @@ export class FlightScene extends Phaser.Scene {
 
   init(data: FlightSceneData): void {
     this.contractId          = data.contractId;
+    this.training            = !!data.training;
+    this.trainer             = null;
+    this.trainMarks          = null;
+    this.trainViewKey        = '';
+    this.trainGuideFade      = 0;
     this.landed              = false;
     this.crashing            = false;
     this.hasBeenAirborne     = false;
@@ -346,10 +384,22 @@ export class FlightScene extends Phaser.Scene {
         this.destSurface = dest.field?.approach ?? 'open';
       }
     }
+    let homeId: string | undefined;
+    if (this.training) {
+      homeId = save.player.currentLocationId;
+      const home = window.gameData.settlements.find(s => s.id === homeId);
+      this.routeKm = TRAINING_KM;
+      destinationName = home ? `${home.name} (home)` : 'home';
+      this.originRunwayM = this.destRunwayM = home?.field?.runwayM ?? 600;
+      this.originSurface = this.destSurface = home?.field?.approach ?? 'open';
+      // A full tank for the lesson — and nothing here is written back
+      this.state.fuel = definition.stats.fuelCapacity;
+      this.state.integrity = 100;
+    }
     this.destinationName = destinationName;
-    this.originBiome = biomeFor(contract?.originId);
-    this.originId = contract?.originId ?? '';
-    this.destBiome = biomeFor(contract?.destinationId);
+    this.originBiome = biomeFor(contract?.originId ?? homeId);
+    this.originId = contract?.originId ?? homeId ?? '';
+    this.destBiome = biomeFor(contract?.destinationId ?? homeId);
     EventBus.emit('flight:route-info', { routeKm: this.routeKm, destinationName });
 
     // ── Cargo hold: what's riding in the back ─────────────────────────────
@@ -367,18 +417,48 @@ export class FlightScene extends Phaser.Scene {
      * The layout can only know that if it already knows what country it is in.
      */
     this.world.setBiomes(this.originBiome, this.destBiome);
-    this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+    if (this.training) {
+      this.trainMarks = this.world.setTrainingRoute(this.routeKm, 'Millbrook');
+    } else {
+      this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+    }
     // Survivors along the route — something to do in the cruise. See SupplyDrops.
-    this.world.drops.layout(
-      this.routeKm * 1000 * WORLD_PX_PER_M, this.hashRoute(this.contractId),
-      cratesFor(SaveService.getActiveAircraft().def.stats.cargoCapacity),
-    );
+    // They live in the towns the route was just laid out with, so they go second.
+    {
+      const hz = this.world.hazards;
+      this.world.drops.layout(
+        this.routeKm * 1000 * WORLD_PX_PER_M, this.hashRoute(this.contractId),
+        cratesFor(SaveService.getActiveAircraft().def.stats.cargoCapacity),
+        {
+          towns: hz.towns,
+          zones: hz.zones,
+          tallestBetween: (a, b) => hz.tallestBetween(a, b),
+          surfaceAt: x => hz.surfaceAt(x),
+        },
+        // The lesson is one crowd in one square — rooftops come later
+        this.training ? { squaresOnly: true, camps: false } : {},
+      );
+    }
     this.dropStats = { dropped: 0, hits: 0, earned: 0 };
-    // Weather becomes a set of places on this route rather than a global mood.
+    this.dropGuideFade = 0;
+    this.dropZone = null;
+    this.descentCalled.clear();
+    this.dropSlow = 1;
+    this.dropTickAt = 99;
+    this.dropWindowToned = false;
+    // Weather becomes a set of places on this route rather than a global mood,
+    // and each place gets the weather of the country it is in.
+    {
+      const endPx = this.routeKm * 1000 * WORLD_PX_PER_M;
+      const from = this.originBiome, to = this.destBiome;
+      this.world.weatherField.setClimate(x => climateAt(from, to, x / endPx));
+    }
     this.world.weatherField.reset(
       this.hashRoute(this.contractId), this.routeKm * 1000 * WORLD_PX_PER_M,
     );
     this.weather.attachField(this.world.weatherField);
+    // The lesson flies in still air: one new thing at a time
+    this.world.weatherField.setCalm(this.training);
 
     // -- Pacing, and what the world already knows about you ----------------
     this.pilot = new PilotModel(SaveService.get().player.pilot ?? null);
@@ -434,10 +514,15 @@ export class FlightScene extends Phaser.Scene {
     // turns it over. See the note where engineRunning is set false.
     this.world.loading = true;
     this.loadingLeft = 3.2;
-    // First flight of this save gets taught; everyone else is left alone.
-    this.tutorial = SaveService.get().player.stats.totalFlights === 0
+    // Flight school teaches the whole thing. Failing that, the first real
+    // flight of a save gets the one-line hints; everyone else is left alone.
+    const stats = SaveService.get().player.stats;
+    this.trainer = this.training ? new TrainingFlight() : null;
+    this.tutorial = !this.training && stats.totalFlights === 0 && !stats.trainingDone
       ? new FlightTutorial()
       : null;
+    // The HUD comes up on this event; a real flight gets it from the board
+    if (this.training) EventBus.emit('scene:start-flight', { contractId: '' });
     this.aircraft.stopEngine();
     EventBus.emit('ui:show-notification', {
       message: '📦 Loading cargo — flaps and gear are set for departure',
@@ -541,6 +626,24 @@ export class FlightScene extends Phaser.Scene {
         this.disengageWarp(event.title.toLowerCase());
         this.playEventCinematic(event, () => EventBus.emit('ui:show-event-modal', { event }));
       }),
+      // Flight school's two exits: go again, or on to the map
+      EventBus.on('flight:training-exit', ({ again }) => {
+        if (!this.training) return;
+        if (again) {
+          fadeToScene(this, 'FlightScene', { contractId: '', training: true });
+        } else {
+          EventBus.emit('scene:return-to-map');
+          fadeToScene(this, 'MapScene');
+        }
+      }),
+      EventBus.on('flight:skip-training', () => {
+        if (!this.training) return;
+        const save = SaveService.get();
+        save.player.stats.trainingDone = true;
+        SaveService.save(save.player, save.world);
+        EventBus.emit('scene:return-to-map');
+        fadeToScene(this, 'MapScene');
+      }),
     ];
     this.events.once('shutdown', () => {
       this.rig?.reset();
@@ -583,7 +686,7 @@ export class FlightScene extends Phaser.Scene {
         this.world.loading = false;
         SoundEngine.chime();
         EventBus.emit('ui:show-notification', {
-          message: '📦 Cargo aboard and secured — press E to start the engine',
+          message: `📦 Cargo aboard — ${press('engine')} to start the engine`,
           type: 'success',
         });
       }
@@ -687,12 +790,8 @@ export class FlightScene extends Phaser.Scene {
       this.flapsToggleCooldown = 500;
       SoundEngine.flapMove();
       EventBus.emit('flight:flaps-toggled', { deployed: this.state.flapsDeployed });
-      EventBus.emit('ui:show-notification', {
-        message: this.state.flapsDeployed
-          ? 'Flaps DOWN — extra lift and a lower stall speed for takeoff/landing, at the cost of drag.'
-          : 'Flaps UP — clean wing for cruise.',
-        type: 'info',
-      });
+      // No toast: the FLAP mark on the HUD and the sound say it, and a
+      // paragraph about lift every time you touched the lever was noise.
     }
     if ((Phaser.Input.Keyboard.JustDown(this.keys.T) || TouchInput.consume('time'))) {
       if (this.timeScale === 4) {
@@ -719,7 +818,9 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // ── Time warp: everything below advances on scaled time ───────────────
-    const sdt = dt * this.timeScale;
+    // Warp speeds the quiet stretches; the drop run slows the one moment
+    // that is a matter of timing.
+    const sdt = dt * this.timeScale * this.dropSlow;
 
     // ── Weather → wind ─────────────────────────────────────────────────────
     this.weather.update(
@@ -928,7 +1029,7 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // Flight events — only once airborne, at most one check every 3 seconds
-    if (this.hasBeenAirborne && this.state.elapsedSeconds - this.lastEventCheckAt >= 9) {
+    if (!this.training && this.hasBeenAirborne && this.state.elapsedSeconds - this.lastEventCheckAt >= 9) {
       this.lastEventCheckAt = this.state.elapsedSeconds;
       FlightEventService.checkEvents(this.state);
     }
@@ -945,7 +1046,8 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // ── Other traffic: advisories, then the midair if you ignored them ────
-    this.updateTraffic(worldX, sdt);
+    // Nobody else is flying the training circuit.
+    if (!this.training) this.updateTraffic(worldX, sdt);
     if (this.landed) return;
 
     // ── World & weather visuals ────────────────────────────────────────────
@@ -1058,11 +1160,9 @@ export class FlightScene extends Phaser.Scene {
     return onOrigin || onDest;
   }
 
-  /** Stable numeric seed from a contract id. */
+  /** Stable numeric seed from a contract id — shared with the board's preview. */
   private hashRoute(id: string): number {
-    let h = 2166136261;
-    for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
-    return (h >>> 0) % 100000;
+    return routeSeed(id);
   }
 
   // ── Threats: obstacles, raider fire, engine reliability ───────────────────
@@ -1090,7 +1190,7 @@ export class FlightScene extends Phaser.Scene {
       this.state.speed *= 0.55;
       this.cargo.applyDamage(30);
       EventBus.emit('ui:show-notification', {
-        message: `⚠ STRUCK A ${hit.kind.toUpperCase()} — airframe critical`,
+        message: `⚠ STRUCK A ${STRUCTURE_NAME[hit.kind] ?? hit.kind.toUpperCase()} — airframe critical`,
         type: 'danger',
       });
       this.disengageWarp('collision');
@@ -1109,6 +1209,48 @@ export class FlightScene extends Phaser.Scene {
       this.scrollX += hit.halfWidth * 2 + 40;
     }
 
+    /*
+     * Wires. A power line strike is not a mast strike — the cable parts, it
+     * does not stop you dead — but it wraps the prop and the gear, snatches
+     * the nose down and costs a chunk of airframe. Street wires are lighter
+     * again. Either way the span comes down behind you and stays down.
+     */
+    const wire = this.hasBeenAirborne && !this.landed
+      ? hz.wireStrike(this.prevHazardX, this.prevHazardAlt, worldX, alt) : null;
+    this.prevHazardX = worldX;
+    this.prevHazardAlt = alt;
+    if (wire) {
+      const power = wire.kind === 'power';
+      hz.cutSpan(wire, worldX);
+      this.spawnImpactDebris(AIRCRAFT_X, this.world.altitudeToScreenY(alt), power ? 22 : 10);
+      SoundEngine.impact();
+      this.cameras.main.shake(power ? 380 : 220, power ? 0.01 : 0.006);
+      if (power) this.cameras.main.flash(120, 190, 220, 255);
+      this.aircraft.notifyHit();
+      this.state.integrity = clamp(this.state.integrity - (power ? 24 : 10), 0, 100);
+      this.state.speed *= power ? 0.8 : 0.9;
+      this.state.pitchRate -= power ? 18 : 8;
+      this.cargo.applyDamage(power ? 8 : 3);
+      EventBus.emit('ui:show-notification', {
+        message: power
+          ? '⚡ WIRE STRIKE — you took a power line down with you'
+          : '⚠ WIRE STRIKE — street cables across the prop',
+        type: 'danger',
+      });
+      this.disengageWarp('wire strike');
+      if (this.state.integrity <= 0) {
+        this.finishFlight({
+          verticalSpeed: Math.abs(this.state.verticalSpeed),
+          horizontalSpeed: this.state.speed,
+          gearDown: this.state.gearDown,
+          quality: 'crash',
+          integrityDamage: 100,
+          cargoDamagePercent: 100,
+        });
+        return;
+      }
+    }
+
     // Klaxon for a tall obstacle we are not currently above. The range is set
     // so the call always lands with enough room to out-climb the obstacle.
     // Range set so the call always lands with room to out-climb the tallest
@@ -1124,7 +1266,7 @@ export class FlightScene extends Phaser.Scene {
     const lookAhead = (seconds: number): number => Math.max(
       2200, this.state.groundSpeed * seconds * WORLD_PX_PER_M,
     );
-    const ahead = hz.ahead(worldX, lookAhead(7));
+    const ahead = hz.ahead(worldX, lookAhead(7), alt);
     // Height over whatever is actually below, not over sea level. A mast in
     // the way means the ground has effectively risen to meet you, and that is
     // exactly how it should feel to the Director.
@@ -1134,10 +1276,9 @@ export class FlightScene extends Phaser.Scene {
     if (obstacleThreat && this.nagObstacle.due(this.state.elapsedSeconds)) {
       this.hazardAlertAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
-      EventBus.emit('ui:show-notification', {
-        message: `▲ OBSTACLE AHEAD — ${Math.round(ahead.hazard.heightM)} m — CLIMB`,
-        type: 'warning',
-      });
+      // A pylon is the front of a whole line of them, and the call says so
+      // The caution chip names it and pulses; a toast saying the same thing
+      // underneath it was the same alert twice.
       this.disengageWarp('obstacle ahead');
     }
 
@@ -1163,11 +1304,8 @@ export class FlightScene extends Phaser.Scene {
     if (nowUnderFire !== this.underFire) {
       this.underFire = nowUnderFire;
       if (fire.engaged) {
+        // The chip carries it ("HEAVY MG — CLIMB 165m"); the sound says now
         SoundEngine.warn();
-        EventBus.emit('ui:show-notification', {
-          message: `⚠ ${fire.label} ENGAGING — CLIMB ABOVE ${Math.round(fire.clearAltitudeM)} m`,
-          type: 'danger',
-        });
         this.disengageWarp('taking ground fire');
       }
     }
@@ -1246,7 +1384,7 @@ export class FlightScene extends Phaser.Scene {
         SoundEngine.radio('Ashline flight, you are above your ceiling and the engine has quit. Get the nose down.',
           { kind: 'warning', station: 'ASHLINE CONTROL' });
         EventBus.emit('ui:show-notification', {
-          message: '✖ FLAMED OUT ABOVE THE CEILING — descend, then hold E to relight',
+          message: `✖ FLAMED OUT ABOVE THE CEILING — descend, then ${press('engine')} to relight`,
           type: 'danger',
         });
         this.disengageWarp('flamed out');
@@ -1261,7 +1399,7 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // ── Engine reliability: tired engines quit, and you can restart them ──
-    if (this.hasBeenAirborne && this.state.elapsedSeconds - this.failureCheckAt >= 5) {
+    if (!this.training && this.hasBeenAirborne && this.state.elapsedSeconds - this.failureCheckAt >= 5) {
       this.failureCheckAt = this.state.elapsedSeconds;
       if (this.engineRunning && !this.engineFailed) {
         const { def } = SaveService.getActiveAircraft();
@@ -1276,7 +1414,7 @@ export class FlightScene extends Phaser.Scene {
           this.aircraft.stopEngine();
           SoundEngine.engineSputter();
           EventBus.emit('ui:show-notification', {
-            message: '✖ ENGINE FAILURE — hold E to restart, trade height for speed',
+            message: `✖ ENGINE FAILURE — ${press('engine')} to restart, trade height for speed`,
             type: 'danger',
           });
           this.disengageWarp('engine failure');
@@ -1408,6 +1546,9 @@ export class FlightScene extends Phaser.Scene {
     // ── Supply drops ──────────────────────────────────────────────────────
     this.updateDrops(sdt);
 
+    // ── Flight school ─────────────────────────────────────────────────────
+    if (this.trainer) this.updateTraining(sdt, worldX);
+
     // ── Tutorial, first flight only ───────────────────────────────────────
     if (this.tutorial) {
       const line = this.tutorial.update(this.state, {
@@ -1443,6 +1584,9 @@ export class FlightScene extends Phaser.Scene {
       stall: this.stallWarning,
       overspeed,
       obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
+      obstacleLabel: ahead && alt < ahead.hazard.heightM + 18
+        ? (ahead.hazard.kind === 'pylon' ? 'POWER LINES' : STRUCTURE_NAME[ahead.hazard.kind] ?? 'OBSTACLE')
+        : null,
       trafficDeltaM: this.trafficAdvisory,
       trafficAvoid: this.trafficAvoid,
       fuelAtArrival: this.fuelAtArrival,
@@ -1450,6 +1594,7 @@ export class FlightScene extends Phaser.Scene {
       // A camp is signalling and there is something left to drop on it
       dropReady: this.world.dropReticle !== null,
       cratesLeft: this.world.drops.cratesLeft,
+      dropZone: this.dropZone,
     });
   }
 
@@ -1486,7 +1631,7 @@ export class FlightScene extends Phaser.Scene {
       this.state.verticalSpeed -= 3 + Math.random() * 4;
       this.disengageWarp('lightning strike');
       EventBus.emit('ui:show-notification', {
-        message: '⚡ LIGHTNING STRIKE — engine out, instruments gone. Hold E to restart.',
+        message: `⚡ LIGHTNING STRIKE — engine out. ${press('engine')} to restart.`,
         type: 'danger',
       });
     }
@@ -1500,7 +1645,7 @@ export class FlightScene extends Phaser.Scene {
       this.disengageWarp('engine out');
       if (!rep.struck) {
         EventBus.emit('ui:show-notification', {
-          message: '✖ SAND HAS KILLED THE ENGINE — hold E to restart',
+          message: `✖ SAND HAS KILLED THE ENGINE — ${press('engine')} to restart`,
           type: 'danger',
         });
       }
@@ -1534,33 +1679,147 @@ export class FlightScene extends Phaser.Scene {
   private updateDrops(sdt: number): void {
     const drops = this.world.drops;
     const worldX = this.scrollX + AIRCRAFT_X;
-    const airborne = this.hasBeenAirborne && this.state.altitude > 3 && !this.landed;
-    const ev = drops.update(sdt, worldX, airborne);
+    const alt = this.state.altitude;
+    const airborne = this.hasBeenAirborne && alt > 3 && !this.landed;
+    const gs = Math.max(25, this.state.groundSpeed);
+    /*
+     * Calls are timed, not ranged.
+     *
+     * The flare used to go up 290 m out — five seconds in the crop duster and
+     * under two in the transport, from a cruise at 150 m. Nobody can come down
+     * 120 m in two seconds, so the drop was only ever possible if you happened
+     * to be low already. Now the first call comes about forty seconds out,
+     * which is a comfortable descent at any speed, and the flare at twelve.
+     */
+    const inboundPx = Math.max(2800, gs * 40) * WORLD_PX_PER_M;
+    const signalPx = Math.max(900, gs * 12) * WORLD_PX_PER_M;
+    const ev = drops.update(sdt, worldX, airborne, inboundPx, signalPx);
+    const touch = isTouchDevice();
+    const seen = SaveService.get().player.stats.supplyDrops ?? 0;
 
-    if (ev.signalled) {
-      const touch = isTouchDevice();
-      // The first two ever get the full instruction; after that the flare speaks for itself
-      const seen = SaveService.get().player.stats.supplyDrops ?? 0;
-      SoundEngine.radio('Survivors on the ground ahead', { kind: 'traffic' });
+    if (ev.inbound && drops.cratesLeft > 0) {
+      const site = ev.inbound;
+      const km = (site.x - worldX) / (WORLD_PX_PER_M * 1000);
+      const where = site.kind === 'rooftop' ? `on a rooftop in ${site.place}`
+        : site.kind === 'square' ? `in ${site.place} square` : `at ${site.place}`;
+      const crates = `${site.need} crate${site.need > 1 ? 's' : ''}`;
+      SoundEngine.radio(
+        `Any aircraft, ${site.people} of us ${where}. We need ${crates}.`
+          + (site.besieged ? ' Raiders all round us — watch the rifles.' : ''),
+        { kind: 'traffic', station: site.place.toUpperCase() },
+      );
       EventBus.emit('ui:show-notification', {
-        message: seen < 2
-          ? `📦 Survivors ahead — ${touch ? 'tap DROP' : 'SPACE'} when the pin is on them. Lower is more accurate.`
-          : `📦 Survivors signalling ahead.`,
+        message: seen < 3
+          ? `📦 ${titleOf(site)} ${km.toFixed(1)} km — come down into the green band (${site.bandLo}–${site.bandHi} m)`
+          : `📦 ${titleOf(site)} · ${km.toFixed(1)} km · ${crates}${site.besieged ? ' · UNDER FIRE' : ''}`,
+        type: 'info',
+      });
+      this.disengageWarp('supply drop ahead');
+    }
+    if (ev.signalled && drops.cratesLeft > 0) {
+      const site = ev.signalled;
+      EventBus.emit('ui:show-notification', {
+        message: seen < 3
+          ? `📦 Flare up over ${site.place} — ${touch ? 'tap DROP' : 'SPACE'} when the pin is on them`
+          : `📦 Flare up over ${site.place}`,
         type: 'info',
       });
     }
 
     // Reticle while there is someone to aim at
     const site = airborne ? drops.activeSite(worldX) : null;
+    let meter: { gapM: number; windowM: number; releaseIn: number } | null = null;
     if (site && drops.cratesLeft > 0) {
-      const ix = drops.predictImpactX(worldX, this.state.altitude, this.state.groundSpeed);
+      const imp = drops.predictImpact(worldX, alt, this.state.groundSpeed);
+      const windowM = site.kind === 'rooftop' && site.roof ? site.roof.halfWidth / WORLD_PX_PER_M : 30;
+      const gapM = (site.x - imp.x) / WORLD_PX_PER_M;
+      const onTarget = site.kind === 'rooftop' && site.roof
+        ? Math.abs(imp.x - site.roof.x) <= site.roof.halfWidth && imp.altM > 1
+        : Math.abs(gapM) <= windowM;
       this.world.dropReticle = {
-        x: ix,
-        onTarget: Math.abs(ix - site.x) / WORLD_PX_PER_M <= 55,
-        spreadM: drops.spreadM(this.state.altitude),
+        x: imp.x, altM: imp.altM, onTarget, spreadM: drops.spreadM(alt),
       };
+      meter = { gapM, windowM, releaseIn: (gapM - windowM * 0.4) / gs };
     } else {
       this.world.dropReticle = null;
+    }
+
+    /*
+     * The run-in: ticks at three, two, one, and a tone on them — then a
+     * moment of slow motion over the release itself.
+     *
+     * At cruise the people cross from the edge of the screen to the aim point
+     * in about a second. That is a reflex test, not a drop, and on a phone it
+     * was effectively impossible. The ticks let you time it by ear from
+     * several seconds out; the slow motion (only while you are down in the
+     * window, and only for those two seconds) gives the eye a fair chance.
+     */
+    let slowTarget = 1;
+    if (meter && site) {
+      const inBand = alt <= site.bandHi + 12;
+      const whole = Math.ceil(meter.releaseIn);
+      if (inBand && whole >= 1 && whole <= 3 && whole < this.dropTickAt) {
+        this.dropTickAt = whole;
+        SoundEngine.dropTick(false);
+      }
+      const inWindow = Math.abs(meter.gapM) <= meter.windowM;
+      if (inBand && inWindow && !this.dropWindowToned) {
+        this.dropWindowToned = true;
+        SoundEngine.dropTick(true);
+      }
+      if (!inWindow && meter.gapM > meter.windowM) this.dropWindowToned = false;
+      if (inBand && meter.releaseIn < 2.2 && meter.gapM > -meter.windowM * 1.4) slowTarget = 0.45;
+    } else {
+      this.dropTickAt = 99;
+      this.dropWindowToned = false;
+    }
+    this.dropSlow += (slowTarget - this.dropSlow) * Math.min(1, (sdt / Math.max(0.05, this.dropSlow)) * 5);
+
+    /*
+     * The window, and when to start down into it.
+     *
+     * "Descend now" is worked out from where you are: the height to lose at a
+     * comfortable seven metres a second, turned into distance at the speed you
+     * are actually making, plus a few hundred metres to settle. Start down at
+     * that point and you arrive in the band with time to line up.
+     */
+    const next = airborne && drops.cratesLeft > 0 ? drops.nextCalling(worldX) : null;
+    this.dropGuideFade = next
+      ? Math.min(1, this.dropGuideFade + sdt / 1.2)
+      : Math.max(0, this.dropGuideFade - sdt / 0.8);
+    if (next) {
+      const km = Math.max(0, (next.x - worldX) / (WORLD_PX_PER_M * 1000));
+      const needKm = (Math.max(0, alt - next.bandHi) / 7) * gs / 1000 + 0.35;
+      let cue: DropZoneStatus['cue'];
+      // The crates carry forward as they fall, so once the aim point is past
+      // them any crate out of the door now lands beyond them
+      const aimPast = this.world.dropReticle !== null && next.state === 'signalled'
+        && (this.world.dropReticle.x - next.x) / WORLD_PX_PER_M > 30;
+      if (aimPast) cue = 'late';
+      else if (alt < next.bandLo - 2) cue = 'low';
+      else if (alt <= next.bandHi + 3) cue = this.world.dropReticle?.onTarget ? 'release' : 'window';
+      else cue = km <= needKm ? 'descend' : 'hold';
+      if (cue === 'descend' && !this.descentCalled.has(next)) {
+        this.descentCalled.add(next);
+        SoundEngine.chime();
+        EventBus.emit('ui:show-notification', {
+          message: `▼ Start down now — ${next.bandLo}–${next.bandHi} m for ${next.place}`,
+          type: 'info',
+        });
+      }
+      this.dropZone = {
+        place: next.place, kind: next.kind, km, need: next.need, got: next.got,
+        lo: next.bandLo, hi: next.bandHi, besieged: next.besieged, cue,
+        descendInKm: Math.max(0, km - needKm),
+        gapM: meter && site === next ? meter.gapM : null,
+        windowM: meter?.windowM ?? 30,
+        releaseIn: meter && site === next ? meter.releaseIn : null,
+      };
+      this.world.dropGuide = { lo: next.bandLo, hi: next.bandHi, fade: this.dropGuideFade };
+    } else {
+      this.dropZone = null;
+      this.world.dropGuide = this.dropGuideFade > 0 && this.world.dropGuide
+        ? { ...this.world.dropGuide, fade: this.dropGuideFade } : null;
     }
 
     // Release
@@ -1568,33 +1827,67 @@ export class FlightScene extends Phaser.Scene {
     if (pressed && airborne) {
       if (drops.cratesLeft <= 0) {
         EventBus.emit('ui:show-notification', { message: 'No crates left aboard.', type: 'info' });
-      } else if (drops.release(worldX, this.state.altitude, this.state.groundSpeed)) {
+      } else if (drops.release(worldX, alt, this.state.groundSpeed)) {
         this.dropStats.dropped++;
         SoundEngine.gearMove(false);    // the door and the thump of it going
       }
     }
 
-    // Landings
+    // Landings. Paid the moment they land: it has been delivered, and it should
+    // survive you crashing ten minutes later.
+    const pay = (money: number, rep: number): void => {
+      // Practice crates: the lesson would otherwise be a money printer
+      if (this.training) return;
+      const save = SaveService.get();
+      save.player.money += money;
+      const origin = window.gameData.settlements.find(x => x.id === this.originId);
+      const r = save.player.reputation.find(x => x.factionId === origin?.factionId);
+      if (r) r.points += rep;
+      SaveService.save(save.player, save.world);
+      EventBus.emit('player:money-changed', { amount: save.player.money, delta: money });
+      this.dropStats.earned += money;
+    };
     for (const hit of ev.landed) {
       const r = DROP_REWARD[hit.result];
-      if (r.money > 0) {
-        const save = SaveService.get();
-        save.player.money += r.money;
-        save.player.stats.supplyDrops = (save.player.stats.supplyDrops ?? 0) + 1;
-        const origin = window.gameData.settlements.find(x => x.id === this.originId);
-        const rep = save.player.reputation.find(x => x.factionId === origin?.factionId);
-        if (rep) rep.points += r.rep;
-        SaveService.save(save.player, save.world);
-        EventBus.emit('player:money-changed', { amount: save.player.money, delta: r.money });
+      if (hit.money > 0) {
         this.dropStats.hits++;
-        this.dropStats.earned += r.money;
         SoundEngine.chime();
+        if (!this.training) {
+          const save = SaveService.get();
+          save.player.stats.supplyDrops = (save.player.stats.supplyDrops ?? 0) + 1;
+          pay(hit.money, hit.rep);
+        }
       }
+      // The people answer the first crate, in their own words — and a crate
+      // they cannot reach, because that is worth knowing
+      if (hit.site && ((hit.money > 0 && hit.site.got === 1) || hit.unreachable)) {
+        SoundEngine.radio(siteReply(hit.result, hit.site.kind, hit.site.seed),
+          { kind: 'traffic', station: hit.site.place.toUpperCase() });
+      }
+      const line = hit.unreachable ? 'In the street — they cannot reach it. Put it on the roof' : r.line;
+      const left = hit.site && hit.site.got < hit.site.need
+        ? ` · ${hit.site.need - hit.site.got} more wanted` : '';
+      // A crate that lands a long way from anybody was not a near miss
+      const wasted = hit.money === 0 && hit.distM > 300;
       EventBus.emit('ui:show-notification', {
-        message: r.money > 0
-          ? `📦 ${r.line} — +₢${r.money.toLocaleString()}  (${Math.round(hit.distM)} m)`
-          : `📦 ${r.line} (${Math.round(hit.distM)} m off)`,
-        type: hit.result === 'bullseye' ? 'success' : r.money > 0 ? 'info' : 'warning',
+        message: this.training && hit.money > 0
+          ? `📦 ${line} — that is how it is done`
+          : hit.money > 0
+            ? `📦 ${line} — +₢${hit.money.toLocaleString()}${left}`
+            : hit.unreachable ? `📦 ${line}`
+            : wasted ? '📦 Nobody down there — that crate is gone'
+              : `📦 ${line} (${Math.round(hit.distM)} m off)`,
+        type: hit.result === 'bullseye' ? 'success' : hit.money > 0 ? 'info' : 'warning',
+      });
+    }
+    for (const done of ev.completed) {
+      if (this.training) continue;
+      pay(done.bonus, 2);
+      SoundEngine.radio(`${done.site.place} here. That is everything we asked for. God bless you, pilot.`,
+        { kind: 'traffic', station: done.site.place.toUpperCase() });
+      EventBus.emit('ui:show-notification', {
+        message: `✔ ${titleOf(done.site)} supplied — +₢${done.bonus.toLocaleString()} bonus`,
+        type: 'success',
       });
     }
   }
@@ -1626,11 +1919,7 @@ export class FlightScene extends Phaser.Scene {
     if (ra && this.nagTraffic.due(this.state.elapsedSeconds)) {
       this.trafficAlertAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
-      const where = ra.dAltM >= 0 ? 'ABOVE' : 'BELOW';
-      EventBus.emit('ui:show-notification', {
-        message: `✈ TRAFFIC — ${Math.abs(Math.round(ra.dAltM))} m ${where} — ${ra.avoid > 0 ? 'CLIMB' : 'DESCEND'}`,
-        type: 'warning',
-      });
+      // The TRAFFIC chip says how far and which way; the alarm says now
       this.disengageWarp('traffic conflict');
     }
 
@@ -1822,7 +2111,7 @@ export class FlightScene extends Phaser.Scene {
     if (this.timeScale === 1) return;
     this.timeScale = 1;
     this.warpText.setVisible(false);
-    EventBus.emit('ui:show-notification', { message: `Time warp off — ${reason}.`, type: 'warning' });
+    EventBus.emit('ui:show-notification', { message: `»» Warp off — ${reason}`, type: 'info' });
   }
 
   // ── Event cinematics ──────────────────────────────────────────────────────
@@ -1973,9 +2262,104 @@ export class FlightScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Flight school, each frame: walk the script, draw its height band, and
+   * hand the HUD the step to show.
+   */
+  private updateTraining(sdt: number, worldX: number): void {
+    const trainer = this.trainer;
+    const marks = this.trainMarks;
+    if (!trainer || !marks) return;
+    const site = this.world.drops.sites[0] ?? null;
+    const view = trainer.update(sdt, this.state, {
+      retractableGear: this.aircraft.hasRetractableGear,
+      engineRunning: this.engineRunning,
+      loadingLeft: this.loadingLeft,
+      worldX,
+      landed: this.landed,
+      timeWarp: this.timeScale,
+      mastX: marks.mastX,
+      lineEndX: marks.lineEndX,
+      zone: marks.zone,
+      site,
+      remainingKm: Math.max(0, this.routeKm - this.state.distanceTravelled),
+      vrKmh: Math.round(this.controller.vStall * 1.3 * 3.6),
+      touch: isTouchDevice(),
+    });
+    this.trainGuideFade = view?.guide
+      ? Math.min(1, this.trainGuideFade + sdt / 1.2)
+      : Math.max(0, this.trainGuideFade - sdt / 0.8);
+    if (view?.guide) {
+      this.world.trainGuide = { ...view.guide, fade: this.trainGuideFade };
+    } else if (this.world.trainGuide) {
+      this.world.trainGuide = this.trainGuideFade > 0
+        ? { ...this.world.trainGuide, fade: this.trainGuideFade } : null;
+    }
+    this.emitTrainingView(view);
+  }
+
+  private emitTrainingView(view: TrainingView | null): void {
+    const key = view ? `${view.step}|${view.text}` : '';
+    if (key === this.trainViewKey) return;
+    this.trainViewKey = key;
+    EventBus.emit('flight:tutorial', view
+      ? { text: view.text, title: view.title, step: view.step, total: view.total, keys: view.keys, training: true }
+      : { text: null });
+    this.keyHintText?.setVisible(view === null);
+  }
+
+  /**
+   * The end of the lesson. No contract, no post-flight report: a debrief
+   * over the aeroplane where it stopped, paid once, and the choice to go
+   * again or get on with it.
+   */
+  private finishTraining(result: LandingResult): void {
+    this.emitTrainingView(null);
+    this.world.trainGuide = null;
+    const crashed = result.quality === 'crash';
+    const onRunway = this.isOnRunway(this.scrollX + AIRCRAFT_X);
+    const passed = !crashed && onRunway;
+    const save = SaveService.get();
+    const firstTime = passed && !save.player.stats.trainingDone;
+    if (passed) {
+      save.player.stats.trainingDone = true;
+      if (firstTime) save.player.money += TRAINING_REWARD;
+      SaveService.save(save.player, save.world);
+      if (firstTime) EventBus.emit('player:money-changed', { amount: save.player.money, delta: TRAINING_REWARD });
+    }
+    const debrief = (): void => {
+      EventBus.emit('flight:training-complete', {
+        passed,
+        reward: firstTime ? TRAINING_REWARD : 0,
+        landing: crashed ? 'crash' : result.quality,
+        onRunway,
+        crates: this.dropStats.hits,
+      });
+    };
+    if (!crashed) {
+      SoundEngine.chime();
+      debrief();
+      return;
+    }
+    this.crashing = true;
+    SoundEngine.stopFlightLoop();
+    this.state.speed = 0;
+    this.state.verticalSpeed = 0;
+    this.state.throttle = 0;
+    this.crash.play(
+      { speed: this.state.speed, verticalSpeed: Math.abs(result.verticalSpeed), gearUp: !this.state.gearDown },
+      debrief,
+    );
+  }
+
   private finishFlight(result: LandingResult): void {
     if (this.landed) return;
     this.landed = true;
+
+    if (this.training) {
+      this.finishTraining(result);
+      return;
+    }
 
     /*
      * Fold this crossing into the career numbers and write them down.
@@ -2028,9 +2412,9 @@ export class FlightScene extends Phaser.Scene {
     this.trafficAdvisory = null;
     EventBus.emit('flight:status', {
       engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
-      overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
+      overspeed: false, obstacleAheadM: null, obstacleLabel: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true,
-      dropReady: false, cratesLeft: 0,
+      dropReady: false, cratesLeft: 0, dropZone: null,
     });
     this.state.speed = 0;
     this.state.verticalSpeed = 0;
@@ -2091,4 +2475,11 @@ export class FlightScene extends Phaser.Scene {
     return { verticalSpeed: vSpeed, horizontalSpeed: hSpeed, gearDown: this.state.gearDown,
       quality, integrityDamage, cargoDamagePercent: cargoDamage };
   }
+}
+
+/** "Millbrook rooftop", "a quarry camp" — what the call is about, in a few words. */
+function titleOf(site: DropSite): string {
+  const place = site.place.charAt(0).toUpperCase() + site.place.slice(1);
+  return site.kind === 'rooftop' ? `${place} rooftop`
+    : site.kind === 'square' ? `${place} square` : place;
 }

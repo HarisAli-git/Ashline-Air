@@ -5,6 +5,7 @@ import {
 } from './render/AircraftVisualSpec';
 import { ensureAircraftTextures, SS, type AircraftTexKeys } from './render/AircraftPainter';
 import { AircraftParticles } from './render/AircraftParticles';
+import { drawMainLeg, drawNoseLeg, drawTailSpring, drawSpat, type GearStyle } from './render/GearArt';
 
 /**
  * Fully procedural aircraft renderer.
@@ -227,77 +228,87 @@ export class AircraftSprite {
 
   private buildGear(): void {
     const g = this.spec.gear;
+    const pal = this.spec.palette;
     const bellyY = this.spec.height / 2;
+    const style: GearStyle = g.style ?? 'strut';
 
     /**
-     * One leg. `wheels` > 1 puts them in tandem on a bogie beam, which is what
-     * a transport actually stands on — a heavy freighter balanced on a single
-     * wheel per side is the detail that makes it read as a toy.
+     * One leg, hinge to wheel. The leg itself is drawn by GearArt for this
+     * airframe's style; the wheels are the baked texture so they can spin.
+     * `wheels` > 1 puts them in tandem (the C-130); `dual` is a side-by-side
+     * pair, which from the side is one wheel with the far tyre peeping out.
      */
-    const makeLeg = (
-      hx: number, stowedRad: number, scale = 1, hingeY = g.hingeY,
-      wheels = 1, wheelScale = 1, dual = false,
-    ): GearLeg => {
-      const root = this.scene.add.container(hx, hingeY);
-      root.setScale(scale);
-      const strut = this.scene.add.image(0, 0, this.tex.gearStrut).setScale(1 / SS).setOrigin(0.5, 0.06);
-      root.add(strut);
+    const makeLeg = (o: {
+      hx: number; hy: number; len: number; rake: number; r: number; stowedRad: number;
+      nose?: boolean; wheels?: number; dual?: boolean; spat?: boolean;
+    }): GearLeg => {
+      const root = this.scene.add.container(o.hx, o.hy);
+      const scale = o.r / g.wheelR;
+      const wheels = o.wheels ?? 1;
+      const pitch = o.r * 2.08;
+      const span = pitch * (wheels - 1);
 
-      const r = g.wheelR * wheelScale;
-      let wheel: Phaser.GameObjects.Image;
+      // A bogie beam behind a tandem pair, then the leg
+      const art = this.scene.add.graphics();
+      if (wheels > 1) {
+        art.fillStyle(0x2a2620, 1);
+        art.fillRoundedRect(o.rake - span / 2 - o.r * 0.4, o.len - o.r * 0.32, span + o.r * 0.8, o.r * 0.5, 1.5);
+      }
+      if (o.nose) drawNoseLeg(art, o.len, o.rake, o.r, pal);
+      else drawMainLeg(art, style, o.len, o.rake, o.r, pal);
+      root.add(art);
 
-      // A side-by-side PAIR is one silhouette — you are looking straight down
-      // the axle. Drawing the pair fore-and-aft put a row of wheels along the
-      // belly of every transport in the fleet, which none of them have. The
-      // outboard tyre just sits a touch proud of the inboard one.
-      if (dual) {
-        const inner = this.scene.add
-          .image(0, g.strutLen, this.tex.wheel)
-          .setScale((1 / SS) * wheelScale * 0.96)
-          .setTint(0x8a8a8a);
-        inner.x = -r * 0.16;
+      if (o.dual) {
+        const inner = this.scene.add.image(o.rake - o.r * 0.18, o.len, this.tex.wheel)
+          .setScale((1 / SS) * scale * 0.96)
+          .setTint(0x7a7a7a);
         root.add(inner);
         this.extraWheels.push(inner);
       }
+      const made: Phaser.GameObjects.Image[] = [];
+      for (let i = 0; i < wheels; i++) {
+        const w = this.scene.add.image(o.rake - span / 2 + i * pitch, o.len, this.tex.wheel)
+          .setScale((1 / SS) * scale);
+        root.add(w);
+        made.push(w);
+      }
+      this.extraWheels.push(...made.slice(1));
 
-      if (wheels <= 1) {
-        wheel = this.scene.add.image(0, g.strutLen, this.tex.wheel).setScale((1 / SS) * wheelScale);
-        root.add(wheel);
-      } else {
-        // A genuine TANDEM bogie: wheels one behind the other on a beam.
-        const pitch = r * 1.95;
-        const span = pitch * (wheels - 1);
-        const beam = this.scene.add.rectangle(0, g.strutLen - r * 0.55, span + r * 1.1, r * 0.5, 0x2a2620);
-        root.add(beam);
-        const made: Phaser.GameObjects.Image[] = [];
-        for (let i = 0; i < wheels; i++) {
-          const w = this.scene.add
-            .image(-span / 2 + i * pitch, g.strutLen, this.tex.wheel)
-            .setScale((1 / SS) * wheelScale);
-          root.add(w);
-          made.push(w);
-        }
-        // The first is the one the spin animation drives; the rest follow it
-        wheel = made[0];
-        this.extraWheels.push(...made.slice(1));
+      // The spat goes over the tyre and does not turn with it
+      if (o.spat) {
+        const sg = this.scene.add.graphics();
+        drawSpat(sg, o.rake, o.len, o.r, pal);
+        root.add(sg);
       }
       this.body.add(root);
 
       let door: Phaser.GameObjects.Image | null = null;
       if (!g.fixed) {
-        door = this.scene.add.image(hx - 9, bellyY - 1, this.tex.gearDoor)
+        door = this.scene.add.image(o.hx - 9, bellyY - 1, this.tex.gearDoor)
           .setScale(1 / SS)
           .setOrigin(0.05, 0.2); // hinge at the door's forward edge
         // added to body later so it renders in front of the hull
       }
-      return { root, wheel, stowedRad, door };
+      return { root, wheel: made[0], stowedRad: o.stowedRad, door };
     };
 
-    this.legs.push(makeLeg(g.mainX, MAIN_STOWED_RAD, 1, g.hingeY, g.mainWheels ?? 1, 1, g.mainDual ?? false));
+    this.legs.push(makeLeg({
+      hx: g.mainX, hy: g.hingeY, len: g.strutLen, rake: g.rake ?? 0, r: g.wheelR,
+      stowedRad: MAIN_STOWED_RAD, wheels: g.mainWheels ?? 1, dual: g.mainDual ?? false,
+      spat: style === 'spatted',
+    }));
     if (g.noseX !== null) {
-      // Nose legs are lighter and shorter-travel; heavies carry a pair.
-      const nr = (g.noseWheelR ?? g.wheelR) / g.wheelR;
-      this.legs.push(makeLeg(g.noseX, NOSE_STOWED_RAD, 1, g.hingeY, 1, nr, g.noseDual ?? false));
+      /*
+       * The nose leg is sized to reach the ground. It used to reuse the main
+       * leg's length with a smaller wheel on the end, so every tricycle in
+       * the fleet parked with its nose wheel hovering off the runway by the
+       * difference in tyre size.
+       */
+      const nr = g.noseWheelR ?? g.wheelR;
+      this.legs.push(makeLeg({
+        hx: g.noseX, hy: g.hingeY, len: this.contactY - g.hingeY - nr, rake: 2, r: nr,
+        stowedRad: NOSE_STOWED_RAD, nose: true, dual: g.noseDual ?? false,
+      }));
     }
     if (g.tailWheelX !== null) {
       // Taildragger tail wheel — the aircraft rests nose-high on it.
@@ -314,8 +325,7 @@ export class AircraftSprite {
       const bellyAtTail = Phaser.Math.Linear(H / 2, H * 0.08, frac);
       const tailHinge = bellyAtTail - 1.5; // leg root tucked into the hull
 
-      // Small, but big enough to read as a WHEEL rather than a dot on a pole
-      const wheelScale = 0.6;
+      const wheelScale = 0.55;
       const smallWheelR = g.wheelR * wheelScale;
       const maxStrut = g.strutLen * 0.85;         // never longer than the mains
 
@@ -333,16 +343,14 @@ export class AircraftSprite {
       }
       strutNeeded = Math.max(4, strutNeeded);
 
-      const root = this.scene.add.container(g.tailWheelX, tailHinge);
-      // A stubby sprung leg in airframe colours — a bright thin strut reads
-      // as a pole hanging in space once the tail comes up.
-      const strut = this.scene.add.image(0, 0, this.tex.gearStrut)
-        .setOrigin(0.5, 0.06)
-        .setScale((1 / SS) * 1.05, (1 / SS) * (strutNeeded / g.strutLen))
-        .setTint(0x6a6259);
-      const wheel = this.scene.add.image(0, strutNeeded, this.tex.wheel)
+      // A leaf spring bowing aft; the root is moved forward by the bow so the
+      // wheel still lands exactly where the stance geometry put it.
+      const spring = this.scene.add.graphics();
+      const { ax } = drawTailSpring(spring, strutNeeded, pal);
+      const root = this.scene.add.container(g.tailWheelX - ax, tailHinge);
+      const wheel = this.scene.add.image(ax, strutNeeded, this.tex.wheel)
         .setScale((1 / SS) * wheelScale);
-      root.add(strut);
+      root.add(spring);
       root.add(wheel);
       this.body.add(root);
       this.legs.push({ root, wheel, stowedRad: 0, door: null });

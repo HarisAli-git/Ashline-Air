@@ -662,6 +662,20 @@ class SoundEngineClass {
     this.blip(620, 0.05, 0.07, 'triangle');
   }
 
+  /**
+   * The drop run-in: a short tick each second out, and a higher double tone
+   * the moment the crate would land on them. Timing a release by eye alone
+   * is a one-frame job at cruise speed; timing it by ear is a skill.
+   */
+  dropTick(final = false): void {
+    if (final) {
+      this.blip(1180, 0.09, 0.075, 'triangle');
+      this.blip(1480, 0.14, 0.07, 'triangle', undefined, 0.09);
+    } else {
+      this.blip(880, 0.05, 0.06, 'triangle');
+    }
+  }
+
   chime(): void {
     this.blip(660, 0.12, 0.07);
     this.blip(880, 0.16, 0.07, 'sine', undefined, 0.11);

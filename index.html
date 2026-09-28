@@ -51,8 +51,20 @@
 
       /* Live-channel blink on the flight-event dialog. */
       @keyframes aa-live { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0.15; } }
+      /* A softer beat for "do this now" cues on the glass. */
+      @keyframes aa-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+      /* A message on the glass: in, hold, fade. */
+      @keyframes aa-note { 0% { opacity: 0; transform: translateY(4px); } 5% { opacity: 1; transform: none; } 82% { opacity: 1; } 100% { opacity: 0; } }
+      /* A new caution chip: three quick beats so it is seen. */
+      @keyframes aa-chip { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+      /* A new lesson step arriving. */
+      @keyframes aa-step { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
       @media (prefers-reduced-motion: reduce) {
+        @keyframes aa-step { from { opacity: 1; } to { opacity: 1; } }
+        @keyframes aa-note { 0% { opacity: 1; } 82% { opacity: 1; } 100% { opacity: 0; } }
+        @keyframes aa-chip { 0%, 100% { opacity: 1; } }
         @keyframes aa-live { 0%, 100% { opacity: 1; } }
+        @keyframes aa-pulse { 0%, 100% { opacity: 1; } }
       }
 
       /* Thin, dark scrollbars for the panels that do scroll. */

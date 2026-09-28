@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
+import { EventBus } from '../utils/EventBus';
 import { drawUndead, drawCorpse, drawHorde, undeadKindFor, type CrowdStyle } from '../world/Crowds';
 import { drawFighter, drawMuzzleFlash, garrisonPalette, RAIDER_PALETTE } from '../world/Figures';
 import { isTouchDevice } from '../utils/device';
@@ -59,11 +60,14 @@ export class IntroScene extends Phaser.Scene {
   private advancing = false;
   /** Where to go when the intro ends — MenuScene replay vs. a new game. */
   private nextScene = 'MapScene';
+  /** Straight into flight school afterwards — a new game's first flight. */
+  private training = false;
 
   constructor() { super({ key: 'IntroScene' }); }
 
-  init(data: { next?: string }): void {
+  init(data: { next?: string; training?: boolean }): void {
     this.nextScene = data?.next ?? 'MapScene';
+    this.training = !!data?.training;
     this.index = 0;
     this.t = 0;
     this.total = 0;
@@ -147,6 +151,12 @@ export class IntroScene extends Phaser.Scene {
     if (this.advancing) return;
     this.advancing = true;
     this.hintText.setAlpha(0);
+    if (this.training) {
+      // The HUD has to be up before the flight's first frame reports in
+      EventBus.emit('scene:start-flight', { contractId: '' });
+      fadeToScene(this, 'FlightScene', { contractId: '', training: true });
+      return;
+    }
     fadeToScene(this, this.nextScene);
   }
 

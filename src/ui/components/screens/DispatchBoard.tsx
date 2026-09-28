@@ -5,6 +5,7 @@ import { EventBus } from '../../../game/utils/EventBus';
 import { SoundEngine } from '../../../game/audio/SoundEngine';
 import type { Contract } from '../../../types';
 import { routeBlock, routeKmBetween, describeBlock, fuelCheck } from '../../../services/RouteService';
+import { previewDrops } from '../../../game/world/RoutePreview';
 import { useViewport } from '../../viewport';
 
 /**
@@ -129,6 +130,9 @@ export function DispatchBoard({ settlementId, onContractAccepted }: Props): Reac
           const blk = blockerFor(c);
           const on = c.id === picked;
           const tag = TYPE_TAG[c.type];
+          // What else is on the way: people to drop to, and whether any of
+          // them are under fire. Same layout the flight will use.
+          const drops = km > 0 ? previewDrops(c.id, km) : null;
           return (
             <button
               key={c.id}
@@ -151,6 +155,12 @@ export function DispatchBoard({ settlementId, onContractAccepted }: Props): Reac
                 <span style={s.fig}>{massOf(c).toLocaleString()} kg</span>
                 <span style={s.fig}>{Math.round(km)} km</span>
                 {tag && <span style={{ ...s.fig, color: tag.tone }}>{tag.label}</span>}
+                {drops && drops.sites > 0 && (
+                  <span style={{ ...s.fig, color: '#9fe8b0' }}>
+                    📦 {drops.sites} drop{drops.sites > 1 ? 's' : ''}
+                    {drops.besieged > 0 && <span style={{ color: '#ff8844' }}> · 1 under fire</span>}
+                  </span>
+                )}
                 {blk && <span style={s.blocked}>{blk}</span>}
               </div>
             </button>
