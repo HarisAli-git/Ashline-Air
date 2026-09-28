@@ -73,6 +73,13 @@ function hash(i: number): number {
 
 export class WeatherField {
   private cells: WeatherCell[] = [];
+  /** No cells and none spawning — the training circuit flies in still air. */
+  private calm = false;
+
+  setCalm(on: boolean): void {
+    this.calm = on;
+    if (on) this.cells = [];
+  }
   private seed = 1;
   private routeEndPx = 40000;
   private spawnTimer = 0;
@@ -154,6 +161,7 @@ export class WeatherField {
    *   because a leg you cannot learn is a leg you cannot fly well.
    */
   update(dt: number, playerX: number, pressure = 0.5): void {
+    if (this.calm) return;
     for (const c of this.cells) {
       c.age += dt;
       c.x += c.drift * dt;

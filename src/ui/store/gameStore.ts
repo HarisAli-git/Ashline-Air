@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { EventBus } from '../../game/utils/EventBus';
+import { EventBus, type DropZoneStatus } from '../../game/utils/EventBus';
 import { SaveService } from '../../services/SaveService';
 import type { FlightState, FlightEventDefinition } from '../../types';
+import type { TutorialPayload } from '../components/hud/TrainingPanel';
 
 /**
  * Lightweight reactive store built on plain React hooks + EventBus.
@@ -38,10 +39,11 @@ export function useInFlight(): boolean {
 }
 
 /** The current tutorial line, or null. First flight of a save only. */
-export function useTutorial(): string | null {
-  const [line, setLine] = useState<string | null>(null);
-  useEffect(() => EventBus.on('flight:tutorial', ({ text }) => setLine(text)), []);
-  return line;
+/** The current teaching line — or, in flight school, the whole step. */
+export function useTutorial(): TutorialPayload | null {
+  const [lesson, setLesson] = useState<TutorialPayload | null>(null);
+  useEffect(() => EventBus.on('flight:tutorial', p => setLesson(p.text ? { ...p, text: p.text } : null)), []);
+  return lesson;
 }
 
 export function useMoney(): number {
@@ -82,6 +84,7 @@ export interface FlightStatus {
   retractableGear: boolean;
   dropReady: boolean;
   cratesLeft: number;
+  dropZone: DropZoneStatus | null;
   weatherCaution: string | null;
   iceLoad: number;
   avionicsOut: boolean;

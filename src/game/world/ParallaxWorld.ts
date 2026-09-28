@@ -202,9 +202,14 @@ export class ParallaxWorld {
   readonly drops = new SupplyDrops();
   /**
    * Where a crate released right now would land, set by FlightScene each
-   * frame while a camp is signalling — null hides the reticle.
+   * frame while a site is signalling — null hides the reticle. `altM` is the
+   * roof or ground it would come down on.
    */
-  dropReticle: { x: number; onTarget: boolean; spreadM: number } | null = null;
+  dropReticle: { x: number; altM: number; onTarget: boolean; spreadM: number } | null = null;
+  /** The drop window to fly into, while a site is calling. */
+  dropGuide: { lo: number; hi: number; fade: number } | null = null;
+  /** A height band the training script wants you in. Drawn like the drop window. */
+  trainGuide: { lo: number; hi: number; fade: number } | null = null;
   /** The moving air the aircraft actually flies through. */
   readonly air = new AirMass();
   /** Drifting weather cells — the weather is a place, not a global mood. */
@@ -302,8 +307,29 @@ export class ParallaxWorld {
     this.raiders.layout(this.hazards.zones, seed, x => this.waterAt(x) > 0.25);
     // The air has to know what it is flowing around, or there is no rotor.
     this.air.reset(seed);
-    this.air.setObstacles(this.hazards.all.map(h => ({ x: h.x, heightM: h.heightM })));
+    // Only what is tall enough to shed a rotor — a town is forty sheds
+    this.air.setObstacles(this.hazards.all
+      .filter(h => h.heightM >= 14)
+      .map(h => ({ x: h.x, heightM: h.heightM })));
     this.traffic.reset(seed);
+  }
+
+  /**
+   * The training circuit: the same world, with its furniture placed by hand.
+   * See Hazards.generateTraining.
+   */
+  setTrainingRoute(routeKm: number, townName: string): { mastX: number; lineEndX: number; zone: [number, number] } {
+    const seed = 4242;
+    this.routeSeed = seed;
+    this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
+    const marks = this.hazards.generateTraining(routeKm, townName);
+    this.raiders.layout(this.hazards.zones, seed, () => false, ['nest']);
+    this.air.reset(seed);
+    this.air.setObstacles(this.hazards.all
+      .filter(h => h.heightM >= 14)
+      .map(h => ({ x: h.x, heightM: h.heightM })));
+    this.traffic.reset(seed);
+    return marks;
   }
 
   /** Crowd colouring, tied to the current palette so figures sit in the scene. */
@@ -410,7 +436,7 @@ export class ParallaxWorld {
         rim: this.pal.skyBot, daylight: this.dl,
       });
       this.raiders.draw(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl, this.crowdStyle, dt);
-      this.drops.drawCamps(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl);
+      this.drops.drawSites(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl, this.crowdStyle);
     }
 
     this.tracerGfx.clear();
@@ -422,8 +448,7 @@ export class ParallaxWorld {
     this.traffic.draw(this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
     this.drops.drawAir(
       this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t,
-      this.dropReticle?.x ?? null, this.dropReticle?.onTarget ?? false,
-      this.dropReticle?.spreadM ?? 10,
+      this.dropReticle, this.dropGuide ?? this.trainGuide,
     );
   }
 

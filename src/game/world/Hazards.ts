@@ -1,5 +1,9 @@
 import Phaser from 'phaser';
 import { drawObstacle, type ObstacleKind, type ObstacleStyle } from './Obstacles';
+import {
+  layoutSettlements, layoutTrainingSettlements, isBuilding, spanBand, drawBuilding, drawTownGround, drawPole, drawSpan,
+  type BuildingKind, type Span, type Town,
+} from './Towns';
 
 /**
  * Everything along the route that can actually hurt you.
@@ -14,7 +18,7 @@ import { drawObstacle, type ObstacleKind, type ObstacleStyle } from './Obstacles
  * climbing is safe but costs fuel, time and airspeed.
  */
 
-export type HazardKind = ObstacleKind;
+export type HazardKind = ObstacleKind | BuildingKind;
 
 export interface Hazard {
   x: number;          // world px
@@ -34,6 +38,14 @@ export interface Hazard {
   damage?: number;
   /** Seconds since it was struck, for the fire and the smoke column. */
   hitAge?: number;
+  /** A flat roof a crate can land on, metres; null for a pitched or domed top. */
+  roofM?: number | null;
+  /**
+   * Whether it gets the OBSTACLE AHEAD klaxon. A town is forty buildings;
+   * sounding the alarm for every shed on the way through would make the one
+   * call that matters — the tower block in front of you — unhearable.
+   */
+  warn?: boolean;
 }
 
 /*
@@ -43,7 +55,7 @@ export interface Hazard {
  */
 
 /** Height range in metres for each obstacle, and its collision footprint. */
-const HEIGHT_BAND: Record<HazardKind, [number, number]> = {
+const HEIGHT_BAND: Record<ObstacleKind, [number, number]> = {
   mast:    [34, 78],   // the one that genuinely makes you climb
   turbine: [36, 68],
   stack:   [26, 54],
@@ -52,7 +64,7 @@ const HEIGHT_BAND: Record<HazardKind, [number, number]> = {
   crane:   [16, 34],
 };
 
-const HALF_WIDTH: Record<HazardKind, number> = {
+const HALF_WIDTH: Record<ObstacleKind, number> = {
   mast: 11, turbine: 14, stack: 15, tower: 22, pylon: 20, crane: 30,
 };
 
@@ -64,34 +76,51 @@ function hash(i: number): number {
 export class Hazards {
   private list: Hazard[] = [];
   private hostile: Array<[number, number]> = [];
+  private spanList: Span[] = [];
+  private townList: Town[] = [];
 
-  /** Lay out obstacles and hostile ground between the two airfields. */
+  /** Lay out towns, power lines, obstacles and hostile ground between the two airfields. */
   generate(startPx: number, endPx: number, seed: number): void {
     this.list = [];
     this.hostile = [];
+    this.spanList = [];
+    this.townList = [];
     const span = endPx - startPx;
     if (span <= 0) return;
 
+    // Towns and the lines that feed them go down first; everything else
+    // has to find room around them.
+    const built = layoutSettlements(startPx, endPx, seed);
+    this.townList = built.towns;
+    this.spanList = built.spans;
+    for (const t of built.towns) this.list.push(...t.buildings);
+    for (const s of built.substations) this.list.push(s.hazard);
+    this.list.push(...built.pylons);
+
     // Obstacles: spaced with a guaranteed gap so the route is always flyable.
-    // These are WORLD PIXELS — at 6 px/m a 2400 px gap is ~400 m of flying.
+    // These are WORLD PIXELS — at 9 px/m a 2400 px gap is ~270 m of flying.
     const minGap = 2400;
     let x = startPx + 1800;
     let i = seed * 31;
     while (x < endPx - 400) {
       // Weighted so the tall ones — the masts and turbines that actually force
       // a climb — stay uncommon, and the low clutter is what you meet most.
+      // No lone pylons: a pylon with nothing either side of it was the
+      // "wires connected to air" problem. They only come in lines now.
       const r = hash(i++);
-      const kind: HazardKind =
-        r < 0.22 ? 'mast' :
-        r < 0.42 ? 'tower' :
-        r < 0.58 ? 'crane' :
-        r < 0.74 ? 'pylon' :
-        r < 0.89 ? 'stack' : 'turbine';
+      const kind: ObstacleKind =
+        r < 0.26 ? 'mast' :
+        r < 0.50 ? 'tower' :
+        r < 0.69 ? 'crane' :
+        r < 0.87 ? 'stack' : 'turbine';
       const band = HEIGHT_BAND[kind];
       const heightM = band[0] + hash(i++) * (band[1] - band[0]);
-      this.list.push({ x, kind, heightM, halfWidth: HALF_WIDTH[kind], seed: i });
+      const half = HALF_WIDTH[kind];
+      const clear = !built.reserved.some(([ra, rb]) => x + half + 200 > ra && x - half - 200 < rb);
+      if (clear) this.list.push({ x, kind, heightM, halfWidth: half, seed: i, warn: true });
       x += minGap + hash(i++) * 3000;
     }
+    this.list.sort((p, q) => p.x - q.x);
 
     /*
      * Hostile stretches: raider-held bands wide enough to be a real crossing
@@ -125,6 +154,34 @@ export class Hazards {
     }
   }
 
+  /**
+   * The training circuit, laid out by hand in the order the lesson needs:
+   * one mast, then a power line into a town with people waiting in it, then
+   * a short stretch of raider ground held by rifles only.
+   *
+   * Returns where each lesson lives, so the script can tell when it is done.
+   */
+  generateTraining(routeKm: number, townName: string): { mastX: number; lineEndX: number; zone: [number, number] } {
+    const M = 9;
+    const km = (k: number): number => k * 1000 * M;
+    this.list = [];
+    this.hostile = [];
+    const mastX = km(Math.min(3.1, routeKm * 0.24));
+    this.list.push({ x: mastX, kind: 'mast', heightM: 46, halfWidth: HALF_WIDTH.mast, seed: 77, warn: true });
+    const t0 = km(routeKm * 0.44), t1 = t0 + km(0.5);
+    const built = layoutTrainingSettlements(t0, t1, 4242, townName);
+    this.townList = built.towns;
+    this.spanList = built.spans;
+    for (const t of built.towns) this.list.push(...t.buildings);
+    for (const s of built.substations) this.list.push(s.hazard);
+    this.list.push(...built.pylons);
+    this.list.sort((p, q) => p.x - q.x);
+    const zone: [number, number] = [km(routeKm * 0.64), km(routeKm * 0.64 + 0.7)];
+    this.hostile.push(zone);
+    const lineEndX = built.towns[0].poles[0].x;
+    return { mastX, lineEndX, zone };
+  }
+
   /** The obstacle the aircraft is currently inside, if any. */
   /** Every structure on the route — the air flows around all of them. */
   get all(): ReadonlyArray<Hazard> { return this.list; }
@@ -143,9 +200,10 @@ export class Hazards {
     h.heightM *= 1 - 0.34 * amount;
   }
 
-  /** Advance the burn on anything that has been hit. */
+  /** Advance the burn on anything that has been hit, and the swing of cut wires. */
   tickDamage(dt: number): void {
     for (const h of this.list) if (h.damage) h.hitAge = (h.hitAge ?? 0) + dt;
+    for (const s of this.spanList) if (s.cutT !== undefined) s.cutT += dt;
   }
 
   collisionAt(worldX: number, altitudeM: number): Hazard | null {
@@ -155,17 +213,114 @@ export class Hazards {
     return null;
   }
 
-  /** Nearest obstacle ahead of the aircraft, for the HUD warning. */
-  ahead(worldX: number, rangePx: number): { hazard: Hazard; distancePx: number } | null {
-    let best: { hazard: Hazard; distancePx: number } | null = null;
-    for (const h of this.list) {
-      const d = h.x - worldX;
-      if (d > 0 && d < rangePx && (!best || d < best.distancePx)) {
-        best = { hazard: h, distancePx: d };
-      }
+  /**
+   * Did the aircraft fly through a cable between the last frame and this one?
+   *
+   * A crossing test rather than a proximity test: a wire is a line with no
+   * thickness worth speaking of, and at 150 m/s with a warp on, a point test
+   * steps straight over it. Being inside the band of conductors counts, and so
+   * does ending up on the other side of it from where you started.
+   */
+  wireStrike(prevX: number, prevAlt: number, worldX: number, altM: number): Span | null {
+    const MARGIN = 1.2;
+    const side = (band: [number, number] | null, alt: number): number | null => {
+      if (!band) return null;
+      if (alt > band[1] + MARGIN) return 1;
+      if (alt < band[0] - MARGIN) return -1;
+      return 0;
+    };
+    for (const s of this.spanList) {
+      if (s.cutT !== undefined) continue;
+      if (worldX < s.a - 40 || worldX > s.b + 40) continue;
+      const now = side(spanBand(s, worldX), altM);
+      if (now === null) continue;
+      if (now === 0) return s;
+      const before = side(spanBand(s, prevX), prevAlt);
+      if (before !== null && before !== now) return s;
+    }
+    return null;
+  }
+
+  /** An aeroplane went through it: the span parts and hangs from its supports. */
+  cutSpan(s: Span, atX: number): void {
+    s.cutT = 0;
+    s.cutX = atX;
+  }
+
+  /**
+   * The highest surface a falling crate would come to rest on at `worldX`:
+   * a roof if there is a building under it, otherwise the ground.
+   */
+  surfaceAt(worldX: number): { altM: number; on: Hazard | null } {
+    let best: { altM: number; on: Hazard | null } = { altM: 0, on: null };
+    /*
+     * The list is sorted by x and nothing is wider than ~60 px either side,
+     * so a binary search to the left edge and a short scan is enough. The
+     * reticle calls this ninety times a frame; a full scan of a town was not
+     * going to survive that on a phone.
+     */
+    const from = worldX - 90;
+    let lo = 0, hi = this.list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.list[mid].x < from) lo = mid + 1; else hi = mid;
+    }
+    for (let i = lo; i < this.list.length; i++) {
+      const h = this.list[i];
+      if (h.x > worldX + 90) break;
+      if (!isBuilding(h.kind) || h.kind === 'substation') continue;
+      if (Math.abs(worldX - h.x) > h.halfWidth) continue;
+      const roof = h.roofM ?? h.heightM * 0.82;
+      if (roof > best.altM) best = { altM: roof, on: h };
     }
     return best;
   }
+
+  /**
+   * The tallest thing between two points, metres — buildings,
+   * pylons and cables alike. Used to tell the pilot how low they can safely
+   * come for a drop.
+   */
+  tallestBetween(x0: number, x1: number): number {
+    let top = 0;
+    for (const h of this.list) {
+      if (h.x + h.halfWidth >= x0 && h.x - h.halfWidth <= x1) top = Math.max(top, h.heightM);
+    }
+    for (const s of this.spanList) {
+      if (s.cutT !== undefined || s.b < x0 || s.a > x1) continue;
+      top = Math.max(top, s.topA, s.topB);
+    }
+    return top;
+  }
+
+  /**
+   * Nearest obstacle ahead worth a warning at this altitude.
+   *
+   * Skips what we are already comfortably above, so the klaxon names the
+   * thing we would actually hit rather than the shed in front of it.
+   */
+  ahead(worldX: number, rangePx: number, altM = -Infinity): { hazard: Hazard; distancePx: number } | null {
+    let best: { hazard: Hazard; distancePx: number } | null = null;
+    for (const h of this.list) {
+      if (h.warn === false) continue;
+      const d = h.x - worldX;
+      if (d <= 0 || d >= rangePx) continue;
+      if (altM > h.heightM + 12) continue;
+      if (!best || d < best.distancePx) best = { hazard: h, distancePx: d };
+    }
+    return best;
+  }
+
+  /** The town under a point, or starting within `aheadPx` of it. */
+  townAt(worldX: number, aheadPx = 0): Town | null {
+    for (const t of this.townList) {
+      if (worldX >= t.x0 - aheadPx && worldX <= t.x1) return t;
+    }
+    return null;
+  }
+
+  get towns(): ReadonlyArray<Town> { return this.townList; }
+  get spans(): ReadonlyArray<Span> { return this.spanList; }
 
   isHostile(worldX: number): boolean {
     return this.hostile.some(([a, b]) => worldX >= a && worldX <= b);
@@ -213,13 +368,28 @@ export class Hazards {
       }
     }
 
+    // Towns: the road and barricades, then the buildings standing on them
+    for (const town of this.townList) {
+      if (town.x1 - scrollX < -200 || town.x0 - scrollX > width + 200) continue;
+      drawTownGround(g, town, scrollX, baseY, width, style);
+    }
     for (const h of this.list) {
       const sx = h.x - scrollX;
       if (sx < -140 || sx > width + 140) continue;
       const topY = baseY - h.heightM * pxPerM;
-      drawObstacle(g, h.kind, sx, baseY, topY, h.halfWidth, h.seed, t, style);
+      if (isBuilding(h.kind)) drawBuilding(g, h, sx, baseY, pxPerM, t, style);
+      else drawObstacle(g, h.kind, sx, baseY, topY, h.halfWidth, h.seed, t, style);
       if (h.damage) this.drawStruck(g, h, sx, baseY, topY, t);
     }
+    // Poles, then every cable last so a conductor sits in front of its support
+    for (const town of this.townList) {
+      if (town.x1 - scrollX < -200 || town.x0 - scrollX > width + 200) continue;
+      for (const p of town.poles) {
+        const sx = p.x - scrollX;
+        if (sx > -30 && sx < width + 30) drawPole(g, p, sx, baseY, pxPerM, style.daylight);
+      }
+    }
+    for (const s of this.spanList) drawSpan(g, s, scrollX, baseY, pxPerM, width, t, style);
   }
 
   /**

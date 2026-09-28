@@ -26,7 +26,7 @@ function hash(i: number): number {
   return x - Math.floor(x);
 }
 
-function mix(a: number, b: number, t: number): number {
+export function mix(a: number, b: number, t: number): number {
   const u = Math.max(0, Math.min(1, t));
   const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
   const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
@@ -376,21 +376,19 @@ export function drawObstacle(
         g.lineStyle(0.9, STEEL, 0.8);
         g.lineBetween(sx - aw, ay, sx, ay - 7);
         g.lineBetween(sx + aw, ay, sx, ay - 7);
-        // Insulator strings and the cables they carry, sagging away both ways
+        /*
+         * Insulator strings only. The cables used to be drawn here too, as
+         * 120 px stubs sagging out from each arm and stopping in mid-air —
+         * wires connected to nothing. Pylons stand in lines now and the spans
+         * between them are drawn (and collided with) by Towns.ts, leaving
+         * from the bottom of exactly these insulators.
+         */
         for (const dir of [-1, 1]) {
           const ix = sx + dir * aw;
-          g.lineStyle(1, 0x4a4640, 0.9);
-          g.lineBetween(ix, ay, ix, ay + 6);
-          g.lineStyle(0.9, STEEL_DARK, 0.7);
-          g.beginPath();
-          g.moveTo(ix, ay + 6);
-          for (let k = 1; k <= 6; k++) {
-            const kt = k / 6;
-            const cx2 = ix + dir * 120 * kt;
-            const sag = Math.sin(kt * Math.PI) * 22;
-            g.lineTo(cx2, ay + 6 + sag);
-          }
-          g.strokePath();
+          g.lineStyle(1.2, 0x5a564c, 0.95);
+          g.lineBetween(ix, ay, ix, ay + h * 0.06);
+          g.fillStyle(0x6a665a, 0.9);
+          g.fillCircle(ix, ay + h * 0.06, 1.2);
         }
       }
       rustStreaks(g, sx, topY, baseY, w * 0.6, seed, 3);

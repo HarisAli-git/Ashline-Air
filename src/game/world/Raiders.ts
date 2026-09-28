@@ -286,6 +286,8 @@ export class Raiders {
   layout(
     zones: ReadonlyArray<readonly [number, number]>, seed: number,
     isWater: (worldX: number) => boolean = () => false,
+    /** Restrict the weapons to these kinds — the training circuit is rifles only. */
+    only: ReadonlyArray<EmplacementKind> | null = null,
   ): void {
     this.list = [];
     this.tracers = [];
@@ -326,6 +328,7 @@ export class Raiders {
            */
           kind = r < 0.72 ? 'gunboat' : 'camp';
         } else if (i === 0 || i === n - 1) kind = 'camp';
+        else if (only) kind = only[Math.floor(r * only.length) % only.length];
         else if (i === aaSlot) kind = 'aa';
         else if (r < 0.45) kind = 'nest';
         else if (r < 0.78) kind = 'technical';

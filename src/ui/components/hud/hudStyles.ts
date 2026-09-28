@@ -24,6 +24,8 @@ export function hudPanelHeight(uiScale: number, compact: boolean): number {
  */
 export function hudStyles(
   uiScale: number, compact: boolean, touch = false, radioChoices = 0,
+  /** A flight-school step is docked at the top (phones) — push the chips under it. */
+  lessonOnTop = false,
 ): HudStyles {
   const s = uiScale;
   const n = (v: number): number => Math.round(v * s);
@@ -84,7 +86,8 @@ export function hudStyles(
           // choice rather than a whole one. Derived from the real layout —
           // a fixed offset breaks the moment a call has two options not three.
           ? n(compact ? 48 : 72) + Math.ceil(radioChoices / (compact ? 2 : 1)) * n(compact ? 34 : 42)
-          : 0)}px + ${safeT})`,
+          : 0)
+        + (lessonOnTop ? n(84) : 0)}px + ${safeT})`,
       left: '50%', transform: 'translateX(-50%)',
       display: 'flex', flexDirection: 'column', alignItems: 'center',
       gap: n(3), pointerEvents: 'none', maxWidth: '80%',
@@ -180,6 +183,46 @@ export function hudStyles(
       letterSpacing: 1, textShadow: etch,
     },
 
+    // ── Drop card: the next site, top-left ──────────────────────────────
+    /*
+     * Top-left because it is the only corner nothing else lives in: the
+     * cautions own the top centre, the systems drawer the top right, and the
+     * two clusters the bottom corners. Pushed down past the time-warp tag,
+     * which Phaser draws at the very top-left.
+     */
+    dropCard: {
+      position: 'absolute',
+      top: `calc(${n(compact ? 38 : 48)}px + ${safeT})`,
+      left: `calc(${n(10) + leverClearance}px + ${safeL})`,
+      background: 'linear-gradient(90deg, rgba(10,14,8,0.62) 0%, rgba(10,14,8,0.0) 100%)',
+      borderLeft: '2px solid #9fe8b0',
+      padding: `${n(compact ? 3 : 5)}px ${n(compact ? 10 : 16)}px ${n(compact ? 3 : 5)}px ${n(7)}px`,
+      fontFamily: 'monospace',
+      textShadow: etch,
+      pointerEvents: 'none',
+      maxWidth: compact ? '46%' : 'min(360px, 40%)',
+      zIndex: 120,
+    },
+    dropHead: {
+      display: 'flex', alignItems: 'center', gap: n(6), flexWrap: 'wrap',
+      fontSize: n(compact ? 8.5 : 9.5), letterSpacing: 1.5, color: '#9fe8b0',
+      textTransform: 'uppercase', fontWeight: 'bold',
+    },
+    dropBadge: {
+      fontSize: n(compact ? 7.5 : 8.5), letterSpacing: 1, color: '#ff8844',
+      border: '1px solid #ff8844', borderRadius: 2, padding: `0 ${n(3)}px`,
+    },
+    dropRow: { display: 'flex', alignItems: 'baseline', gap: n(8), marginTop: n(1) },
+    dropKm: {
+      fontSize: n(compact ? 15 : 19), fontWeight: 'bold', color: '#e8d5b7', letterSpacing: -0.5,
+    },
+    dropPips: { display: 'flex', gap: n(2), alignItems: 'center' },
+    dropPip: { width: n(compact ? 6 : 7), height: n(compact ? 6 : 7), borderRadius: 1 },
+    dropCue: {
+      fontSize: n(compact ? 9.5 : 11.5), fontWeight: 'bold', letterSpacing: 1,
+      marginTop: n(compact ? 1 : 2), whiteSpace: 'nowrap',
+    },
+
     // ── Teaching line, first flight only ────────────────────────────────
     tutorial: {
       position: 'absolute',
@@ -195,9 +238,10 @@ export function hudStyles(
       // 40-86. The first value put this line at 62 — inside it — and the
       // screenshot showed the instruction hidden behind "Cargo aboard".
       bottom: `calc(${n(compact ? 68 : 96)}px + ${safeB})`,
-      left: '50%', transform: 'translateX(-50%)',
-      maxWidth: compact ? '88%' : 'min(720px, 80%)',
-      textAlign: 'center',
+      // Right of the aircraft, which sits on the runway at the left third
+      left: '40%',
+      maxWidth: compact ? (touch ? '45%' : '56%') : 'min(620px, 56%)',
+      textAlign: 'left',
       // A wash rather than a panel — it sits ON the world like the rest of it
       background: 'rgba(12,9,4,0.78)',
       borderLeft: '2px solid #ffd080',

@@ -1,9 +1,10 @@
 import React from 'react';
 import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo, useFlightStatus, useTutorial } from '../../store/gameStore';
-import { EventBus } from '../../../game/utils/EventBus';
+import { EventBus, type DropZoneStatus } from '../../../game/utils/EventBus';
 import { SaveService } from '../../../services/SaveService';
 import { useViewport } from '../../viewport';
 import { hudStyles, type HudStyles } from './hudStyles';
+import { TrainingPanel, TrainingDebrief } from './TrainingPanel';
 
 /**
  * The instrument panel was a slab.
@@ -38,7 +39,10 @@ export function FlightHUD(): React.ReactElement | null {
   if (!state) return null;
 
   const compact = vp.isCompact;
-  const styles = hudStyles(vp.uiScale, compact, vp.isTouch, event ? event.choices.length : 0);
+  const styles = hudStyles(
+    vp.uiScale, compact, vp.isTouch, event ? event.choices.length : 0,
+    compact && !!tutorial?.training,
+  );
 
   const { def } = SaveService.getActiveAircraft();
   const speedKmh = Math.round(state.speed * 3.6);
@@ -109,6 +113,11 @@ export function FlightHUD(): React.ReactElement | null {
             <Chip s={styles} tone="#ffd080" text={`OBSTACLE ${Math.round(status.obstacleAheadM)}m`} />
           )}
         </div>
+      )}
+
+      {/* ── The next drop site, while somebody is calling ────────────────── */}
+      {status?.dropZone && (
+        <DropCard s={styles} zone={status.dropZone} compact={compact} touch={vp.isTouch} />
       )}
 
       {/* ── Left cluster: the two numbers you actually fly by ───────────── */}
@@ -199,8 +208,66 @@ export function FlightHUD(): React.ReactElement | null {
         * the keyboard legend sits (FlightScene hides that while this shows,
         * so they can never overlap).
         */}
-      {tutorial && <div style={styles.tutorial}>{tutorial}</div>}
+      {tutorial && (tutorial.training
+        ? <TrainingPanel lesson={tutorial} scale={vp.uiScale} compact={compact} touch={vp.isTouch} />
+        : <div style={styles.tutorial}>{tutorial.text}</div>)}
+      <TrainingDebrief scale={vp.uiScale} compact={compact} />
     </>
+  );
+}
+
+/**
+ * Where the next drop is, and what to do about it RIGHT NOW.
+ *
+ * The question the old drop never answered was "when do I bring it down?" —
+ * the flare went up five seconds out and that was all the warning you got.
+ * This card answers it in one line that changes as you fly: hold, start
+ * down, you are in the band, drop now, too low. The green band drawn across
+ * the sky is the same window, so the card and the world always agree.
+ */
+function DropCard({ s, zone, compact, touch }: {
+  s: HudStyles; zone: DropZoneStatus; compact: boolean; touch: boolean;
+}): React.ReactElement {
+  const what = zone.kind === 'rooftop' ? 'rooftop' : zone.kind === 'square' ? 'square' : '';
+  const place = `${zone.place}${what ? ` ${what}` : ''}`;
+  const band = `${zone.lo}–${zone.hi} m`;
+  const cue: Record<DropZoneStatus['cue'], { text: string; tone: string; pulse?: boolean }> = {
+    hold: {
+      text: zone.descendInKm > 0.05
+        ? `HOLD · start down in ${zone.descendInKm.toFixed(1)} km`
+        : `HOLD · then down to ${band}`,
+      tone: '#c8b888',
+    },
+    descend: { text: `▼ DESCEND to ${band}`, tone: '#ffd080', pulse: true },
+    window: { text: `IN THE BAND · wait for the pin`, tone: '#9fe8b0' },
+    release: { text: touch ? 'PIN ON THEM · DROP NOW' : 'PIN ON THEM · SPACE', tone: '#b8ffc8', pulse: true },
+    low: { text: `▲ TOO LOW · climb to ${zone.lo} m`, tone: '#ff8844', pulse: true },
+    late: { text: 'PAST THEM · release earlier next time', tone: '#8a7a5a' },
+  };
+  const c = cue[zone.cue];
+  return (
+    <div style={s.dropCard}>
+      <div style={s.dropHead}>
+        <span>📦 {compact ? place : `Drop · ${place}`}</span>
+        {zone.besieged && <span style={s.dropBadge}>UNDER FIRE</span>}
+      </div>
+      <div style={s.dropRow}>
+        <span style={s.dropKm}>{zone.km < 1 ? `${Math.round(zone.km * 1000)} m` : `${zone.km.toFixed(1)} km`}</span>
+        <span style={s.dropPips} aria-label={`${zone.got} of ${zone.need} crates`}>
+          {Array.from({ length: zone.need }, (_, i) => (
+            <span key={i} style={{
+              ...s.dropPip,
+              background: i < zone.got ? '#9fe8b0' : 'transparent',
+              border: `1px solid ${i < zone.got ? '#9fe8b0' : '#6a7a5a'}`,
+            }} />
+          ))}
+        </span>
+      </div>
+      <div style={{
+        ...s.dropCue, color: c.tone,
+        animation: c.pulse ? 'aa-pulse 0.9s ease-in-out infinite' : 'none',
+      }}>{c.text}</div>
+    </div>
   );
 }
 
