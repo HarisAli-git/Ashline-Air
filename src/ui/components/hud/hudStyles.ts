@@ -191,7 +191,10 @@ export function hudStyles(
        * The persistent line sits higher and the transient one passes beneath
        * it, so they stack instead of crowding each other.
        */
-      bottom: `calc(${n(compact ? 46 : 62)}px + ${safeB})`,
+      // The toast is ~46 px tall on desktop and sits 40 px up, so it spans
+      // 40-86. The first value put this line at 62 — inside it — and the
+      // screenshot showed the instruction hidden behind "Cargo aboard".
+      bottom: `calc(${n(compact ? 68 : 96)}px + ${safeB})`,
       left: '50%', transform: 'translateX(-50%)',
       maxWidth: compact ? '88%' : 'min(720px, 80%)',
       textAlign: 'center',

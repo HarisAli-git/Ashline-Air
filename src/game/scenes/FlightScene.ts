@@ -22,6 +22,7 @@ import { CameraRig } from './CameraRig';
 import { routeKmBetween } from '../../services/RouteService';
 import { Director } from '../ai/Director';
 import { FlightTutorial } from './FlightTutorial';
+import { DROP_REWARD, cratesFor } from '../world/SupplyDrops';
 import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
 
@@ -164,6 +165,10 @@ export class FlightScene extends Phaser.Scene {
    */
   private tutorial: FlightTutorial | null = null;
   private tutorialLine: string | null = null;
+  /** Supply-drop tally for this flight, shown on the post-flight report. */
+  private dropStats = { dropped: 0, hits: 0, earned: 0 };
+  /** Departure settlement id — drop reputation is credited to its faction. */
+  private originId = '';
   /**
    * Projected fuel in the tank when you arrive, 0-1. Smoothed.
    *
@@ -343,6 +348,7 @@ export class FlightScene extends Phaser.Scene {
     }
     this.destinationName = destinationName;
     this.originBiome = biomeFor(contract?.originId);
+    this.originId = contract?.originId ?? '';
     this.destBiome = biomeFor(contract?.destinationId);
     EventBus.emit('flight:route-info', { routeKm: this.routeKm, destinationName });
 
@@ -362,6 +368,12 @@ export class FlightScene extends Phaser.Scene {
      */
     this.world.setBiomes(this.originBiome, this.destBiome);
     this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+    // Survivors along the route — something to do in the cruise. See SupplyDrops.
+    this.world.drops.layout(
+      this.routeKm * 1000 * WORLD_PX_PER_M, this.hashRoute(this.contractId),
+      cratesFor(SaveService.getActiveAircraft().def.stats.cargoCapacity),
+    );
+    this.dropStats = { dropped: 0, hits: 0, earned: 0 };
     // Weather becomes a set of places on this route rather than a global mood.
     this.world.weatherField.reset(
       this.hashRoute(this.contractId), this.routeKm * 1000 * WORLD_PX_PER_M,
@@ -469,8 +481,8 @@ export class FlightScene extends Phaser.Scene {
     // it can get.
     // G only appears for an aeroplane that actually has a retractable one.
     const keyLegend = this.aircraft.hasRetractableGear
-      ? 'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine/Restart   T: Time   M: Mute   ESC: Abort'
-      : 'W/S: Throttle   A/D: Pitch   F: Flaps   E: Engine/Restart   T: Time   M: Mute   ESC: Abort';
+      ? 'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine   SPACE: Drop   T: Time   M: Mute   ESC: Abort'
+      : 'W/S: Throttle   A/D: Pitch   F: Flaps   E: Engine   SPACE: Drop   T: Time   M: Mute   ESC: Abort';
     this.keyHintText = this.add.text(width / 2, height - 4, keyLegend,
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
@@ -493,6 +505,7 @@ export class FlightScene extends Phaser.Scene {
       T:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.T),
       M:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.M),
       ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
+      SPACE: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE),
     };
 
     // DEV: number keys force weather conditions, 0 pulls the next traffic
@@ -1392,6 +1405,9 @@ export class FlightScene extends Phaser.Scene {
       });
     }
 
+    // ── Supply drops ──────────────────────────────────────────────────────
+    this.updateDrops(sdt);
+
     // ── Tutorial, first flight only ───────────────────────────────────────
     if (this.tutorial) {
       const line = this.tutorial.update(this.state, {
@@ -1431,6 +1447,9 @@ export class FlightScene extends Phaser.Scene {
       trafficAvoid: this.trafficAvoid,
       fuelAtArrival: this.fuelAtArrival,
       retractableGear: this.aircraft.hasRetractableGear,
+      // A camp is signalling and there is something left to drop on it
+      dropReady: this.world.dropReticle !== null,
+      cratesLeft: this.world.drops.cratesLeft,
     });
   }
 
@@ -1500,6 +1519,84 @@ export class FlightScene extends Phaser.Scene {
     }
     this.iceLoad = rep.iceLoad;
     this.avionicsOut = rep.blackout > 0;
+  }
+
+  // ── Supply drops ──────────────────────────────────────────────────────────
+
+  /**
+   * Survivors, flares and crates — the cruise's one active thing to do.
+   *
+   * Runs the physics, raises the reticle while a camp is signalling, handles
+   * the release, and pays out on landing. Money is credited the moment the
+   * crate lands rather than at the end of the flight: it has been delivered,
+   * and it should survive you crashing ten minutes later.
+   */
+  private updateDrops(sdt: number): void {
+    const drops = this.world.drops;
+    const worldX = this.scrollX + AIRCRAFT_X;
+    const airborne = this.hasBeenAirborne && this.state.altitude > 3 && !this.landed;
+    const ev = drops.update(sdt, worldX, airborne);
+
+    if (ev.signalled) {
+      const touch = isTouchDevice();
+      // The first two ever get the full instruction; after that the flare speaks for itself
+      const seen = SaveService.get().player.stats.supplyDrops ?? 0;
+      SoundEngine.radio('Survivors on the ground ahead', { kind: 'traffic' });
+      EventBus.emit('ui:show-notification', {
+        message: seen < 2
+          ? `📦 Survivors ahead — ${touch ? 'tap DROP' : 'SPACE'} when the pin is on them. Lower is more accurate.`
+          : `📦 Survivors signalling ahead.`,
+        type: 'info',
+      });
+    }
+
+    // Reticle while there is someone to aim at
+    const site = airborne ? drops.activeSite(worldX) : null;
+    if (site && drops.cratesLeft > 0) {
+      const ix = drops.predictImpactX(worldX, this.state.altitude, this.state.groundSpeed);
+      this.world.dropReticle = {
+        x: ix,
+        onTarget: Math.abs(ix - site.x) / WORLD_PX_PER_M <= 55,
+        spreadM: drops.spreadM(this.state.altitude),
+      };
+    } else {
+      this.world.dropReticle = null;
+    }
+
+    // Release
+    const pressed = Phaser.Input.Keyboard.JustDown(this.keys.SPACE) || TouchInput.consume('drop');
+    if (pressed && airborne) {
+      if (drops.cratesLeft <= 0) {
+        EventBus.emit('ui:show-notification', { message: 'No crates left aboard.', type: 'info' });
+      } else if (drops.release(worldX, this.state.altitude, this.state.groundSpeed)) {
+        this.dropStats.dropped++;
+        SoundEngine.gearMove(false);    // the door and the thump of it going
+      }
+    }
+
+    // Landings
+    for (const hit of ev.landed) {
+      const r = DROP_REWARD[hit.result];
+      if (r.money > 0) {
+        const save = SaveService.get();
+        save.player.money += r.money;
+        save.player.stats.supplyDrops = (save.player.stats.supplyDrops ?? 0) + 1;
+        const origin = window.gameData.settlements.find(x => x.id === this.originId);
+        const rep = save.player.reputation.find(x => x.factionId === origin?.factionId);
+        if (rep) rep.points += r.rep;
+        SaveService.save(save.player, save.world);
+        EventBus.emit('player:money-changed', { amount: save.player.money, delta: r.money });
+        this.dropStats.hits++;
+        this.dropStats.earned += r.money;
+        SoundEngine.chime();
+      }
+      EventBus.emit('ui:show-notification', {
+        message: r.money > 0
+          ? `📦 ${r.line} — +₢${r.money.toLocaleString()}  (${Math.round(hit.distM)} m)`
+          : `📦 ${r.line} (${Math.round(hit.distM)} m off)`,
+        type: hit.result === 'bullseye' ? 'success' : r.money > 0 ? 'info' : 'warning',
+      });
+    }
   }
 
   // ── Other traffic ─────────────────────────────────────────────────────────
@@ -1904,6 +2001,7 @@ export class FlightScene extends Phaser.Scene {
       // What the world has worked out about you, in words. An adaptive system
       // nobody can see is indistinguishable from an unfair one.
       logbook: this.pilot.describe(),
+      drops: this.dropStats,
     };
     if (result.quality !== 'crash') {
       SoundEngine.chime();
@@ -1932,6 +2030,7 @@ export class FlightScene extends Phaser.Scene {
       engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
       overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true,
+      dropReady: false, cratesLeft: 0,
     });
     this.state.speed = 0;
     this.state.verticalSpeed = 0;

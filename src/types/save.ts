@@ -42,6 +42,8 @@ export interface PlayerStats {
   totalCargoDeliveredKg: number;
   totalEarned: number;
   perfectLandings: number;
+  /** Supply crates put on target, all time. Gates the first-time hint. */
+  supplyDrops?: number;
 }
 
 export interface WorldState {

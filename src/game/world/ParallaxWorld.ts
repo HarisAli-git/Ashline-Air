@@ -10,6 +10,7 @@ import {
   drawFighter, drawMuzzleFlash, drawWireFence, drawBarrier, garrisonPalette, RAIDER_PALETTE,
 } from './Figures';
 import { blendBiome, BIOMES, type BiomeId, type BiomeShape } from './Biomes';
+import { SupplyDrops } from './SupplyDrops';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -33,6 +34,21 @@ const CLOUD_LAYER_ALTS = [110, 190, 280, 385, 505, 650];
 export const PLANE_MIN_Y = 250;    // screen y the aircraft pins to above the band
 /** World px per metre flown — high so speed genuinely reads on screen. */
 export const WORLD_PX_PER_M = 9;
+
+/**
+ * Runway geometry, in screen px, shared by the strip and everything beside it.
+ *
+ * The deck straddles the aircraft's contact line: RUNWAY_FAR of it lies beyond
+ * the wheels, the rest in front. Anything that stands BESIDE the runway —
+ * hangar, towers, wire, the crew — therefore belongs on the far apron, above
+ * the deck's far edge. When the deck was moved to straddle the line those
+ * structures kept their old base at the contact line and ended up standing in
+ * the middle of the tarmac.
+ */
+export const RUNWAY_DECK = 34;
+export const RUNWAY_FAR = Math.round(RUNWAY_DECK * 0.38);
+/** Depth of the packed-earth apron beyond the far edge that structures stand on. */
+export const RUNWAY_APRON = 10;
 
 interface Palette {
   skyTop: number; skyBot: number; glow: number;
@@ -182,6 +198,13 @@ export class ParallaxWorld {
   readonly raiders = new Raiders();
   /** Other traffic sharing the airspace. */
   readonly traffic = new AirTraffic();
+  /** Survivors along the route, and the crates you put down to them. */
+  readonly drops = new SupplyDrops();
+  /**
+   * Where a crate released right now would land, set by FlightScene each
+   * frame while a camp is signalling — null hides the reticle.
+   */
+  dropReticle: { x: number; onTarget: boolean; spreadM: number } | null = null;
   /** The moving air the aircraft actually flies through. */
   readonly air = new AirMass();
   /** Drifting weather cells — the weather is a place, not a global mood. */
@@ -387,6 +410,7 @@ export class ParallaxWorld {
         rim: this.pal.skyBot, daylight: this.dl,
       });
       this.raiders.draw(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl, this.crowdStyle, dt);
+      this.drops.drawCamps(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl);
     }
 
     this.tracerGfx.clear();
@@ -396,6 +420,11 @@ export class ParallaxWorld {
     // conflict on screen is a conflict in the collision test.
     this.trafficGfx.clear();
     this.traffic.draw(this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
+    this.drops.drawAir(
+      this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t,
+      this.dropReticle?.x ?? null, this.dropReticle?.onTarget ?? false,
+      this.dropReticle?.spreadM ?? 10,
+    );
   }
 
   /**
@@ -613,8 +642,20 @@ export class ParallaxWorld {
       let h = Math.max(6, ampBase + sharp * ampVar);
       // Sandstone country: terrace the silhouette into flat-topped mesas
       if (sh.plateau > 0.02) {
+        /*
+         * Flat tops, SLOPED risers.
+         *
+         * Rounding to the nearest step made every riser a vertical cliff, so
+         * mesa country read as a stack of boxes. A smoothstep across the
+         * middle of each band keeps the tops flat — which is what makes it
+         * sandstone — and gives the faces the talus slope real ones have.
+         */
         const stepH = Math.max(12, ampBase * 0.42);
-        const terraced = Math.round(h / stepH) * stepH;
+        const band = h / stepH;
+        const lo = Math.floor(band);
+        const f = band - lo;
+        const e = Math.max(0, Math.min(1, (f - 0.3) / 0.4));
+        const terraced = (lo + e * e * (3 - 2 * e)) * stepH;
         h = h + (terraced - h) * sh.plateau;
       }
       return Math.max(6, h);
@@ -651,15 +692,47 @@ export class ParallaxWorld {
     g.closePath();
     g.fillPath();
 
-    // Darker lower mass — reads as valley shadow and gives the range depth
+    /*
+     * ── Light falls off down the face ────────────────────────────────────
+     *
+     * Every layer used to be ONE flat colour with a single shade band under
+     * it, which is the cut-paper look — "the world behind is way too boxy".
+     * Four nested silhouettes at shrinking heights, each a little darker,
+     * give the crests the light and the valleys the shadow while following
+     * the terrain's own shape rather than a flat horizontal gradient.
+     */
     if (opts.shade !== undefined) {
-      g.fillStyle(opts.shade, 0.55);
-      g.beginPath();
-      g.moveTo(xs[0], baseY + 60);
-      for (let i = 0; i < n; i++) g.lineTo(xs[i], baseY - hs[i] * 0.55);
-      g.lineTo(xs[n - 1], baseY + 60);
-      g.closePath();
-      g.fillPath();
+      const bands: Array<[number, number]> = [[0.80, 0.22], [0.62, 0.32], [0.44, 0.42], [0.26, 0.5]];
+      for (const [frac, a2] of bands) {
+        g.fillStyle(opts.shade, a2);
+        g.beginPath();
+        g.moveTo(xs[0], baseY + 60);
+        for (let i = 0; i < n; i++) g.lineTo(xs[i], baseY - hs[i] * frac);
+        g.lineTo(xs[n - 1], baseY + 60);
+        g.closePath();
+        g.fillPath();
+      }
+
+      /*
+       * Strata. Broken contour lines at fixed fractions of the local height,
+       * so they follow the land. On sandstone they are bedding planes, on
+       * the high ridges they are rock bands, and either way they are the
+       * surface detail the layer never had. Broken deterministically so they
+       * read as rock, not as a ruled line.
+       */
+      const strata = 0.07 + sh.plateau * 0.10 + sh.roughness * 0.03;
+      for (const frac of [0.88, 0.7, 0.52]) {
+        g.lineStyle(1, opts.shade, strata);
+        let open = false;
+        for (let i = 0; i < n; i++) {
+          const keep = Math.sin((i0 + i) * 1.7 + frac * 40 + seed) > -0.35;
+          const x = xs[i], y = baseY - hs[i] * frac;
+          if (keep && !open) { g.beginPath(); g.moveTo(x, y); open = true; }
+          else if (keep && open) g.lineTo(x, y);
+          else if (!keep && open) { g.strokePath(); open = false; }
+        }
+        if (open) g.strokePath();
+      }
     }
 
     // Lit crest line
@@ -1449,9 +1522,11 @@ export class ParallaxWorld {
     // destination's is at its strip entrance, overflown on approach.
     // The fortifications face open country: outbound from the origin field,
     // back down the route from the destination's.
-    this.drawAirfield(g, 10, scrollX, gy, 1);
-    if (this.loading) this.drawLoading(g, 10, scrollX, gy);
-    this.drawAirfield(g, dstFrom + 60, scrollX, gy, -1);
+    // The field stands beside the strip, so on the far apron — see RUNWAY_FAR.
+    const apronY = gy - RUNWAY_FAR - 2;
+    this.drawAirfield(g, 10, scrollX, apronY, 1);
+    if (this.loading) this.drawLoading(g, 10, scrollX, apronY, gy);
+    this.drawAirfield(g, dstFrom + 60, scrollX, apronY, -1);
     this.drawSettlement(g, oriFrom - 60, scrollX, gy, -1);
     this.drawSettlement(g, dstTo + 60, scrollX, gy, 1);
 
@@ -1489,8 +1564,15 @@ export class ParallaxWorld {
    * rather than a loading bar, and starting the engine is visibly the moment
    * you decide they are done.
    */
+  /**
+   * @param gy     the apron line the pallets sit on
+   * @param planeY the aircraft's contact line on the strip — the loaders walk
+   *               across from one to the other, so they are visibly crossing
+   *               to the aeroplane rather than pacing a line beside it
+   */
   private drawLoading(
     g: Phaser.GameObjects.Graphics, startPx: number, scrollX: number, gy: number,
+    planeY: number = gy,
   ): void {
     if (startPx - scrollX < -400) return;
     const t = this.t;
@@ -1531,15 +1613,17 @@ export class ParallaxWorld {
       const p2 = outbound ? phase * 2 : (1 - phase) * 2;
       const px = sx + (stackX - sx) * p2;
       const bob = Math.abs(Math.sin(t * 5 + k * 2)) * 1.6;
+      // Feet on the apron at the pallets, on the strip at the aircraft
+      const fy = planeY + (gy - planeY) * p2;
       // The crate on his shoulder, only on the way back
       if (!outbound) {
         g.fillStyle(0x5a4526, 1);
-        g.fillRect(px - 6, gy - 26 - bob, 12, 9);
+        g.fillRect(px - 6, fy - 26 - bob, 12, 9);
         g.lineStyle(1, 0x2a2010, 0.8);
-        g.strokeRect(px - 6, gy - 26 - bob, 12, 9);
+        g.strokeRect(px - 6, fy - 26 - bob, 12, 9);
       }
       drawFighter(
-        g, px, gy - bob, t, 900 + k * 31, 0.95,
+        g, px, fy - bob, t, 900 + k * 31, 0.95,
         outbound ? 1 : -1, outbound ? 'patrol' : 'work', -1.2, dl, RAIDER_PALETTE,
       );
     }
@@ -1866,7 +1950,7 @@ export class ParallaxWorld {
      * and the depth is what lets everything else on it — lights, markers,
      * rubber — actually be seen.
      */
-    const DECK = 34;
+    const DECK = RUNWAY_DECK;
     const BANDS = 11;
     /*
      * ── The strip straddles the contact line ──────────────────────────────
@@ -1878,7 +1962,7 @@ export class ParallaxWorld {
      * runway is ABOVE the point you are standing on it, so the deck has to
      * extend past the contact line for the wheels to be on the surface.
      */
-    const FAR = Math.round(DECK * 0.38);     // how much of the slab is beyond you
+    const FAR = RUNWAY_FAR;                  // how much of the slab is beyond you
     const top = gy - FAR;
     for (let i = 0; i < BANDS; i++) {
       const t = i / (BANDS - 1);
@@ -1892,7 +1976,17 @@ export class ParallaxWorld {
     }
     // Shoulders: graded dirt either side of the hard surface
     g.fillStyle(lerpColor(S.deck, this.pal.ground ?? 0x4a3d28, 0.6), 0.85);
-    g.fillRect(sx0, top - 4, sx1 - sx0, 4);
+    /*
+     * The far apron: packed earth between the strip and the field's buildings.
+     * It is what the hangar and the wire stand ON — without it they either sit
+     * in the tarmac or hang in the hills.
+     */
+    g.fillStyle(lerpColor(this.pal.groundTop ?? 0x6b5c38, 0x000000, 0.25), 1);
+    g.fillRect(sx0, top - RUNWAY_APRON, sx1 - sx0, RUNWAY_APRON);
+    g.fillStyle(lerpColor(this.pal.glow, 0x000000, 0.35), 0.35);
+    g.fillRect(sx0, top - RUNWAY_APRON, sx1 - sx0, 1.5);   // lit far lip
+    g.fillStyle(0x000000, 0.28);
+    g.fillRect(sx0, top - 2, sx1 - sx0, 2);                  // shadow onto the deck
     g.fillRect(sx0, top + DECK, sx1 - sx0, 5);
     // Painted edge lines, top and bottom of the deck
     g.lineStyle(1.2, S.mark, S.loose ? 0.10 : 0.34);

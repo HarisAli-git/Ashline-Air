@@ -108,6 +108,11 @@ export function TouchControls(): React.ReactElement | null {
           <PulseButton label="▶ START" scale={s} control="engine" wide danger />
         )}
 
+        {/* Survivors signalling: the drop is the only thing that matters now */}
+        {!engineOut && status?.dropReady && (
+          <PulseButton label={`📦 DROP ${status.cratesLeft}`} scale={s} control="drop" wide />
+        )}
+
         {/* Near the ground: the two things a takeoff or an approach needs */}
         {!engineOut && nearGround && (
           <>

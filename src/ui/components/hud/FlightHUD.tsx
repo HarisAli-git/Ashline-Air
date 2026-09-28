@@ -168,6 +168,10 @@ export function FlightHUD(): React.ReactElement | null {
         )}
 
         {/* Only when they matter — see the note at the top of this file */}
+        {/* Crates aboard — only while there is someone to drop them on */}
+        {status?.dropReady && (
+          <Mini s={styles} label="CRATES" value={`${status.cratesLeft}`} tone="#9fe8b0" />
+        )}
         {warnTemp && <Mini s={styles} label="ENG" value={`${tempPct}%`} tone="#ff8844" />}
         {warnHull && (
           <Mini s={styles} label="HULL" value={`${integrity.toFixed(0)}%`}

@@ -24,6 +24,8 @@ interface PostFlightData {
    * to say so out loud.
    */
   logbook?: string[];
+  /** Supply crates this flight: put out, landed on target, and what they paid. */
+  drops?: { dropped: number; hits: number; earned: number };
 }
 
 type Outcome = 'delivered' | 'cargo_ruined' | 'diverted' | 'crashed' | 'ferry';
@@ -287,6 +289,17 @@ export class PostFlightScene extends Phaser.Scene {
      * player an account of itself. Capped at two lines: this is a note in the
      * margin, not the subject of the screen.
      */
+    // Supply drops — already paid as they landed, so this is a record, not a payout
+    const dr = data.drops;
+    if (dr && dr.dropped > 0) {
+      info.push({
+        text: dr.hits > 0
+          ? `📦  ${dr.hits} of ${dr.dropped} crates reached survivors  (+₢${dr.earned.toLocaleString()})`
+          : `📦  ${dr.dropped} crate${dr.dropped > 1 ? 's' : ''} dropped — none reached anyone`,
+        size: 13, color: dr.hits > 0 ? '#9fe8b0' : '#8a7a5a',
+      });
+    }
+
     const logbook = data.logbook ?? [];
     if (logbook.length > 0) {
       info.push({ text: '- LOGBOOK -', size: 11, color: '#5a4a2a', h: 20 });

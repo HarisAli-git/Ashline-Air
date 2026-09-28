@@ -80,6 +80,8 @@ export interface FlightStatus {
   /** Projected fuel fraction left in the tank on arrival. See FlightScene. */
   fuelAtArrival: number;
   retractableGear: boolean;
+  dropReady: boolean;
+  cratesLeft: number;
   weatherCaution: string | null;
   iceLoad: number;
   avionicsOut: boolean;

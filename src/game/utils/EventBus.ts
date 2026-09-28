@@ -95,6 +95,9 @@ export interface GameEvents {
     fuelAtArrival: number;
     /** False for the two fixed-gear aircraft — no GEAR control should appear. */
     retractableGear: boolean;
+    /** A survivor camp is signalling and a crate could be dropped on it. */
+    dropReady: boolean;
+    cratesLeft: number;
     /** Icing / sand / avionics caution from the weather, or null. */
     weatherCaution: string | null;
     /** 0–1 ice on the airframe, for the gauge. */
