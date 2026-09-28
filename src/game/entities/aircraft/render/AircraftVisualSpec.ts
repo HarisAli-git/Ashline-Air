@@ -6,6 +6,8 @@
  * (centre of the fuselage at the wing root). Positive y is DOWN (screen space).
  */
 
+import type { GearStyle } from './GearArt';
+
 export type WingLayout = 'low' | 'high' | 'biplane';
 export type CanopyStyle = 'bubble' | 'windows';
 /**
@@ -112,6 +114,12 @@ export interface AircraftVisualSpec {
   prop: { r: number; bladePairs: 1 | 2 };
   gear: {
     fixed: boolean;          // true = non-retractable (always down, no doors)
+    /** What the legs are — see GearArt. Defaults to a plain oleo. */
+    style?: GearStyle;
+    /** How far forward of the hinge the axle sits (negative = trailing), units. */
+    rake?: number;
+    /** Tundra tyres: fat sidewalls, a small hub. */
+    tyre?: 'standard' | 'tundra';
     mainX: number;
     noseX: number | null;    // null = taildragger
     tailWheelX: number | null;
@@ -230,7 +238,8 @@ const RAW_SPECS: Record<string, RawSpec> = {
     engines: [{ frac: 0, nose: true, cowlLen: 24, cowlH: 24 }],
     prop:  { r: 20, bladePairs: 1 },
     // Ag-biplane: fat low-pressure mains on faired legs, small tailwheel.
-    gear:  { fixed: true, mainX: 18, noseX: null, tailWheelX: -58, strutLen: 16, wheelR: 8, hingeY: 11 },
+    gear:  { fixed: true, style: 'spatted', rake: 4, mainX: 18, noseX: null, tailWheelX: -58,
+             strutLen: 15.5, wheelR: 8.5, hingeY: 11 },
     flap:  { maxDeflectDeg: 30 },
     beacon: { x: -58, y: -36 },
     exhaust: { x: 40, y: 10 },
@@ -266,7 +275,8 @@ const RAW_SPECS: Record<string, RawSpec> = {
      * LONG LEGS: deep prop clearance and a lot of travel to soak up a gravel
      * bar. So the tyre comes down and the strut goes up.
      */
-    gear:  { fixed: true, mainX: 24, noseX: null, tailWheelX: -60, strutLen: 23, wheelR: 9.5, hingeY: 11 },
+    gear:  { fixed: true, style: 'bungee', rake: 4, tyre: 'tundra', mainX: 22, noseX: null,
+             tailWheelX: -60, strutLen: 23, wheelR: 9.5, hingeY: 11 },
     flap:  { maxDeflectDeg: 35 },
     beacon: { x: -62, y: -38 },
     exhaust: { x: 44, y: 12 },
@@ -302,7 +312,9 @@ const RAW_SPECS: Record<string, RawSpec> = {
     // High wing, so the mains live in sponsons on the fuselage sides: twin
     // wheels on each leg, twin nose wheels, short legs close to the ground
     // for truck-bed loading.
-    gear:  { fixed: false, mainX: 2, noseX: 82, tailWheelX: null, strutLen: 18, wheelR: 8,
+    // Short trailing-arm legs out of the fairings: the ATR sits LOW, which is
+    // the point of it — the cabin floor is at truck-bed height.
+    gear:  { fixed: false, style: 'trailing', rake: -5, mainX: 2, noseX: 82, tailWheelX: null, strutLen: 12, wheelR: 8,
              hingeY: 13, mainDual: true, noseDual: true, noseWheelR: 6,
              sponson: { x: 2, w: 46, h: 13 } },
     flap:  { maxDeflectDeg: 38 },
@@ -346,7 +358,9 @@ const RAW_SPECS: Record<string, RawSpec> = {
     // The one genuine TANDEM bogie in the fleet: two wheels one behind the
     // other on each main leg, which is why it is the only aircraft here that
     // shows more than one main wheel from the side.
-    gear:  { fixed: false, mainX: 6, noseX: 90, tailWheelX: null, strutLen: 17, wheelR: 10,
+    // Stubby legs with the tandem pair tucked half up inside the sponson,
+    // the way a C-130 actually squats on the ramp.
+    gear:  { fixed: false, style: 'sponson', rake: 0, mainX: 6, noseX: 90, tailWheelX: null, strutLen: 9, wheelR: 10,
              hingeY: 15, mainWheels: 2, noseDual: true, noseWheelR: 7,
              sponson: { x: 6, w: 62, h: 15 } },
     flap:  { maxDeflectDeg: 40 },

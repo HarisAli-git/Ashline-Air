@@ -77,6 +77,7 @@ export interface FlightStatus {
   stall: boolean;
   overspeed: boolean;
   obstacleAheadM: number | null;
+  obstacleLabel: string | null;
   trafficDeltaM: number | null;
   trafficAvoid: 1 | -1 | null;
   /** Projected fuel fraction left in the tank on arrival. See FlightScene. */
@@ -110,15 +111,69 @@ export function useCargo(): { average: number; count: number } | null {
   return cargo;
 }
 
-export function useNotification(): { message: string; type: string } | null {
-  const [note, setNote] = useState<{ message: string; type: string } | null>(null);
+export interface Note {
+  id: number;
+  message: string;
+  type: string;
+  /** How many times this exact line has arrived while it was showing. */
+  count: number;
+  born: number;
+  ttl: number;
+}
+
+const NOTE_RANK: Record<string, number> = { info: 0, success: 1, warning: 2, danger: 3 };
+
+/** Long enough to read, and more for the things that matter. */
+function noteTtl(type: string, message: string): number {
+  const base = ({ info: 3200, success: 3600, warning: 4600, danger: 6000 } as Record<string, number>)[type] ?? 3600;
+  return base + Math.max(0, message.length - 48) * 35;
+}
+
+/**
+ * The message queue.
+ *
+ * It was one slot with a fixed four-second timer per message, and the timers
+ * were never cancelled — a message arriving three seconds after another was
+ * wiped by the FIRST one's timer a second later, so anything that came in a
+ * burst (and in a fight everything does) flashed up and vanished unread.
+ *
+ * Now each line has its own lifetime, a repeat bumps a counter instead of
+ * stacking a copy, and when the stack is full the least important line goes
+ * first — a routine radio call never pushes a stall warning off the screen.
+ */
+export function useNotifications(max: number): Note[] {
+  const [notes, setNotes] = useState<Note[]>([]);
   useEffect(() => {
-    return EventBus.on('ui:show-notification', ({ message, type }) => {
-      setNote({ message, type });
-      setTimeout(() => setNote(null), 4000);
+    let seq = 0;
+    const off = EventBus.on('ui:show-notification', ({ message, type }) => {
+      const now = performance.now();
+      setNotes(list => {
+        const same = list.find(n => n.message === message);
+        if (same) {
+          return list.map(n => n === same
+            ? { ...n, count: n.count + 1, born: now, ttl: noteTtl(type, message) } : n);
+        }
+        const next = [...list, { id: ++seq, message, type, count: 1, born: now, ttl: noteTtl(type, message) }];
+        while (next.length > max) {
+          let victim = 0;
+          for (let i = 1; i < next.length; i++) {
+            if ((NOTE_RANK[next[i].type] ?? 0) < (NOTE_RANK[next[victim].type] ?? 0)) victim = i;
+          }
+          next.splice(victim, 1);
+        }
+        return next;
+      });
     });
-  }, []);
-  return note;
+    const timer = setInterval(() => {
+      const now = performance.now();
+      setNotes(list => {
+        const kept = list.filter(n => now - n.born < n.ttl);
+        return kept.length === list.length ? list : kept;
+      });
+    }, 200);
+    return () => { off(); clearInterval(timer); };
+  }, [max]);
+  return notes;
 }
 
 export function useEventModal(): FlightEventDefinition | null {

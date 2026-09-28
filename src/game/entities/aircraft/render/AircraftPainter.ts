@@ -27,7 +27,6 @@ export interface AircraftTexKeys {
   propBlade: string;
   propDisc: string;
   propDiscBlur: string;
-  gearStrut: string;
   wheel: string;
   gearDoor: string;
   flap: string;
@@ -707,31 +706,31 @@ export function ensureAircraftTextures(
 
   // ── Landing gear parts ─────────────────────────────────────────────────────
   const gr = spec.gear;
-  bake(scene, k('gearStrut'), 12, gr.strutLen + 8, 6, 2, p => {
-    p.rrect(-1.8, 0, 3.6, gr.strutLen, 1.5, pal.metal, 1);
-    p.rrect(-1.2, gr.strutLen * 0.55, 2.4, gr.strutLen * 0.4, 1, 0xd8d4c8, 0.85); // polished oleo
-    p.line(-1.5, gr.strutLen * 0.45, 2.8, gr.strutLen * 0.62, 1.2, pal.metal, 0.9); // torque link
-    p.line(2.8, gr.strutLen * 0.62, -1.5, gr.strutLen * 0.8, 1.2, pal.metal, 0.9);
-  });
+  /*
+   * An aircraft wheel, not a cart wheel. The old one had five spokes, which
+   * is a bicycle; aircraft wheels are a solid split hub with a ring of bolts
+   * and a deep tyre. Tundra tyres are the same wheel with the hub shrunk and
+   * the sidewall fattened. A pale creep mark on the sidewall is what lets you
+   * see it turning.
+   */
   bake(scene, k('wheel'), gr.wheelR * 2 + 4, gr.wheelR * 2 + 4, gr.wheelR + 2, gr.wheelR + 2, p => {
     const R = gr.wheelR;
-    p.circle(0, 0, R, 0x1d1b18, 1);                                  // tyre
-    // Tread blocks around the circumference — these are what actually read as
-    // rotation once the wheel is turning
-    for (let i = 0; i < 10; i++) {
-      const a = (i / 10) * Math.PI * 2;
-      const c = Math.cos(a), s = Math.sin(a);
-      p.line(c * R * 0.82, s * R * 0.82, c * (R - 0.4), s * (R - 0.4), 1.5, 0x35312b, 0.95);
+    const tundra = gr.tyre === 'tundra';
+    const hubR = R * (tundra ? 0.36 : 0.5);
+    p.circle(0, 0, R, 0x1b1916, 1);                                   // tyre
+    p.strokeEllipse(0, 0, R * 1.62, R * 1.62, R * (tundra ? 0.3 : 0.2), 0x2c2924, 1); // sidewall
+    p.strokeEllipse(0, 0, R * 2 - 1.2, R * 2 - 1.2, 0.9, 0x3a362e, 1); // tread shoulder
+    // Light catching the top of the tyre
+    p.line(-R * 0.55, -R * 0.72, R * 0.2, -R * 0.9, 1.1, 0x5a554a, 0.7);
+    p.circle(0, 0, hubR, mixHex(pal.metal, 0x000000, 0.18), 1);        // hub
+    p.strokeEllipse(0, 0, hubR * 2, hubR * 2, 0.8, mixHex(pal.metal, 0x000000, 0.5), 1);
+    for (let i = 0; i < 6; i++) {                                     // bolt ring
+      const a = (i / 6) * Math.PI * 2;
+      p.circle(Math.cos(a) * hubR * 0.62, Math.sin(a) * hubR * 0.62, Math.max(0.45, hubR * 0.1),
+        mixHex(pal.metal, 0xffffff, 0.45), 1);
     }
-    p.strokeEllipse(0, 0, R * 2 - 1.4, R * 2 - 1.4, 0.8, 0x3c382f, 1);
-    // Hub with spokes
-    p.circle(0, 0, R * 0.52, mixHex(pal.metal, 0x000000, 0.25), 1);
-    for (let i = 0; i < 5; i++) {
-      const a = (i / 5) * Math.PI * 2;
-      p.line(0, 0, Math.cos(a) * R * 0.48, Math.sin(a) * R * 0.48, 1.3, mixHex(pal.metal, 0xffffff, 0.35), 0.95);
-    }
-    p.circle(0, 0, R * 0.2, 0x14120e, 1);                            // axle
-    p.circle(-R * 0.14, -R * 0.14, R * 0.08, 0xffffff, 0.35);        // hub glint
+    p.circle(0, 0, hubR * 0.3, mixHex(pal.metal, 0xffffff, 0.25), 1);   // cap
+    p.rect(R * 0.72, -0.7, R * 0.18, 1.4, 0xd8d0b8, 0.75);              // creep mark
   });
   bake(scene, k('gearDoor'), 20, 6, 1, 1, p => {
     p.rrect(0, 0, 18, 4, 1.5, pal.hullShade, 1);
@@ -756,7 +755,6 @@ export function ensureAircraftTextures(
     propBlade: k('propBlade'),
     propDisc: k('propDisc'),
     propDiscBlur: k('propDiscBlur'),
-    gearStrut: k('gearStrut'),
     wheel: k('wheel'),
     gearDoor: k('gearDoor'),
     elevator: k('elevator'),

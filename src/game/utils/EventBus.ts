@@ -27,6 +27,14 @@ export interface DropZoneStatus {
   cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late';
   /** How far until you should start down, km. */
   descendInKm: number;
+  /**
+   * The drop meter, once the flare is up: metres from where a crate would
+   * land now to the people (positive = still ahead of it), the half-width of
+   * the "on them" window, and seconds until the two meet.
+   */
+  gapM: number | null;
+  windowM: number;
+  releaseIn: number | null;
 }
 
 export interface GameEvents {
@@ -124,6 +132,8 @@ export interface GameEvents {
     stall: boolean;
     overspeed: boolean;
     obstacleAheadM: number | null;
+    /** What it is — "TOWER BLOCK", "POWER LINES" — for the caution chip. */
+    obstacleLabel: string | null;
     /** Conflicting traffic's height minus ours, metres. Null when clear. */
     trafficDeltaM: number | null;
     /** Which way to go to miss it: +1 climb, -1 descend. */

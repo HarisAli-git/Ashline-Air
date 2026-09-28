@@ -95,7 +95,19 @@ export interface Town {
   /** A flat roof people have retreated to, if there is one fit for it. */
   refuge: Hazard | null;
   poles: Pole[];
+  /** Raiders have it surrounded — the one drop on the route that is under fire. */
+  besieged?: boolean;
 }
+
+/**
+ * The drop run: how far before and after a site you are down low, world px.
+ * No gun may reach any of it unless the site is besieged on purpose.
+ * Before = the last ~10 s in the band; after = the climb back out.
+ */
+export const DROP_RUN_BEFORE_PX = 1100 * M;
+export const DROP_RUN_AFTER_PX = 450 * M;
+/** The longest reach of any raider weapon (AA, 3200 px) plus a margin. */
+export const GUN_REACH_PX = 3300;
 
 export interface Substation {
   x: number;
@@ -450,13 +462,40 @@ export function layoutTrainingSettlements(x0: number, x1: number, seed: number, 
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
-const WALLS = [0x40392f, 0x48392c, 0x3b3934, 0x4b3e30, 0x36312b, 0x4a3326];
+/**
+ * How a place builds. A town in the red rock is adobe with flat roofs and
+ * beams through the walls; up at the relay it is dark timber under steep,
+ * snow-loaded roofs; on the marsh it stands on stilts; round the works it is
+ * brick. Only the drawing changes — footprints and heights, and so every
+ * collision, are the same whatever the style.
+ */
+export type TownStyle = 'plain' | 'adobe' | 'alpine' | 'marsh' | 'brick';
+
+export function townStyleFor(biome: string): TownStyle {
+  switch (biome) {
+    case 'redrock': return 'adobe';
+    case 'highreach': return 'alpine';
+    case 'saltmarsh': return 'marsh';
+    case 'industrial': case 'cinder': return 'brick';
+    default: return 'plain';
+  }
+}
+
+const WALLS_BY: Record<TownStyle, number[]> = {
+  plain:  [0x40392f, 0x48392c, 0x3b3934, 0x4b3e30, 0x36312b, 0x4a3326],
+  adobe:  [0x8a6440, 0x9a7048, 0x7e5a3a, 0xa27a52, 0x8e6a48],
+  alpine: [0x4a3424, 0x553b28, 0x3e2e22, 0x4c3a2c],
+  marsh:  [0x4a5558, 0x55605e, 0x404a4c, 0x5a5448],
+  brick:  [0x5a3226, 0x4e2c22, 0x633a2a, 0x54362a],
+};
+const SNOW = 0xe8eef0;
 const TRIM = 0x15110d;
 const LAMP = 0xe8a848;
 
 /** Palette for one building, pulled toward the sky so distance reads. */
-function wallFor(seed: number, style: ObstacleStyle): number {
-  return mix(WALLS[Math.floor(hash(seed + 31) * WALLS.length)], style.rim, 0.10);
+function wallFor(seed: number, style: ObstacleStyle, look: TownStyle = 'plain'): number {
+  const set = WALLS_BY[look];
+  return mix(set[Math.floor(hash(seed + 31) * set.length)], style.rim, 0.10);
 }
 
 /** Lit face, shade face: the two rectangles that turn a shape into a solid. */
@@ -500,11 +539,26 @@ export function drawBuilding(
   g: Phaser.GameObjects.Graphics,
   b: Hazard, sx: number, baseY: number, pxPerM: number, t: number, style: ObstacleStyle,
 ): void {
+  const look: TownStyle = b.look ?? 'plain';
+  // The roof is where the collision says it is, whatever the style
   const top = baseY - b.heightM * pxPerM;
+  // On the marsh the living floors stand on stilts above the flood line; the
+  // building is as tall as ever, it just starts higher.
+  if (look === 'marsh' && (b.kind === 'house' || b.kind === 'shack' || b.kind === 'warehouse')) {
+    const lift = Math.min(2.4, b.heightM * 0.3) * pxPerM;
+    g.lineStyle(2, 0x2a2420, 1);
+    for (let k = -1; k <= 1; k += 0.5) {
+      const x = sx + k * b.halfWidth * 0.85;
+      g.lineBetween(x, baseY, x, baseY - lift);
+    }
+    g.lineStyle(1, 0x2a2420, 0.7);
+    g.lineBetween(sx - b.halfWidth * 0.85, baseY - lift * 0.4, sx + b.halfWidth * 0.85, baseY - lift * 0.4);
+    baseY -= lift;
+  }
   const h = baseY - top;
   const hw = b.halfWidth;
   const L = sx - hw, R = sx + hw;
-  const wall = wallFor(b.seed, style);
+  const wall = wallFor(b.seed, style, look);
   const dark = mix(wall, 0x000000, 0.45);
   const night = 1 - style.daylight;
   const seed = b.seed;
@@ -512,6 +566,24 @@ export function drawBuilding(
   // Cast shadow away from the low sun, like every other structure
   g.fillStyle(0x000000, 0.2 + style.daylight * 0.1);
   g.fillEllipse(sx + h * 0.28, baseY + 1, hw * 2.1 + h * 0.5, 8 + hw * 0.18);
+
+  // Adobe: no pitched roofs at all — a flat roof, a soft parapet, and the
+  // ends of the roof beams poking out through the wall.
+  if (look === 'adobe' && (b.kind === 'house' || b.kind === 'shack')) {
+    g.fillStyle(wall, 1);
+    g.fillRoundedRect(L, top, hw * 2, h, Math.min(4, h * 0.2));
+    g.fillStyle(mix(wall, 0xffffff, 0.12), 1);
+    g.fillRect(L + 1, top, hw * 2 - 2, 2.5);
+    g.fillStyle(0x3a2a1c, 1);
+    for (let x = L + 5; x < R - 3; x += 9) g.fillRect(x, top + h * 0.18, 5, 2.2);
+    windows(g, L + 6, R - 6, top + h * 0.38, baseY - 6, seed, night, 14, 12, 4, 5, 0.3);
+    g.fillStyle(TRIM, 1);
+    const dh = Math.min(12, h * 0.5);
+    g.fillRect(sx - 3, baseY - dh, 6, dh);
+    g.fillCircle(sx, baseY - dh, 3);
+    faces(g, L, top, hw * 2, h, style);
+    return;
+  }
 
   switch (b.kind) {
     case 'shack': {
@@ -752,6 +824,26 @@ export function drawBuilding(
 
     default:
       break;
+  }
+
+  // Up at the relay every roof carries snow
+  if (look === 'alpine') {
+    g.lineStyle(2.6, SNOW, 0.95);
+    if (b.kind === 'house') {
+      const eave = top + h * 0.38, apex = sx - hw * 0.08;
+      g.lineBetween(L - 4, eave + 1, apex, top);
+      g.lineBetween(apex, top, R + 4, eave + 1);
+    } else if (b.kind === 'church') {
+      g.lineBetween(L - 3, baseY - h * 0.36, sx + hw * 0.2, baseY - h * 0.48);
+    } else if (b.kind === 'warehouse') {
+      // Along each tooth's slope, not a line floating over the peaks
+      const eave = top + h * 0.3;
+      const teeth = Math.max(2, Math.round(hw / 14));
+      const tw = (hw * 2) / teeth;
+      for (let i = 0; i < teeth; i++) g.lineBetween(L + i * tw, eave, L + i * tw + tw * 0.8, top + 1);
+    } else if (b.kind !== 'silo' && b.kind !== 'watertower') {
+      g.lineBetween(L - 1, top - 1, R + 1, top - 1);
+    }
   }
 
   // A few chimneys smoke even now: somebody is cooking

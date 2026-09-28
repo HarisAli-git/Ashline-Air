@@ -9,8 +9,9 @@ import { drawUndead, drawCorpse, drawHorde, undeadKindFor, type CrowdStyle } fro
 import {
   drawFighter, drawMuzzleFlash, drawWireFence, drawBarrier, garrisonPalette, RAIDER_PALETTE,
 } from './Figures';
-import { blendBiome, BIOMES, type BiomeId, type BiomeShape } from './Biomes';
+import { blendBiome, dominantBiome, BIOMES, type BiomeId, type BiomeShape } from './Biomes';
 import { SupplyDrops } from './SupplyDrops';
+import { routeSpanPx } from './RoutePreview';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -300,11 +301,14 @@ export class ParallaxWorld {
   setRoute(routeKm: number, seed: number): void {
     this.routeSeed = seed;
     this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
-    const destPx = Math.max(2000 * WORLD_PX_PER_M, routeKm * 1000 * WORLD_PX_PER_M);
-    this.hazards.generate(450 * WORLD_PX_PER_M, destPx - 300 * WORLD_PX_PER_M, seed);
+    // The same span the dispatch board previews — see RoutePreview
+    const [spanA, spanB] = routeSpanPx(routeKm);
+    // The country each point is in, crossing over on the same S-curve as the land
+    const from = this.biomeFrom, to = this.biomeTo, end = this.routeEndPx;
+    this.hazards.generate(spanA, spanB, seed, x => dominantBiome(from, to, x / end));
     // The layout needs to know which positions are afloat, so a stretch over
     // the channels comes out as gun barges rather than sandbag nests.
-    this.raiders.layout(this.hazards.zones, seed, x => this.waterAt(x) > 0.25);
+    this.raiders.layout(this.hazards.zones, seed, x => this.waterAt(x) > 0.25, null, this.hazards.zoneWeapons);
     // The air has to know what it is flowing around, or there is no rotor.
     this.air.reset(seed);
     // Only what is tall enough to shed a rotor — a town is forty sheds
@@ -322,7 +326,8 @@ export class ParallaxWorld {
     const seed = 4242;
     this.routeSeed = seed;
     this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
-    const marks = this.hazards.generateTraining(routeKm, townName);
+    const home = this.biomeFrom;
+    const marks = this.hazards.generateTraining(routeKm, townName, () => home);
     this.raiders.layout(this.hazards.zones, seed, () => false, ['nest']);
     this.air.reset(seed);
     this.air.setObstacles(this.hazards.all

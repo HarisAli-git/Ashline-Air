@@ -288,6 +288,8 @@ export class Raiders {
     isWater: (worldX: number) => boolean = () => false,
     /** Restrict the weapons to these kinds — the training circuit is rifles only. */
     only: ReadonlyArray<EmplacementKind> | null = null,
+    /** Per-zone restriction, aligned with `zones` — a besieged town is rifles only. */
+    zoneOnly: ReadonlyArray<ReadonlyArray<string> | null> = [],
   ): void {
     this.list = [];
     this.tracers = [];
@@ -311,7 +313,8 @@ export class Raiders {
       // emplacement had a 22% chance of being one, so a typical zone fielded
       // two batteries whose 4.4 km reach overlapped the entire stretch. That
       // is what made it feel like AA was everywhere.
-      const aaZone = rnd(seed * 53 + z * 17) < 0.45;
+      const limit = (only ?? zoneOnly[z] ?? null) as ReadonlyArray<EmplacementKind> | null;
+      const aaZone = !limit && rnd(seed * 53 + z * 17) < 0.45;
       const aaSlot = aaZone ? 1 + Math.floor(rnd(seed * 71 + z) * Math.max(1, n - 2)) : -1;
 
       for (let i = 0; i < n; i++) {
@@ -328,7 +331,7 @@ export class Raiders {
            */
           kind = r < 0.72 ? 'gunboat' : 'camp';
         } else if (i === 0 || i === n - 1) kind = 'camp';
-        else if (only) kind = only[Math.floor(r * only.length) % only.length];
+        else if (limit) kind = limit[Math.floor(r * limit.length) % limit.length];
         else if (i === aaSlot) kind = 'aa';
         else if (r < 0.45) kind = 'nest';
         else if (r < 0.78) kind = 'technical';

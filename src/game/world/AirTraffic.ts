@@ -69,6 +69,8 @@ const ADVISORY_SECONDS = 9;
 const ADVISORY_ALT_M = 26;
 
 const MAX_CONCURRENT = 2;
+/** Lowest anyone else will cruise, m — clear of the tallest mast (78 m) and every tower block. */
+const TRAFFIC_FLOOR_M = 95;
 
 /** Who is on the other end of the radio. */
 const CALLSIGN: Record<TrafficKind, string> = {
@@ -222,7 +224,19 @@ export class AirTraffic {
     const offset = conflicting
       ? (rnd(id + 13) - 0.5) * 9
       : (rnd(id + 13) > 0.5 ? 1 : -1) * (32 + rnd(id + 17) * 40);
-    const alt = Math.max(14, ctx.planeAlt + offset);
+    /*
+     * Nobody cruises through the rooftops.
+     *
+     * Traffic used to spawn at YOUR height give or take a few metres with a
+     * 14 m floor, so the moment you came down to drop a crate an airliner-
+     * shaped hauler turned up at chimney height, which no pilot on earth does.
+     * Everyone else keeps above the tallest thing on the route. If you are
+     * down in the weeds they go over the top at their own level.
+     */
+    const low = ctx.planeAlt < TRAFFIC_FLOOR_M - 15;
+    const alt = low
+      ? TRAFFIC_FLOOR_M + 25 + rnd(id + 43) * 110
+      : Math.max(TRAFFIC_FLOOR_M, ctx.planeAlt + offset);
 
     let wx: number, vx: number, dir: 1 | -1;
     if (headOn) {
@@ -324,6 +338,8 @@ export class AirTraffic {
       const err = p.cruiseAlt - p.alt;
       p.vAlt += (Phaser.Math.Clamp(err * 0.08, -7, 7) - p.vAlt) * Math.min(1, dt * 0.9);
     }
+    // A break downward stops at the floor — dodging you is not worth a mast
+    if (p.alt < TRAFFIC_FLOOR_M && p.vAlt < 0) p.vAlt *= Math.max(0, 1 - dt * 4);
   }
 
   advisory(planeWorldX: number, planeAlt: number, planeSpeedPx: number): TrafficAdvisory | null {

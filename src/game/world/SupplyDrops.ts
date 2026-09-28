@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { drawFighter, type FighterPalette } from './Figures';
 import { drawUndead, undeadKindFor, type CrowdStyle } from './Crowds';
-import type { Town } from './Towns';
+import { DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, type Town } from './Towns';
 import type { Hazard } from './Hazards';
 
 /**
@@ -75,6 +75,8 @@ export interface DropSite {
   /** Seconds since the last crate landed on them, for the marker. */
   resultT: number;
   earned: number;
+  /** People out fetching crates that landed near them. */
+  fetches: Fetch[];
 }
 
 export interface Crate {
@@ -91,6 +93,17 @@ export interface Crate {
   landedT: number;
   /** The roof it came to rest on, if any. */
   onRoofX: number | null;
+  /** Somebody has carried it off — stop drawing it on the ground. */
+  taken?: boolean;
+}
+
+/** Somebody running out to a crate and carrying it back. */
+interface Fetch {
+  crate: Crate;
+  from: number;
+  t: number;
+  run: number;
+  seed: number;
 }
 
 export interface CrateLanding {
@@ -99,6 +112,8 @@ export interface CrateLanding {
   distM: number;
   money: number;
   rep: number;
+  /** It landed near them but where they cannot get to it — a street full of the dead. */
+  unreachable?: boolean;
 }
 
 /** What happened this frame, for FlightScene to act on. */
@@ -201,8 +216,9 @@ export class SupplyDrops {
 
     towns.forEach((t, i) => {
       const s = seed * 17 + i * 29;
-      // Not every town is calling for help — some are doing fine
-      if (towns.length > 1 && rnd(s) < 0.22) return;
+      // Not every town is calling for help — some are doing fine. A town
+      // under siege always is.
+      if (towns.length > 1 && !t.besieged && rnd(s) < 0.22) return;
       if (t.refuge && !opts.squaresOnly && rnd(s + 1) < 0.45) {
         const r = t.refuge;
         this.sites.push(this.site(r.x, s, 'rooftop', t.name, r.roofM ?? r.heightM,
@@ -220,7 +236,10 @@ export class SupplyDrops {
     const n = Math.max(1, Math.round(routeEndPx / PER));
     const start = routeEndPx * 0.14, span = routeEndPx * 0.72;
     const nearTown = (x: number): boolean =>
-      towns.some(t => x > t.x0 - 700 * M && x < t.x1 + 700 * M);
+      towns.some(t => x > t.x0 - 700 * M && x < t.x1 + 700 * M)
+      // A camp is never put where a gun can reach its drop run
+      || (world?.zones ?? []).some(([a, b]) =>
+        x > a - GUN_REACH_PX - DROP_RUN_AFTER_PX && x < b + GUN_REACH_PX + DROP_RUN_BEFORE_PX);
     for (let i = 0; i < (opts.camps === false ? 0 : n); i++) {
       const slice = span / n;
       let x = start + slice * (i + 0.2 + rnd(seed * 13 + i) * 0.6);
@@ -230,8 +249,20 @@ export class SupplyDrops {
       this.sites.push(this.site(x, s, 'camp', CAMP_NAMES[Math.floor(rnd(s + 4) * CAMP_NAMES.length)],
         0, null, 2 + Math.floor(rnd(seed + i * 5) * 3), 1));
     }
+    // Every route has somebody to help. If the rolls left nobody, the first
+    // town calls; failing that, a camp in the first spot no gun can reach.
     if (this.sites.length === 0) {
-      this.sites.push(this.site(routeEndPx * 0.5, seed, 'camp', CAMP_NAMES[0], 0, null, 3, 1));
+      const t = towns[0];
+      if (t) {
+        this.sites.push(this.site(t.squareX, seed, 'square', t.name, 0, null, 5, 2));
+      } else {
+        let x = routeEndPx * 0.5;
+        for (let k = 0; k <= 24; k++) {
+          const c = routeEndPx * (0.2 + (k / 24) * 0.6);
+          if (!nearTown(c)) { x = c; break; }
+        }
+        this.sites.push(this.site(x, seed, 'camp', CAMP_NAMES[0], 0, null, 3, 1));
+      }
     }
     this.sites.sort((a, b) => a.x - b.x);
 
@@ -258,7 +289,7 @@ export class SupplyDrops {
     return {
       x, seed, people, kind, place, surfaceM, roof, besieged: false, need, got: 0,
       bandLo: 18, bandHi: 42, state: 'waiting', inboundT: -1, flareT: -1,
-      result: null, resultT: 99, earned: 0,
+      result: null, resultT: 99, earned: 0, fetches: [],
     };
   }
 
@@ -352,6 +383,11 @@ export class SupplyDrops {
     const ev: DropEvents = { inbound: null, signalled: null, landed: [], completed: [] };
 
     for (const s of this.sites) {
+      for (const f of s.fetches) {
+        f.t += dt;
+        if (f.t > f.run) f.crate.taken = true;
+      }
+      s.fetches = s.fetches.filter(f => f.t < f.run * 2 + 0.5);
       if (s.inboundT >= 0) s.inboundT += dt;
       if (s.flareT >= 0) s.flareT += dt;
       s.resultT += dt;
@@ -395,8 +431,10 @@ export class SupplyDrops {
         }
       }
     }
-    // Keep the ground tidy: a landed crate lingers long enough to be seen
-    this.crates = this.crates.filter(c => !c.landed || c.landedT < 9);
+    // Keep the ground tidy: a landed crate lingers long enough to be seen,
+    // unless somebody is out fetching it
+    this.crates = this.crates.filter(c =>
+      !c.landed || c.landedT < 9 || this.sites.some(s => s.fetches.some(f => f.crate === c)));
     return ev;
   }
 
@@ -426,9 +464,23 @@ export class SupplyDrops {
       if (c.onRoofX !== null && (result === 'bullseye' || result === 'good')) result = 'close';
     }
     if (!site || result === 'miss') return { site: null, result: 'miss', distM: best, money: 0, rep: 0 };
+    // On a rooftop, near is not good enough: a crate in the street is a
+    // crate they cannot reach, so it neither pays nor counts
+    if (site.kind === 'rooftop' && c.onRoofX === null) {
+      return { site, result: 'close', distM: best, money: 0, rep: 0, unreachable: true };
+    }
 
     site.got++;
     if (!site.result || RANK[result] > RANK[site.result]) site.result = result;
+    // Somebody runs out for it — unless it is in a street full of the dead
+    const reachable = site.kind !== 'rooftop' || c.onRoofX !== null;
+    if (reachable) {
+      const from = site.x + (c.wx > site.x ? 10 : -10);
+      site.fetches.push({
+        crate: c, from, t: 0, seed: site.seed + site.got * 13,
+        run: Phaser.Math.Clamp(Math.abs(c.wx - from) / 70, 0.8, 5),
+      });
+    }
     site.resultT = 0;
     const base = DROP_REWARD[result];
     const money = Math.round(base.money * this.payMult(site) / 10) * 10;
@@ -451,6 +503,23 @@ export class SupplyDrops {
       else if (s.kind === 'square') this.drawSquare(g, s, sx, groundY, t, dl, calling);
       else this.drawCamp(g, s, sx, groundY, t, dl, calling);
       if (s.besieged) this.drawDefences(g, s, sx, groundY - s.surfaceM * pxPerM, t, dl);
+      // Runners: out to the crate, then back with it on their shoulder
+      for (const f of s.fetches) {
+        const out = f.t < f.run;
+        const k = out ? f.t / f.run : Math.min(1, (f.t - f.run) / f.run);
+        const x = out ? f.from + (f.crate.wx - f.from) * k : f.crate.wx + (f.from - f.crate.wx) * k;
+        const fx = x - scrollX;
+        const fy = groundY - f.crate.alt * pxPerM;
+        const face: 1 | -1 = (out ? f.crate.wx > f.from : f.from > f.crate.wx) ? 1 : -1;
+        drawFighter(g, fx, fy, t * 1.8, f.seed, 0.9, face, 'patrol', -1.2, dl,
+          s.kind === 'square' ? TOWNSFOLK_PALETTE : SURVIVOR_PALETTE);
+        if (!out) {
+          g.fillStyle(0x6a5430, 1);
+          g.fillRect(fx - 5, fy - 27, 11, 8);
+          g.lineStyle(1, 0x2a2010, 0.9);
+          g.strokeRect(fx - 5, fy - 27, 11, 8);
+        }
+      }
       // Crates that made it, stacked where they can reach them
       const shown = Math.min(3, s.got);
       const baseY = groundY - s.surfaceM * pxPerM;
@@ -719,6 +788,7 @@ export class SupplyDrops {
       if (sx < -60 || sx > width + 60) continue;
       const cy = groundY - c.alt * pxPerM;
       if (c.landed) {
+        if (c.taken) continue;
         if (c.landedT < 1.2) {
           const k = c.landedT / 1.2;
           g.fillStyle(0xcab89a, 0.4 * (1 - k));
@@ -778,4 +848,22 @@ export const DROP_REWARD: Record<DropResult, { money: number; rep: number; line:
  */
 export function cratesFor(cargoKg: number): number {
   return Phaser.Math.Clamp(Math.round(4 + Math.sqrt(Math.max(0, cargoKg)) / 7), 5, 14);
+}
+
+/**
+ * What the people on the ground say when a crate lands — their voice, not a
+ * score. Only the first crate at a site and the last one get a call, so the
+ * radio does not narrate every box.
+ */
+export function siteReply(result: DropResult, kind: SiteKind, seed: number): string {
+  const pick = (lines: string[]): string => lines[Math.abs(Math.floor(seed)) % lines.length];
+  if (kind === 'rooftop' && result === 'close') {
+    return pick(['It went in the street — we cannot get down to it!', 'Missed the roof. The dead are all over it.']);
+  }
+  switch (result) {
+    case 'bullseye': return pick(['Right on us! Thank you, pilot!', 'Dead centre — we have it!', 'Landed at our feet. God bless.']);
+    case 'good': return pick(['We see it — going out for it now.', 'Close enough, we are on it.', 'Got eyes on the crate, thank you!']);
+    case 'close': return pick(['Long walk, but we will fetch it.', 'It is past the wire — we will manage.']);
+    default: return 'Nothing here, pilot.';
+  }
 }

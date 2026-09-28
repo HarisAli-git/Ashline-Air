@@ -6,12 +6,12 @@ import { CrashSequence } from '../entities/aircraft/CrashSequence';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { WeatherHazards } from '../entities/weather/WeatherHazards';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
-import { biomeFor } from '../world/Biomes';
+import { biomeFor, climateAt } from '../world/Biomes';
 import { WeatherFX } from '../world/WeatherFX';
 import { FlightEventService } from '../../services/FlightEventService';
 import { SaveService } from '../../services/SaveService';
 import { CargoHold } from '../entities/CargoHold';
-import { EventBus } from '../utils/EventBus';
+import { EventBus, type DropZoneStatus } from '../utils/EventBus';
 import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
@@ -23,8 +23,10 @@ import { routeKmBetween } from '../../services/RouteService';
 import { Director } from '../ai/Director';
 import { FlightTutorial } from './FlightTutorial';
 import { TrainingFlight, type TrainingView } from './TrainingFlight';
-import { DROP_REWARD, cratesFor, type DropSite } from '../world/SupplyDrops';
+import { DROP_REWARD, cratesFor, siteReply, type DropSite } from '../world/SupplyDrops';
 import { STRUCTURE_NAME } from '../world/Towns';
+import { routeSeed } from '../world/RoutePreview';
+import { press } from '../utils/controls';
 import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
 
@@ -187,9 +189,14 @@ export class FlightScene extends Phaser.Scene {
   /** The drop window, faded in while a site is calling. */
   private dropGuideFade = 0;
   /** What the HUD card says about the next site. See updateDrops. */
-  private dropZone: DropZoneCard | null = null;
+  private dropZone: DropZoneStatus | null = null;
   /** Sites we have already told to start down, so it is said once. */
   private readonly descentCalled = new Set<DropSite>();
+  /** Slow-motion over the release, 1 = normal time. See updateDrops. */
+  private dropSlow = 1;
+  /** Last whole second of the run-in countdown that ticked. */
+  private dropTickAt = 99;
+  private dropWindowToned = false;
   /** Departure settlement id — drop reputation is credited to its faction. */
   private originId = '';
   /**
@@ -436,7 +443,16 @@ export class FlightScene extends Phaser.Scene {
     this.dropGuideFade = 0;
     this.dropZone = null;
     this.descentCalled.clear();
-    // Weather becomes a set of places on this route rather than a global mood.
+    this.dropSlow = 1;
+    this.dropTickAt = 99;
+    this.dropWindowToned = false;
+    // Weather becomes a set of places on this route rather than a global mood,
+    // and each place gets the weather of the country it is in.
+    {
+      const endPx = this.routeKm * 1000 * WORLD_PX_PER_M;
+      const from = this.originBiome, to = this.destBiome;
+      this.world.weatherField.setClimate(x => climateAt(from, to, x / endPx));
+    }
     this.world.weatherField.reset(
       this.hashRoute(this.contractId), this.routeKm * 1000 * WORLD_PX_PER_M,
     );
@@ -670,7 +686,7 @@ export class FlightScene extends Phaser.Scene {
         this.world.loading = false;
         SoundEngine.chime();
         EventBus.emit('ui:show-notification', {
-          message: '📦 Cargo aboard and secured — press E to start the engine',
+          message: `📦 Cargo aboard — ${press('engine')} to start the engine`,
           type: 'success',
         });
       }
@@ -774,12 +790,8 @@ export class FlightScene extends Phaser.Scene {
       this.flapsToggleCooldown = 500;
       SoundEngine.flapMove();
       EventBus.emit('flight:flaps-toggled', { deployed: this.state.flapsDeployed });
-      EventBus.emit('ui:show-notification', {
-        message: this.state.flapsDeployed
-          ? 'Flaps DOWN — extra lift and a lower stall speed for takeoff/landing, at the cost of drag.'
-          : 'Flaps UP — clean wing for cruise.',
-        type: 'info',
-      });
+      // No toast: the FLAP mark on the HUD and the sound say it, and a
+      // paragraph about lift every time you touched the lever was noise.
     }
     if ((Phaser.Input.Keyboard.JustDown(this.keys.T) || TouchInput.consume('time'))) {
       if (this.timeScale === 4) {
@@ -806,7 +818,9 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // ── Time warp: everything below advances on scaled time ───────────────
-    const sdt = dt * this.timeScale;
+    // Warp speeds the quiet stretches; the drop run slows the one moment
+    // that is a matter of timing.
+    const sdt = dt * this.timeScale * this.dropSlow;
 
     // ── Weather → wind ─────────────────────────────────────────────────────
     this.weather.update(
@@ -1146,11 +1160,9 @@ export class FlightScene extends Phaser.Scene {
     return onOrigin || onDest;
   }
 
-  /** Stable numeric seed from a contract id. */
+  /** Stable numeric seed from a contract id — shared with the board's preview. */
   private hashRoute(id: string): number {
-    let h = 2166136261;
-    for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
-    return (h >>> 0) % 100000;
+    return routeSeed(id);
   }
 
   // ── Threats: obstacles, raider fire, engine reliability ───────────────────
@@ -1265,12 +1277,8 @@ export class FlightScene extends Phaser.Scene {
       this.hazardAlertAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
       // A pylon is the front of a whole line of them, and the call says so
-      const what = ahead.hazard.kind === 'pylon' ? '⚡ POWER LINES'
-        : `▲ ${STRUCTURE_NAME[ahead.hazard.kind] ?? 'OBSTACLE'}`;
-      EventBus.emit('ui:show-notification', {
-        message: `${what} AHEAD — ${Math.round(ahead.hazard.heightM)} m — CLIMB`,
-        type: 'warning',
-      });
+      // The caution chip names it and pulses; a toast saying the same thing
+      // underneath it was the same alert twice.
       this.disengageWarp('obstacle ahead');
     }
 
@@ -1296,11 +1304,8 @@ export class FlightScene extends Phaser.Scene {
     if (nowUnderFire !== this.underFire) {
       this.underFire = nowUnderFire;
       if (fire.engaged) {
+        // The chip carries it ("HEAVY MG — CLIMB 165m"); the sound says now
         SoundEngine.warn();
-        EventBus.emit('ui:show-notification', {
-          message: `⚠ ${fire.label} ENGAGING — CLIMB ABOVE ${Math.round(fire.clearAltitudeM)} m`,
-          type: 'danger',
-        });
         this.disengageWarp('taking ground fire');
       }
     }
@@ -1379,7 +1384,7 @@ export class FlightScene extends Phaser.Scene {
         SoundEngine.radio('Ashline flight, you are above your ceiling and the engine has quit. Get the nose down.',
           { kind: 'warning', station: 'ASHLINE CONTROL' });
         EventBus.emit('ui:show-notification', {
-          message: '✖ FLAMED OUT ABOVE THE CEILING — descend, then hold E to relight',
+          message: `✖ FLAMED OUT ABOVE THE CEILING — descend, then ${press('engine')} to relight`,
           type: 'danger',
         });
         this.disengageWarp('flamed out');
@@ -1409,7 +1414,7 @@ export class FlightScene extends Phaser.Scene {
           this.aircraft.stopEngine();
           SoundEngine.engineSputter();
           EventBus.emit('ui:show-notification', {
-            message: '✖ ENGINE FAILURE — hold E to restart, trade height for speed',
+            message: `✖ ENGINE FAILURE — ${press('engine')} to restart, trade height for speed`,
             type: 'danger',
           });
           this.disengageWarp('engine failure');
@@ -1579,6 +1584,9 @@ export class FlightScene extends Phaser.Scene {
       stall: this.stallWarning,
       overspeed,
       obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
+      obstacleLabel: ahead && alt < ahead.hazard.heightM + 18
+        ? (ahead.hazard.kind === 'pylon' ? 'POWER LINES' : STRUCTURE_NAME[ahead.hazard.kind] ?? 'OBSTACLE')
+        : null,
       trafficDeltaM: this.trafficAdvisory,
       trafficAvoid: this.trafficAvoid,
       fuelAtArrival: this.fuelAtArrival,
@@ -1623,7 +1631,7 @@ export class FlightScene extends Phaser.Scene {
       this.state.verticalSpeed -= 3 + Math.random() * 4;
       this.disengageWarp('lightning strike');
       EventBus.emit('ui:show-notification', {
-        message: '⚡ LIGHTNING STRIKE — engine out, instruments gone. Hold E to restart.',
+        message: `⚡ LIGHTNING STRIKE — engine out. ${press('engine')} to restart.`,
         type: 'danger',
       });
     }
@@ -1637,7 +1645,7 @@ export class FlightScene extends Phaser.Scene {
       this.disengageWarp('engine out');
       if (!rep.struck) {
         EventBus.emit('ui:show-notification', {
-          message: '✖ SAND HAS KILLED THE ENGINE — hold E to restart',
+          message: `✖ SAND HAS KILLED THE ENGINE — ${press('engine')} to restart`,
           type: 'danger',
         });
       }
@@ -1696,7 +1704,8 @@ export class FlightScene extends Phaser.Scene {
         : site.kind === 'square' ? `in ${site.place} square` : `at ${site.place}`;
       const crates = `${site.need} crate${site.need > 1 ? 's' : ''}`;
       SoundEngine.radio(
-        `Any aircraft, ${site.people} of us ${where}. We need ${crates}.`,
+        `Any aircraft, ${site.people} of us ${where}. We need ${crates}.`
+          + (site.besieged ? ' Raiders all round us — watch the rifles.' : ''),
         { kind: 'traffic', station: site.place.toUpperCase() },
       );
       EventBus.emit('ui:show-notification', {
@@ -1719,17 +1728,52 @@ export class FlightScene extends Phaser.Scene {
 
     // Reticle while there is someone to aim at
     const site = airborne ? drops.activeSite(worldX) : null;
+    let meter: { gapM: number; windowM: number; releaseIn: number } | null = null;
     if (site && drops.cratesLeft > 0) {
       const imp = drops.predictImpact(worldX, alt, this.state.groundSpeed);
+      const windowM = site.kind === 'rooftop' && site.roof ? site.roof.halfWidth / WORLD_PX_PER_M : 30;
+      const gapM = (site.x - imp.x) / WORLD_PX_PER_M;
       const onTarget = site.kind === 'rooftop' && site.roof
         ? Math.abs(imp.x - site.roof.x) <= site.roof.halfWidth && imp.altM > 1
-        : Math.abs(imp.x - site.x) / WORLD_PX_PER_M <= 30;
+        : Math.abs(gapM) <= windowM;
       this.world.dropReticle = {
         x: imp.x, altM: imp.altM, onTarget, spreadM: drops.spreadM(alt),
       };
+      meter = { gapM, windowM, releaseIn: (gapM - windowM * 0.4) / gs };
     } else {
       this.world.dropReticle = null;
     }
+
+    /*
+     * The run-in: ticks at three, two, one, and a tone on them — then a
+     * moment of slow motion over the release itself.
+     *
+     * At cruise the people cross from the edge of the screen to the aim point
+     * in about a second. That is a reflex test, not a drop, and on a phone it
+     * was effectively impossible. The ticks let you time it by ear from
+     * several seconds out; the slow motion (only while you are down in the
+     * window, and only for those two seconds) gives the eye a fair chance.
+     */
+    let slowTarget = 1;
+    if (meter && site) {
+      const inBand = alt <= site.bandHi + 12;
+      const whole = Math.ceil(meter.releaseIn);
+      if (inBand && whole >= 1 && whole <= 3 && whole < this.dropTickAt) {
+        this.dropTickAt = whole;
+        SoundEngine.dropTick(false);
+      }
+      const inWindow = Math.abs(meter.gapM) <= meter.windowM;
+      if (inBand && inWindow && !this.dropWindowToned) {
+        this.dropWindowToned = true;
+        SoundEngine.dropTick(true);
+      }
+      if (!inWindow && meter.gapM > meter.windowM) this.dropWindowToned = false;
+      if (inBand && meter.releaseIn < 2.2 && meter.gapM > -meter.windowM * 1.4) slowTarget = 0.45;
+    } else {
+      this.dropTickAt = 99;
+      this.dropWindowToned = false;
+    }
+    this.dropSlow += (slowTarget - this.dropSlow) * Math.min(1, (sdt / Math.max(0.05, this.dropSlow)) * 5);
 
     /*
      * The window, and when to start down into it.
@@ -1746,7 +1790,7 @@ export class FlightScene extends Phaser.Scene {
     if (next) {
       const km = Math.max(0, (next.x - worldX) / (WORLD_PX_PER_M * 1000));
       const needKm = (Math.max(0, alt - next.bandHi) / 7) * gs / 1000 + 0.35;
-      let cue: DropZoneCard['cue'];
+      let cue: DropZoneStatus['cue'];
       // The crates carry forward as they fall, so once the aim point is past
       // them any crate out of the door now lands beyond them
       const aimPast = this.world.dropReticle !== null && next.state === 'signalled'
@@ -1767,6 +1811,9 @@ export class FlightScene extends Phaser.Scene {
         place: next.place, kind: next.kind, km, need: next.need, got: next.got,
         lo: next.bandLo, hi: next.bandHi, besieged: next.besieged, cue,
         descendInKm: Math.max(0, km - needKm),
+        gapM: meter && site === next ? meter.gapM : null,
+        windowM: meter?.windowM ?? 30,
+        releaseIn: meter && site === next ? meter.releaseIn : null,
       };
       this.world.dropGuide = { lo: next.bandLo, hi: next.bandHi, fade: this.dropGuideFade };
     } else {
@@ -1811,8 +1858,13 @@ export class FlightScene extends Phaser.Scene {
           pay(hit.money, hit.rep);
         }
       }
-      const onRoofMiss = hit.site?.kind === 'rooftop' && hit.result === 'close';
-      const line = onRoofMiss ? 'In the street — they will have to go down for it' : r.line;
+      // The people answer the first crate, in their own words — and a crate
+      // they cannot reach, because that is worth knowing
+      if (hit.site && ((hit.money > 0 && hit.site.got === 1) || hit.unreachable)) {
+        SoundEngine.radio(siteReply(hit.result, hit.site.kind, hit.site.seed),
+          { kind: 'traffic', station: hit.site.place.toUpperCase() });
+      }
+      const line = hit.unreachable ? 'In the street — they cannot reach it. Put it on the roof' : r.line;
       const left = hit.site && hit.site.got < hit.site.need
         ? ` · ${hit.site.need - hit.site.got} more wanted` : '';
       // A crate that lands a long way from anybody was not a near miss
@@ -1822,6 +1874,7 @@ export class FlightScene extends Phaser.Scene {
           ? `📦 ${line} — that is how it is done`
           : hit.money > 0
             ? `📦 ${line} — +₢${hit.money.toLocaleString()}${left}`
+            : hit.unreachable ? `📦 ${line}`
             : wasted ? '📦 Nobody down there — that crate is gone'
               : `📦 ${line} (${Math.round(hit.distM)} m off)`,
         type: hit.result === 'bullseye' ? 'success' : hit.money > 0 ? 'info' : 'warning',
@@ -1833,7 +1886,7 @@ export class FlightScene extends Phaser.Scene {
       SoundEngine.radio(`${done.site.place} here. That is everything we asked for. God bless you, pilot.`,
         { kind: 'traffic', station: done.site.place.toUpperCase() });
       EventBus.emit('ui:show-notification', {
-        message: `✔ ${done.site.place} supplied — +₢${done.bonus.toLocaleString()} bonus`,
+        message: `✔ ${titleOf(done.site)} supplied — +₢${done.bonus.toLocaleString()} bonus`,
         type: 'success',
       });
     }
@@ -1866,11 +1919,7 @@ export class FlightScene extends Phaser.Scene {
     if (ra && this.nagTraffic.due(this.state.elapsedSeconds)) {
       this.trafficAlertAt = this.state.elapsedSeconds;
       SoundEngine.alarm();
-      const where = ra.dAltM >= 0 ? 'ABOVE' : 'BELOW';
-      EventBus.emit('ui:show-notification', {
-        message: `✈ TRAFFIC — ${Math.abs(Math.round(ra.dAltM))} m ${where} — ${ra.avoid > 0 ? 'CLIMB' : 'DESCEND'}`,
-        type: 'warning',
-      });
+      // The TRAFFIC chip says how far and which way; the alarm says now
       this.disengageWarp('traffic conflict');
     }
 
@@ -2062,7 +2111,7 @@ export class FlightScene extends Phaser.Scene {
     if (this.timeScale === 1) return;
     this.timeScale = 1;
     this.warpText.setVisible(false);
-    EventBus.emit('ui:show-notification', { message: `Time warp off — ${reason}.`, type: 'warning' });
+    EventBus.emit('ui:show-notification', { message: `»» Warp off — ${reason}`, type: 'info' });
   }
 
   // ── Event cinematics ──────────────────────────────────────────────────────
@@ -2363,7 +2412,7 @@ export class FlightScene extends Phaser.Scene {
     this.trafficAdvisory = null;
     EventBus.emit('flight:status', {
       engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
-      overspeed: false, obstacleAheadM: null, trafficDeltaM: null, trafficAvoid: null,
+      overspeed: false, obstacleAheadM: null, obstacleLabel: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true,
       dropReady: false, cratesLeft: 0, dropZone: null,
     });
@@ -2426,21 +2475,6 @@ export class FlightScene extends Phaser.Scene {
     return { verticalSpeed: vSpeed, horizontalSpeed: hSpeed, gearDown: this.state.gearDown,
       quality, integrityDamage, cargoDamagePercent: cargoDamage };
   }
-}
-
-/** The HUD card for the next drop site. Mirrors `flight:status.dropZone`. */
-interface DropZoneCard {
-  place: string;
-  kind: 'camp' | 'square' | 'rooftop';
-  km: number;
-  need: number;
-  got: number;
-  lo: number;
-  hi: number;
-  besieged: boolean;
-  /** hold: not yet; descend: start down; window: in the band; release: pin on them; low: climb; late: overshot */
-  cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late';
-  descendInKm: number;
 }
 
 /** "Millbrook rooftop", "a quarry camp" — what the call is about, in a few words. */

@@ -249,3 +249,43 @@ export function blendBiome(from: BiomeId, to: BiomeId, progress: number): Biome 
 
   return { palette, shape };
 }
+
+/**
+ * What the sky does in each country: relative odds of each kind of weather
+ * cell. There was one table for the whole world, so a flight across the red
+ * rock desert could run into a blizzard and a flight up to the relay could
+ * meet a sandstorm on the snowline. Weather is part of what makes a place
+ * that place — the desert blows sand, the coast sits in fog, the mountains
+ * snow, and nothing else does.
+ */
+export type CellKind = 'thunderstorm' | 'dust_storm' | 'strong_winds' | 'cloudy' | 'fog' | 'blizzard';
+
+export const CLIMATE: Record<BiomeId, Partial<Record<CellKind, number>>> = {
+  basin:      { thunderstorm: 0.22, strong_winds: 0.28, cloudy: 0.30, dust_storm: 0.14, fog: 0.06 },
+  redrock:    { dust_storm: 0.50, strong_winds: 0.30, thunderstorm: 0.08, cloudy: 0.12 },
+  industrial: { cloudy: 0.30, fog: 0.26, strong_winds: 0.20, thunderstorm: 0.19, dust_storm: 0.05 },
+  ashland:    { dust_storm: 0.34, strong_winds: 0.26, cloudy: 0.25, thunderstorm: 0.15 },
+  saltmarsh:  { fog: 0.36, thunderstorm: 0.26, strong_winds: 0.20, cloudy: 0.18 },
+  cinder:     { dust_storm: 0.40, thunderstorm: 0.25, strong_winds: 0.25, cloudy: 0.10 },
+  highreach:  { blizzard: 0.42, strong_winds: 0.24, fog: 0.14, cloudy: 0.20 },
+};
+
+/**
+ * The weather odds at a point along the route, crossing from one country's
+ * climate to the next on the same S-curve as the land, so a storm matches the
+ * ground it is sitting over.
+ */
+export function climateAt(from: BiomeId, to: BiomeId, progress: number): Partial<Record<CellKind, number>> {
+  const t = smoothstep(0.38, 0.74, Math.max(0, Math.min(1, progress)));
+  const a = CLIMATE[from], b = CLIMATE[to];
+  const out: Partial<Record<CellKind, number>> = {};
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)]) as Set<CellKind>) {
+    out[k] = (a[k] ?? 0) * (1 - t) + (b[k] ?? 0) * t;
+  }
+  return out;
+}
+
+/** Which country a point on the route is mostly in — for things that are one or the other. */
+export function dominantBiome(from: BiomeId, to: BiomeId, progress: number): BiomeId {
+  return smoothstep(0.38, 0.74, Math.max(0, Math.min(1, progress))) < 0.5 ? from : to;
+}

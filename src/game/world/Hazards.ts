@@ -1,7 +1,10 @@
 import Phaser from 'phaser';
 import { drawObstacle, type ObstacleKind, type ObstacleStyle } from './Obstacles';
+import { layoutCountryside, drawProp, type Prop } from './Countryside';
+import type { BiomeId } from './Biomes';
 import {
-  layoutSettlements, layoutTrainingSettlements, isBuilding, spanBand, drawBuilding, drawTownGround, drawPole, drawSpan,
+  layoutSettlements, layoutTrainingSettlements, isBuilding, spanBand, townStyleFor,
+  DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, drawBuilding, drawTownGround, drawPole, drawSpan,
   type BuildingKind, type Span, type Town,
 } from './Towns';
 
@@ -40,6 +43,8 @@ export interface Hazard {
   hitAge?: number;
   /** A flat roof a crate can land on, metres; null for a pitched or domed top. */
   roofM?: number | null;
+  /** How a building is built where it stands — adobe, timber, stilts, brick. */
+  look?: import('./Towns').TownStyle;
   /**
    * Whether it gets the OBSTACLE AHEAD klaxon. A town is forty buildings;
    * sounding the alarm for every shed on the way through would make the one
@@ -76,13 +81,23 @@ function hash(i: number): number {
 export class Hazards {
   private list: Hazard[] = [];
   private hostile: Array<[number, number]> = [];
+  /** Per zone, the only weapons allowed in it (null = anything). */
+  private hostileOnly: Array<ReadonlyArray<string> | null> = [];
   private spanList: Span[] = [];
   private townList: Town[] = [];
+  private props: Prop[] = [];
 
-  /** Lay out towns, power lines, obstacles and hostile ground between the two airfields. */
-  generate(startPx: number, endPx: number, seed: number): void {
+  /**
+   * Lay out towns, power lines, obstacles and hostile ground between the two
+   * airfields. `biomeAt` only decides how things LOOK — adobe or timber, a
+   * pumpjack or a barn — never where anything solid goes, so the dispatch
+   * board's preview (which does not pass it) lays out the same route.
+   */
+  generate(startPx: number, endPx: number, seed: number, biomeAt?: (x: number) => BiomeId): void {
     this.list = [];
+    this.props = [];
     this.hostile = [];
+    this.hostileOnly = [];
     this.spanList = [];
     this.townList = [];
     const span = endPx - startPx;
@@ -121,6 +136,10 @@ export class Hazards {
       x += minGap + hash(i++) * 3000;
     }
     this.list.sort((p, q) => p.x - q.x);
+    if (biomeAt) {
+      for (const h of this.list) if (isBuilding(h.kind)) h.look = townStyleFor(biomeAt(h.x));
+      this.props = layoutCountryside(startPx, endPx, seed, built.reserved, biomeAt);
+    }
 
     /*
      * Hostile stretches: raider-held bands wide enough to be a real crossing
@@ -144,15 +163,67 @@ export class Hazards {
      * One zone per slice of the route, jittered inside its own slice, so they
      * are irregular without ever clumping or leaving a huge dead run.
      */
+    /*
+     * ...and they must keep their guns off the drop runs.
+     *
+     * A drop pulls you down to rooftop height for the last kilometre, and the
+     * zones were laid out with no idea where the towns were — so the people
+     * you came down to help were routinely sitting inside a heavy MG's reach
+     * and the drop was a free kill. Every town's run-in and climb-out is now
+     * out of range of everything, and a zone that cannot fit in its slice
+     * without breaking that is dropped rather than squeezed in.
+     *
+     * The exception is deliberate: on a route with a few towns, one may be
+     * BESIEGED — riflemen dug in around it, and the drop card says so before
+     * you commit. That one is a choice with a bigger payout, not an ambush.
+     */
+    const towns = built.towns;
+    const runOf = (t: { x0: number; x1: number }): [number, number] =>
+      [t.x0 - DROP_RUN_BEFORE_PX - GUN_REACH_PX, t.x1 + DROP_RUN_AFTER_PX + GUN_REACH_PX];
+    const siegeOf = (t: { x0: number; x1: number }): [number, number] => [t.x0 - 220 * 9, t.x1 + 220 * 9];
+    let besieged = towns.length >= 2 && hash(seed * 91 + 7) < 0.55
+      ? towns[1 + Math.floor(hash(seed * 93 + 1) * (towns.length - 1))]
+      : null;
+    // The riflemen round a besieged town must not reach a neighbour's run
+    if (besieged) {
+      const [a, b] = siegeOf(besieged);
+      const safe = towns.every(t => t === besieged || runOf(t)[1] <= a || runOf(t)[0] >= b);
+      if (!safe) besieged = null;
+    }
+    if (besieged) besieged.besieged = true;
+    const keepOut: Array<[number, number]> = towns.filter(t => t !== besieged).map(runOf);
+    const clashes = (a: number, b: number): boolean => keepOut.some(([p, q]) => a < q && b > p);
+
     const slice = span / zoneCount;
+    const zones: Array<{ z: [number, number]; only: ReadonlyArray<string> | null }> = [];
     for (let z = 0; z < zoneCount; z++) {
       const half = 2700 + hash(seed * 17 + z) * 1400;
       // Keep the jitter inside the slice, and clear of both airfields
       const room = Math.max(0, slice / 2 - half);
-      const centre = startPx + slice * (z + 0.5) + (hash(seed * 13 + z) - 0.5) * 2 * room;
-      this.hostile.push([centre - half, centre + half]);
+      const ideal = startPx + slice * (z + 0.5) + (hash(seed * 13 + z) - 0.5) * 2 * room;
+      const lo = startPx + slice * z + half, hi = startPx + slice * (z + 1) - half;
+      const candidates = [ideal];
+      if (hi > lo) for (let k = 0; k <= 8; k++) candidates.push(lo + ((hi - lo) * k) / 8);
+      candidates.sort((p, q) => Math.abs(p - ideal) - Math.abs(q - ideal));
+      const centre = candidates.find(c => !clashes(c - half, c + half));
+      if (centre === undefined) continue;
+      zones.push({ z: [centre - half, centre + half], only: null });
     }
+    if (besieged) {
+      const z = siegeOf(besieged);
+      // Riflemen only, and nothing else overlapping them
+      for (let i = zones.length - 1; i >= 0; i--) {
+        if (zones[i].z[0] < z[1] + GUN_REACH_PX && zones[i].z[1] > z[0] - GUN_REACH_PX) zones.splice(i, 1);
+      }
+      zones.push({ z, only: ['nest'] });
+    }
+    zones.sort((p, q) => p.z[0] - q.z[0]);
+    this.hostile = zones.map(z => z.z);
+    this.hostileOnly = zones.map(z => z.only);
   }
+
+  /** Per zone, the only weapon kinds it may field (aligned with `zones`). */
+  get zoneWeapons(): ReadonlyArray<ReadonlyArray<string> | null> { return this.hostileOnly; }
 
   /**
    * The training circuit, laid out by hand in the order the lesson needs:
@@ -161,7 +232,9 @@ export class Hazards {
    *
    * Returns where each lesson lives, so the script can tell when it is done.
    */
-  generateTraining(routeKm: number, townName: string): { mastX: number; lineEndX: number; zone: [number, number] } {
+  generateTraining(
+    routeKm: number, townName: string, biomeAt?: (x: number) => BiomeId,
+  ): { mastX: number; lineEndX: number; zone: [number, number] } {
     const M = 9;
     const km = (k: number): number => k * 1000 * M;
     this.list = [];
@@ -176,8 +249,16 @@ export class Hazards {
     for (const s of built.substations) this.list.push(s.hazard);
     this.list.push(...built.pylons);
     this.list.sort((p, q) => p.x - q.x);
+    if (biomeAt) {
+      for (const h of this.list) if (isBuilding(h.kind)) h.look = townStyleFor(biomeAt(h.x));
+      this.props = layoutCountryside(km(0.9), km(routeKm - 1.4), 4242,
+        [...built.reserved, [mastX - 900, mastX + 900]], biomeAt);
+    } else {
+      this.props = [];
+    }
     const zone: [number, number] = [km(routeKm * 0.64), km(routeKm * 0.64 + 0.7)];
     this.hostile.push(zone);
+    this.hostileOnly = [['nest']];
     const lineEndX = built.towns[0].poles[0].x;
     return { mastX, lineEndX, zone };
   }
@@ -368,6 +449,11 @@ export class Hazards {
       }
     }
 
+    // The leftovers in the open country, first — everything else stands in front
+    for (const p of this.props) {
+      const sx = p.x - scrollX;
+      if (sx > -120 && sx < width + 120) drawProp(g, p, sx, baseY, pxPerM, t, style);
+    }
     // Towns: the road and barricades, then the buildings standing on them
     for (const town of this.townList) {
       if (town.x1 - scrollX < -200 || town.x0 - scrollX > width + 200) continue;

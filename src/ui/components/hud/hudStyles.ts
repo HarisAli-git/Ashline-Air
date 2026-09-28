@@ -218,6 +218,19 @@ export function hudStyles(
     },
     dropPips: { display: 'flex', gap: n(2), alignItems: 'center' },
     dropPip: { width: n(compact ? 6 : 7), height: n(compact ? 6 : 7), borderRadius: 1 },
+    meterWrap: { display: 'flex', alignItems: 'center', gap: n(6), marginTop: n(compact ? 3 : 5) },
+    meterTrack: {
+      position: 'relative', width: n(compact ? 120 : 170), height: n(compact ? 7 : 9),
+      background: 'rgba(20,16,9,0.7)', border: '1px solid rgba(159,232,176,0.35)', borderRadius: 2,
+    },
+    meterWindow: { position: 'absolute', top: 0, bottom: 0, background: 'rgba(159,232,176,0.35)' },
+    meterAim: { position: 'absolute', top: -3, bottom: -3, width: 2, marginLeft: -1, background: '#e8d5b7' },
+    meterMark: {
+      position: 'absolute', top: '50%', width: n(compact ? 7 : 9), height: n(compact ? 7 : 9),
+      marginLeft: -n(compact ? 3.5 : 4.5), marginTop: -n(compact ? 3.5 : 4.5), borderRadius: '50%',
+      transition: 'left 0.08s linear',
+    },
+    meterRead: { fontSize: n(compact ? 9.5 : 11), fontWeight: 'bold', minWidth: n(30) },
     dropCue: {
       fontSize: n(compact ? 9.5 : 11.5), fontWeight: 'bold', letterSpacing: 1,
       marginTop: n(compact ? 1 : 2), whiteSpace: 'nowrap',
