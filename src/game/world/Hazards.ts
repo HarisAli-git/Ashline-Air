@@ -131,7 +131,10 @@ export class Hazards {
       const band = HEIGHT_BAND[kind];
       const heightM = band[0] + hash(i++) * (band[1] - band[0]);
       const half = HALF_WIDTH[kind];
-      const clear = !built.reserved.some(([ra, rb]) => x + half + 200 > ra && x - half - 200 < rb);
+      // Nothing tall in a town's descent corridor either — the glide path
+      // down to a drop has to be clear of more than just guns
+      const corridors = built.towns.map(t => [t.x0 - DROP_RUN_BEFORE_PX, t.x1 + DROP_RUN_AFTER_PX] as [number, number]);
+      const clear = ![...built.reserved, ...corridors].some(([ra, rb]) => x + half + 200 > ra && x - half - 200 < rb);
       if (clear) this.list.push({ x, kind, heightM, halfWidth: half, seed: i, warn: true });
       x += minGap + hash(i++) * 3000;
     }

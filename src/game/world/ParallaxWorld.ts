@@ -10,8 +10,8 @@ import {
   drawFighter, drawMuzzleFlash, drawWireFence, drawBarrier, garrisonPalette, RAIDER_PALETTE,
 } from './Figures';
 import { blendBiome, dominantBiome, BIOMES, type BiomeId, type BiomeShape } from './Biomes';
-import { SupplyDrops } from './SupplyDrops';
-import { routeSpanPx } from './RoutePreview';
+import { SupplyDrops, type DropGuide } from './SupplyDrops';
+import { routeSpanPx, originStripPx, destStripPx } from './RoutePreview';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -208,7 +208,7 @@ export class ParallaxWorld {
    */
   dropReticle: { x: number; altM: number; onTarget: boolean; spreadM: number } | null = null;
   /** The drop window to fly into, while a site is calling. */
-  dropGuide: { lo: number; hi: number; fade: number } | null = null;
+  dropGuide: DropGuide | null = null;
   /** A height band the training script wants you in. Drawn like the drop window. */
   trainGuide: { lo: number; hi: number; fade: number } | null = null;
   /** The moving air the aircraft actually flies through. */
@@ -298,11 +298,11 @@ export class ParallaxWorld {
   }
 
   /** Lay out the route's obstacles, hostile stretches and the militia in them. */
-  setRoute(routeKm: number, seed: number): void {
+  setRoute(routeKm: number, seed: number, originRunwayM = 600, destRunwayM = 600): void {
     this.routeSeed = seed;
     this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
     // The same span the dispatch board previews — see RoutePreview
-    const [spanA, spanB] = routeSpanPx(routeKm);
+    const [spanA, spanB] = routeSpanPx(routeKm, originRunwayM, destRunwayM);
     // The country each point is in, crossing over on the same S-curve as the land
     const from = this.biomeFrom, to = this.biomeTo, end = this.routeEndPx;
     this.hazards.generate(spanA, spanB, seed, x => dominantBiome(from, to, x / end));
@@ -1508,11 +1508,9 @@ export class ParallaxWorld {
     // Lone walkers in the open between the settlements — full-parallax, same
     // plane as the aircraft: real danger on a forced landing out here
     {
-      const PXM2 = WORLD_PX_PER_M;
-      const dPx = Math.max(2000 * PXM2, f.routeTotalKm * 1000 * PXM2);
-      const oL = (f.originRunwayM ?? 600) * PXM2, dL = (f.destRunwayM ?? 600) * PXM2;
-      const zoneA: [number, number] = [-oL * 0.28 - 900, oL * 0.72 + 900];
-      const zoneB: [number, number] = [dPx - dL * 0.5 - 900, dPx + dL * 0.5 + 900];
+      const oS = originStripPx(f.originRunwayM ?? 600), dS = destStripPx(f.routeTotalKm, f.destRunwayM ?? 600);
+      const zoneA: [number, number] = [oS[0] - 900, oS[1] + 900];
+      const zoneB: [number, number] = [dS[0] - 900, dS[1] + 900];
       const cellW = 760;
       const first = Math.floor((scrollX - 100) / cellW);
       for (let c = first; c <= first + Math.ceil(this.width / cellW) + 1; c++) {
@@ -1536,15 +1534,10 @@ export class ParallaxWorld {
     // Runway zones — origin at world 0, destination at the contract distance.
     // Compact ~600 m strips with the airfield buildings right on them and the
     // settlements beyond.
-    const PXM = WORLD_PX_PER_M;
-    const destPx = Math.max(2000 * PXM, f.routeTotalKm * 1000 * PXM);
-    // Each field is drawn at the length it actually has. A 430 m mountain
-    // shelf and an 1800 m freight apron are not the same problem, and drawing
-    // both as the same 180 m stub was why every landing felt identical.
-    const oriLen = (f.originRunwayM ?? 600) * PXM;
-    const dstLen = (f.destRunwayM ?? 600) * PXM;
-    const oriFrom = -oriLen * 0.28, oriTo = oriLen * 0.72;
-    const dstFrom = destPx - dstLen * 0.5, dstTo = destPx + dstLen * 0.5;
+    // A long field is still longer than a short one, but no strip is drawn
+    // at its full published length any more — see RoutePreview.stripM.
+    const [oriFrom, oriTo] = originStripPx(f.originRunwayM ?? 600);
+    const [dstFrom, dstTo] = destStripPx(f.routeTotalKm, f.destRunwayM ?? 600);
     this.drawRunway(g, oriFrom, oriTo, scrollX, gy, f, f.originSurface ?? 'open');
     this.drawRunway(g, dstFrom, dstTo, scrollX, gy, f, f.destSurface ?? 'open');
     // Origin airfield sits just behind the spawn point (aircraft spawns at

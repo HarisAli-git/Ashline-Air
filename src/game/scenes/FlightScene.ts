@@ -21,11 +21,10 @@ import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
 import { routeKmBetween } from '../../services/RouteService';
 import { Director } from '../ai/Director';
-import { FlightTutorial } from './FlightTutorial';
-import { TrainingFlight, type TrainingView } from './TrainingFlight';
+import { FlightCoach, type CoachView } from './FlightCoach';
 import { DROP_REWARD, cratesFor, siteReply, type DropSite } from '../world/SupplyDrops';
-import { STRUCTURE_NAME } from '../world/Towns';
-import { routeSeed } from '../world/RoutePreview';
+import { STRUCTURE_NAME, DROP_RUN_BEFORE_PX, DROP_BAND_RUN_PX } from '../world/Towns';
+import { routeSeed, originStripPx, destStripPx } from '../world/RoutePreview';
 import { press } from '../utils/controls';
 import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
@@ -38,7 +37,7 @@ const AIRCRAFT_X      = 300;
 
 interface FlightSceneData {
   contractId: string;
-  /** Flight school: the hand-laid circuit from home and back. See TrainingFlight. */
+  /** Flight school: the hand-laid circuit from home and back. See FlightCoach. */
   training?: boolean;
 }
 
@@ -160,6 +159,8 @@ export class FlightScene extends Phaser.Scene {
   private ceilingWarnAt  = -99;   // last service-ceiling caution
   // Cautions that back off rather than repeating forever. See Nag.
   private nagObstacle = new Nag(2.5);
+  private nagFuel = new Nag(6);
+  private nagHeat = new Nag(8);
   private nagThreat   = new Nag(8);
   private nagOverspeed = new Nag(3);
   private nagTraffic  = new Nag(5);
@@ -173,17 +174,17 @@ export class FlightScene extends Phaser.Scene {
    */
   private loadingLeft = 3.2;
   /**
-   * Teaches the controls on the first flight of a save and then never again.
-   * Null on every later flight, so it costs nothing to have around.
+   * Teaches the game while you play it: the takeoff on a first flight, and
+   * every mechanic the first time you meet it. See FlightCoach.
    */
-  private tutorial: FlightTutorial | null = null;
-  private tutorialLine: string | null = null;
+  private coach: FlightCoach | null = null;
   /** Flight school, when this is the training circuit. */
   private training = false;
-  private trainer: TrainingFlight | null = null;
-  private trainMarks: { mastX: number; lineEndX: number; zone: [number, number] } | null = null;
-  private trainViewKey = '';
-  private trainGuideFade = 0;
+  private coachViewKey = '';
+  private coachGuideFade = 0;
+  /** What the coach needs to know about the next few seconds of route. */
+  private coachObstacle: { label: string; heightM: number; pylon: boolean } | null = null;
+  private coachThreat: { label: string; ceilingM: number } | null = null;
   /** Supply-drop tally for this flight, shown on the post-flight report. */
   private dropStats = { dropped: 0, hits: 0, earned: 0 };
   /** The drop window, faded in while a site is calling. */
@@ -261,10 +262,11 @@ export class FlightScene extends Phaser.Scene {
   init(data: FlightSceneData): void {
     this.contractId          = data.contractId;
     this.training            = !!data.training;
-    this.trainer             = null;
-    this.trainMarks          = null;
-    this.trainViewKey        = '';
-    this.trainGuideFade      = 0;
+    this.coach               = null;
+    this.coachViewKey        = '';
+    this.coachGuideFade      = 0;
+    this.coachObstacle       = null;
+    this.coachThreat         = null;
     this.landed              = false;
     this.crashing            = false;
     this.hasBeenAirborne     = false;
@@ -418,9 +420,9 @@ export class FlightScene extends Phaser.Scene {
      */
     this.world.setBiomes(this.originBiome, this.destBiome);
     if (this.training) {
-      this.trainMarks = this.world.setTrainingRoute(this.routeKm, 'Millbrook');
+      this.world.setTrainingRoute(this.routeKm, 'Millbrook');
     } else {
-      this.world.setRoute(this.routeKm, this.hashRoute(this.contractId));
+      this.world.setRoute(this.routeKm, this.hashRoute(this.contractId), this.originRunwayM, this.destRunwayM);
     }
     // Survivors along the route — something to do in the cruise. See SupplyDrops.
     // They live in the towns the route was just laid out with, so they go second.
@@ -514,13 +516,26 @@ export class FlightScene extends Phaser.Scene {
     // turns it over. See the note where engineRunning is set false.
     this.world.loading = true;
     this.loadingLeft = 3.2;
-    // Flight school teaches the whole thing. Failing that, the first real
-    // flight of a save gets the one-line hints; everyone else is left alone.
+    /*
+     * The coach runs on every flight. On flight school and on a save's first
+     * flight it starts with the takeoff; after that it only speaks up the
+     * first time you meet something it has not taught you yet — so a player
+     * who never chose flight school still gets taught the whole game.
+     */
     const stats = SaveService.get().player.stats;
-    this.trainer = this.training ? new TrainingFlight() : null;
-    this.tutorial = !this.training && stats.totalFlights === 0 && !stats.trainingDone
-      ? new FlightTutorial()
-      : null;
+    this.coach = new FlightCoach({
+      basics: this.training || (stats.totalFlights === 0 && !stats.trainingDone),
+      forceAll: this.training,
+      seen: stats.lessons ?? [],
+      onSeen: id => {
+        const save = SaveService.get();
+        const list = save.player.stats.lessons ?? [];
+        if (!list.includes(id)) {
+          save.player.stats.lessons = [...list, id];
+          SaveService.save(save.player, save.world);
+        }
+      },
+    });
     // The HUD comes up on this event; a real flight gets it from the board
     if (this.training) EventBus.emit('scene:start-flight', { contractId: '' });
     this.aircraft.stopEngine();
@@ -636,6 +651,13 @@ export class FlightScene extends Phaser.Scene {
           fadeToScene(this, 'MapScene');
         }
       }),
+      EventBus.on('flight:hide-tips', () => {
+        this.coach?.hideAll();
+        const save = SaveService.get();
+        save.player.stats.trainingDone = true;
+        SaveService.save(save.player, save.world);
+        this.emitCoachView(null);
+      }),
       EventBus.on('flight:skip-training', () => {
         if (!this.training) return;
         const save = SaveService.get();
@@ -684,7 +706,6 @@ export class FlightScene extends Phaser.Scene {
       if (this.loadingLeft <= 0) {
         this.loadingLeft = 0;
         this.world.loading = false;
-        SoundEngine.chime();
         EventBus.emit('ui:show-notification', {
           message: `📦 Cargo aboard — ${press('engine')} to start the engine`,
           type: 'success',
@@ -939,8 +960,10 @@ export class FlightScene extends Phaser.Scene {
       else if (this.state.integrity < 30)     this.disengageWarp('airframe critical');
     }
 
-    // Fuel warning (every 5s)
-    if (this.state.fuel < 15 && Math.floor(time / 5000) !== Math.floor((time - delta) / 5000)) {
+    // Fuel and heat warnings back off like every other caution — at a fixed
+    // five seconds, the last ninety seconds of a thin tank were eighteen beeps.
+    if (this.state.fuel >= 15) this.nagFuel.clear();
+    if (this.state.fuel < 15 && this.nagFuel.due(this.state.elapsedSeconds)) {
       SoundEngine.warn();
       EventBus.emit('ui:show-notification', {
         message: `⚠ FUEL CRITICAL: ${this.state.fuel.toFixed(0)} L remaining`,
@@ -949,7 +972,8 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // Engine overheat warning
-    if (this.state.engineTemp > 0.85 && Math.floor(time / 8000) !== Math.floor((time - delta) / 8000)) {
+    if (this.state.engineTemp <= 0.8) this.nagHeat.clear();
+    if (this.state.engineTemp > 0.85 && this.nagHeat.due(this.state.elapsedSeconds)) {
       SoundEngine.warn();
       EventBus.emit('ui:show-notification', {
         message: 'ENGINE OVERHEATING — reduce throttle',
@@ -1150,14 +1174,11 @@ export class FlightScene extends Phaser.Scene {
 
   /** True when the given world position is on either airfield's asphalt. */
   private isOnRunway(worldX: number): boolean {
-    const PXM = WORLD_PX_PER_M;
-    const destPx = Math.max(2000 * PXM, this.routeKm * 1000 * PXM);
-    // Same lengths the world draws — the strip you can see IS the strip you
+    // Same strips the world draws — the strip you can see IS the strip you
     // have to stop on.
-    const oL = this.originRunwayM * PXM, dL = this.destRunwayM * PXM;
-    const onOrigin = worldX > -oL * 0.28 && worldX < oL * 0.72;
-    const onDest   = worldX > destPx - dL * 0.5 && worldX < destPx + dL * 0.5;
-    return onOrigin || onDest;
+    const [oa, ob] = originStripPx(this.originRunwayM);
+    const [da, db] = destStripPx(this.routeKm, this.destRunwayM);
+    return (worldX > oa && worldX < ob) || (worldX > da && worldX < db);
   }
 
   /** Stable numeric seed from a contract id — shared with the board's preview. */
@@ -1272,6 +1293,12 @@ export class FlightScene extends Phaser.Scene {
     // exactly how it should feel to the Director.
     this.clearanceM = ahead ? Math.max(0, alt - ahead.hazard.heightM) : alt;
     const obstacleThreat = ahead !== null && alt < ahead.hazard.heightM + 12;
+    this.coachObstacle = obstacleThreat && ahead
+      ? {
+        label: ahead.hazard.kind === 'pylon' ? 'Power line' : STRUCTURE_NAME[ahead.hazard.kind] ?? 'Obstacle',
+        heightM: ahead.hazard.heightM, pylon: ahead.hazard.kind === 'pylon',
+      }
+      : null;
     if (!obstacleThreat) this.nagObstacle.clear();
     if (obstacleThreat && this.nagObstacle.due(this.state.elapsedSeconds)) {
       this.hazardAlertAt = this.state.elapsedSeconds;
@@ -1337,6 +1364,7 @@ export class FlightScene extends Phaser.Scene {
     // Only worth saying if their guns actually out-reach our current height.
     // Ten seconds: a climb over an AA ceiling takes longer than a dodge.
     const threat = this.world.threatAhead(worldX, lookAhead(10));
+    this.coachThreat = threat && alt < threat.ceilingM ? { label: threat.label, ceilingM: threat.ceilingM } : null;
     if (threat && alt < threat.ceilingM &&
         this.nagThreat.due(this.state.elapsedSeconds)) {
       this.threatAlertAt = this.state.elapsedSeconds;
@@ -1344,7 +1372,7 @@ export class FlightScene extends Phaser.Scene {
         + `Clear altitude ${Math.round(threat.ceilingM)} metres.`;
       // Control warns you about the ground the same way it warns you about
       // the weather, so the two threats arrive in the same voice.
-      SoundEngine.radio(call, { kind: 'warning', station: 'ASHLINE CONTROL' });
+      SoundEngine.radio(call, { kind: 'control', station: 'ASHLINE CONTROL' });
       EventBus.emit('ui:show-notification', {
         message: `▲ ${threat.label} AHEAD — CLEAR ALTITUDE ${Math.round(threat.ceilingM)} m`,
         type: 'warning',
@@ -1546,28 +1574,8 @@ export class FlightScene extends Phaser.Scene {
     // ── Supply drops ──────────────────────────────────────────────────────
     this.updateDrops(sdt);
 
-    // ── Flight school ─────────────────────────────────────────────────────
-    if (this.trainer) this.updateTraining(sdt, worldX);
-
-    // ── Tutorial, first flight only ───────────────────────────────────────
-    if (this.tutorial) {
-      const line = this.tutorial.update(this.state, {
-        retractableGear: this.aircraft.hasRetractableGear,
-        engineRunning: this.engineRunning,
-        loadingLeft: this.loadingLeft,
-        remainingKm: Math.max(0, this.routeKm - this.state.distanceTravelled),
-        underFire: this.underFire,
-        airborne: this.hasBeenAirborne,
-      }, isTouchDevice());
-      if (line !== this.tutorialLine) {
-        this.tutorialLine = line;
-        EventBus.emit('flight:tutorial', { text: line });
-        // The legend and the teaching line share the bottom centre — only one
-        // of them may be there at a time.
-        this.keyHintText?.setVisible(line === null);
-      }
-      if (!this.tutorial.active) this.tutorial = null;
-    }
+    // ── The coach ─────────────────────────────────────────────────────────
+    this.updateCoach(sdt);
 
     // Annunciator panel state for the React HUD
     EventBus.emit('flight:status', {
@@ -1709,9 +1717,11 @@ export class FlightScene extends Phaser.Scene {
         { kind: 'traffic', station: site.place.toUpperCase() },
       );
       EventBus.emit('ui:show-notification', {
+        // Hold, not descend: the guns are between you and them until the
+        // card says otherwise
         message: seen < 3
-          ? `📦 ${titleOf(site)} ${km.toFixed(1)} km — come down into the green band (${site.bandLo}–${site.bandHi} m)`
-          : `📦 ${titleOf(site)} · ${km.toFixed(1)} km · ${crates}${site.besieged ? ' · UNDER FIRE' : ''}`,
+          ? `📦 ${titleOf(site)} ${km.toFixed(1)} km — they need ${crates}. Hold your height until the card says descend`
+          : `📦 ${titleOf(site)} · ${km.toFixed(1)} km · needs ${crates}${site.besieged ? ' · UNDER FIRE' : ''}`,
         type: 'info',
       });
       this.disengageWarp('supply drop ahead');
@@ -1778,10 +1788,12 @@ export class FlightScene extends Phaser.Scene {
     /*
      * The window, and when to start down into it.
      *
-     * "Descend now" is worked out from where you are: the height to lose at a
-     * comfortable seven metres a second, turned into distance at the speed you
-     * are actually making, plus a few hundred metres to settle. Start down at
-     * that point and you arrive in the band with time to line up.
+     * Every drop site has a corridor in front of it that no gun can reach —
+     * the layout guarantees it (see Hazards.generate). Outside it, the card
+     * says HOLD and there is no band: coming down early just means coming
+     * down among the guns. At the corridor's edge it says DESCEND, the band
+     * appears, and a path is drawn from the aircraft to where the band
+     * starts, with the sink rate that gets you there.
      */
     const next = airborne && drops.cratesLeft > 0 ? drops.nextCalling(worldX) : null;
     this.dropGuideFade = next
@@ -1789,33 +1801,49 @@ export class FlightScene extends Phaser.Scene {
       : Math.max(0, this.dropGuideFade - sdt / 0.8);
     if (next) {
       const km = Math.max(0, (next.x - worldX) / (WORLD_PX_PER_M * 1000));
-      const needKm = (Math.max(0, alt - next.bandHi) / 7) * gs / 1000 + 0.35;
+      const corridorKm = DROP_RUN_BEFORE_PX / (WORLD_PX_PER_M * 1000) - 0.05;
+      const inCorridor = km <= corridorKm;
       let cue: DropZoneStatus['cue'];
       // The crates carry forward as they fall, so once the aim point is past
       // them any crate out of the door now lands beyond them
       const aimPast = this.world.dropReticle !== null && next.state === 'signalled'
         && (this.world.dropReticle.x - next.x) / WORLD_PX_PER_M > 30;
-      if (aimPast) cue = 'late';
+      if (!inCorridor) cue = 'hold';
+      else if (aimPast) cue = 'late';
       else if (alt < next.bandLo - 2) cue = 'low';
       else if (alt <= next.bandHi + 3) cue = this.world.dropReticle?.onTarget ? 'release' : 'window';
-      else cue = km <= needKm ? 'descend' : 'hold';
+      else cue = 'descend';
+      // Where the band starts, and the sink rate that reaches it from here
+      const bandStartX = next.x - DROP_BAND_RUN_PX;
+      const bandMid = (next.bandLo + next.bandHi) / 2;
+      const secsToBand = Math.max(1, (bandStartX - worldX) / WORLD_PX_PER_M / gs);
+      const descentRate = cue === 'descend' ? Math.max(0, (alt - bandMid) / secsToBand) : 0;
       if (cue === 'descend' && !this.descentCalled.has(next)) {
         this.descentCalled.add(next);
-        SoundEngine.chime();
         EventBus.emit('ui:show-notification', {
-          message: `▼ Start down now — ${next.bandLo}–${next.bandHi} m for ${next.place}`,
+          message: `▼ Clear of the guns — start down to ${next.bandLo}–${next.bandHi} m`,
           type: 'info',
         });
       }
       this.dropZone = {
         place: next.place, kind: next.kind, km, need: next.need, got: next.got,
         lo: next.bandLo, hi: next.bandHi, besieged: next.besieged, cue,
-        descendInKm: Math.max(0, km - needKm),
+        descendInKm: Math.max(0, km - corridorKm),
+        descentRate,
+        aboard: drops.cratesLeft,
         gapM: meter && site === next ? meter.gapM : null,
         windowM: meter?.windowM ?? 30,
         releaseIn: meter && site === next ? meter.releaseIn : null,
       };
-      this.world.dropGuide = { lo: next.bandLo, hi: next.bandHi, fade: this.dropGuideFade };
+      // The band only once it is safe to use; the path only while getting to it
+      const path = cue === 'descend' && bandStartX > worldX
+        ? { x0: worldX, alt0: alt, x1: bandStartX, alt1: bandMid }
+        : cue === 'low'
+          ? { x0: worldX, alt0: alt, x1: worldX + 260 * WORLD_PX_PER_M, alt1: bandMid }
+          : null;
+      this.world.dropGuide = cue === 'hold'
+        ? null
+        : { lo: next.bandLo, hi: next.bandHi, fade: this.dropGuideFade, path };
     } else {
       this.dropZone = null;
       this.world.dropGuide = this.dropGuideFade > 0 && this.world.dropGuide
@@ -2263,48 +2291,54 @@ export class FlightScene extends Phaser.Scene {
   }
 
   /**
-   * Flight school, each frame: walk the script, draw its height band, and
-   * hand the HUD the step to show.
+   * The coach, each frame: tell it what is going on, draw any height band it
+   * wants, and hand the HUD what to show.
    */
-  private updateTraining(sdt: number, worldX: number): void {
-    const trainer = this.trainer;
-    const marks = this.trainMarks;
-    if (!trainer || !marks) return;
-    const site = this.world.drops.sites[0] ?? null;
-    const view = trainer.update(sdt, this.state, {
+  private updateCoach(sdt: number): void {
+    const coach = this.coach;
+    if (!coach) return;
+    // Lessons are read in REAL time — under a time warp a twelve-second
+    // lesson used to be gone in three
+    const realDt = sdt / Math.max(0.1, this.timeScale * this.dropSlow);
+    const view = coach.update(realDt, this.state, {
+      touch: isTouchDevice(),
       retractableGear: this.aircraft.hasRetractableGear,
       engineRunning: this.engineRunning,
       loadingLeft: this.loadingLeft,
-      worldX,
       landed: this.landed,
       timeWarp: this.timeScale,
-      mastX: marks.mastX,
-      lineEndX: marks.lineEndX,
-      zone: marks.zone,
-      site,
       remainingKm: Math.max(0, this.routeKm - this.state.distanceTravelled),
       vrKmh: Math.round(this.controller.vStall * 1.3 * 3.6),
-      touch: isTouchDevice(),
+      obstacle: this.coachObstacle,
+      threat: this.coachThreat,
+      drop: this.dropZone,
+      crateHits: this.dropStats.hits,
+      weatherAhead: this.weatherAhead,
+      traffic: this.trafficAdvisory !== null,
     });
-    this.trainGuideFade = view?.guide
-      ? Math.min(1, this.trainGuideFade + sdt / 1.2)
-      : Math.max(0, this.trainGuideFade - sdt / 0.8);
+    this.coachGuideFade = view?.guide
+      ? Math.min(1, this.coachGuideFade + sdt / 1.2)
+      : Math.max(0, this.coachGuideFade - sdt / 0.8);
     if (view?.guide) {
-      this.world.trainGuide = { ...view.guide, fade: this.trainGuideFade };
+      this.world.trainGuide = { ...view.guide, fade: this.coachGuideFade };
     } else if (this.world.trainGuide) {
-      this.world.trainGuide = this.trainGuideFade > 0
-        ? { ...this.world.trainGuide, fade: this.trainGuideFade } : null;
+      this.world.trainGuide = this.coachGuideFade > 0
+        ? { ...this.world.trainGuide, fade: this.coachGuideFade } : null;
     }
-    this.emitTrainingView(view);
+    this.emitCoachView(view);
   }
 
-  private emitTrainingView(view: TrainingView | null): void {
-    const key = view ? `${view.step}|${view.text}` : '';
-    if (key === this.trainViewKey) return;
-    this.trainViewKey = key;
+  private emitCoachView(view: CoachView | null): void {
+    const key = view ? `${view.title}|${view.text}` : '';
+    if (key === this.coachViewKey) return;
+    this.coachViewKey = key;
     EventBus.emit('flight:tutorial', view
-      ? { text: view.text, title: view.title, step: view.step, total: view.total, keys: view.keys, training: true }
+      ? {
+        text: view.text, title: view.title, step: view.step, total: view.total, keys: view.keys,
+        training: this.training, coach: true,
+      }
       : { text: null });
+    // The legend and the lesson share the bottom of the screen
     this.keyHintText?.setVisible(view === null);
   }
 
@@ -2314,7 +2348,7 @@ export class FlightScene extends Phaser.Scene {
    * again or get on with it.
    */
   private finishTraining(result: LandingResult): void {
-    this.emitTrainingView(null);
+    this.emitCoachView(null);
     this.world.trainGuide = null;
     const crashed = result.quality === 'crash';
     const onRunway = this.isOnRunway(this.scrollX + AIRCRAFT_X);

@@ -20,6 +20,8 @@ export interface TutorialPayload {
   total?: number;
   keys?: string[];
   training?: boolean;
+  /** From the coach on any flight, not just flight school. */
+  coach?: boolean;
 }
 
 const AMBER = '#ffd080';
@@ -34,6 +36,9 @@ export function TrainingPanel({ lesson, scale, compact, touch }: {
   const n = (v: number): number => Math.round(v * scale);
   const step = lesson.step ?? 1;
   const total = lesson.total ?? 1;
+  // The takeoff sequence is numbered; a one-off lesson mid-flight is not
+  const sequenced = lesson.step !== undefined && lesson.total !== undefined;
+  const label = lesson.training ? 'FLIGHT SCHOOL' : sequenced ? 'FIRST FLIGHT' : 'NEW';
   return (
     <div style={{
       position: 'absolute',
@@ -43,21 +48,20 @@ export function TrainingPanel({ lesson, scale, compact, touch }: {
        * docks at the top instead, over empty sky, and the caution chips
        * move down under it (hudStyles `lessonOnTop`).
        */
-      ...(compact
-        ? { top: `calc(${n(6)}px + env(safe-area-inset-top, 0px))` }
-        : { bottom: `calc(${n(94)}px + env(safe-area-inset-bottom, 0px))` }),
       /*
-       * Right of the aircraft, not centred. The plane is pinned at the left
-       * third of the screen and sits on the runway at the bottom — a centred
-       * panel covered it for the whole takeoff, which is the one moment you
-       * most need to see it. On touch it also stops short of the pitch keys.
+       * Never over the ground ahead. The bottom of the screen is where the
+       * runway, the people you are dropping to and the aim point all are —
+       * the panel sat right on the target during the release lesson. On a
+       * phone it docks at the top over empty sky; on a desktop it takes the
+       * top-right corner, the one part of the HUD nothing else uses.
        */
-      left: '40%',
-      width: compact ? (touch ? '45%' : '56%') : 'min(620px, 56%)',
+      ...(compact
+        ? { top: `calc(${n(6)}px + env(safe-area-inset-top, 0px))`, left: '40%', width: touch ? '45%' : '56%' }
+        : { top: `calc(${n(14)}px + env(safe-area-inset-top, 0px))`, right: `calc(${n(16)}px + env(safe-area-inset-right, 0px))`, width: 'min(460px, 36%)' }),
       pointerEvents: 'none', zIndex: 260,
     }}>
       {/* Re-keyed per step so each new lesson arrives rather than just changing */}
-      <div key={step} style={{
+      <div key={`${step}-${lesson.title}`} style={{
         background: 'linear-gradient(180deg, rgba(12,9,4,0.86) 0%, rgba(12,9,4,0.74) 100%)',
         borderLeft: `2px solid ${AMBER}`,
         borderRadius: 3,
@@ -71,11 +75,11 @@ export function TrainingPanel({ lesson, scale, compact, touch }: {
           <span style={{
             fontSize: n(compact ? 8 : 9), letterSpacing: 2, color: ASH, whiteSpace: 'nowrap',
           }}>
-            FLIGHT SCHOOL · {step}/{total}
+            {label}{sequenced ? ` · ${step}/${total}` : ''}
           </span>
-          {/* The whole circuit as ticks — a lesson you can see the end of */}
+          {/* The sequence as ticks — a lesson you can see the end of */}
           <span style={{ display: 'flex', gap: 2, flex: 1, minWidth: 0 }} aria-hidden>
-            {Array.from({ length: total }, (_, i) => (
+            {sequenced && Array.from({ length: total }, (_, i) => (
               <span key={i} style={{
                 flex: 1, height: n(3), borderRadius: 1,
                 background: i < step - 1 ? GREEN : i === step - 1 ? AMBER : 'rgba(138,122,90,0.35)',
@@ -83,7 +87,7 @@ export function TrainingPanel({ lesson, scale, compact, touch }: {
             ))}
           </span>
           <button
-            onClick={() => EventBus.emit('flight:skip-training')}
+            onClick={() => EventBus.emit(lesson.training ? 'flight:skip-training' : 'flight:hide-tips')}
             style={{
               pointerEvents: 'auto', background: 'none', border: 'none', cursor: 'pointer',
               color: ASH, fontFamily: 'monospace', fontSize: n(compact ? 8.5 : 9.5),
@@ -91,7 +95,7 @@ export function TrainingPanel({ lesson, scale, compact, touch }: {
               minHeight: touch ? 28 : undefined,
             }}
           >
-            Skip ›
+            {lesson.training ? 'Skip ›' : 'Hide tips'}
           </button>
         </div>
         <div style={{

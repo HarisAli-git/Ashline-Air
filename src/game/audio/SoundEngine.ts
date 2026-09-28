@@ -621,16 +621,23 @@ class SoundEngineClass {
     this.noiseBurst(0.16, 110, 0.17);
   }
 
-  /** Master caution — two-tone. */
+  /**
+   * Master caution — a soft falling pair.
+   *
+   * These were square waves at 760/560 Hz and 980 Hz: the harshest timbre in
+   * the synth at the pitch the ear is most sensitive to, fired every few
+   * seconds for as long as a condition held. Rounded tones in a lower, calmer
+   * register still read as "look" without grating on the twentieth repeat.
+   */
   warn(): void {
-    this.blip(760, 0.12, 0.10, 'square');
-    this.blip(560, 0.14, 0.10, 'square', undefined, 0.16);
+    this.blip(620, 0.16, 0.055, 'triangle');
+    this.blip(470, 0.2, 0.05, 'triangle', undefined, 0.17);
   }
 
-  /** Sharp repeating alarm for imminent danger (obstacle ahead). */
+  /** Imminent danger (obstacle, traffic, overspeed): two quick rising notes. */
   alarm(): void {
-    this.blip(980, 0.08, 0.11, 'square');
-    this.blip(980, 0.08, 0.11, 'square', undefined, 0.13);
+    this.blip(520, 0.09, 0.06, 'triangle', 700);
+    this.blip(520, 0.09, 0.06, 'triangle', 700, 0.14);
   }
 
   /** Rounds coming up from the ground. */
@@ -669,17 +676,17 @@ class SoundEngineClass {
    */
   dropTick(final = false): void {
     if (final) {
-      this.blip(1180, 0.09, 0.075, 'triangle');
-      this.blip(1480, 0.14, 0.07, 'triangle', undefined, 0.09);
+      this.blip(740, 0.1, 0.05, 'sine');
+      this.blip(988, 0.16, 0.05, 'sine', undefined, 0.1);
     } else {
-      this.blip(880, 0.05, 0.06, 'triangle');
+      this.blip(660, 0.04, 0.035, 'sine');
     }
   }
 
+  /** A reward: soft, low, and only for things that earned one. */
   chime(): void {
-    this.blip(660, 0.12, 0.07);
-    this.blip(880, 0.16, 0.07, 'sine', undefined, 0.11);
-    this.blip(1320, 0.22, 0.04, 'sine', undefined, 0.22);
+    this.blip(523, 0.14, 0.045);
+    this.blip(784, 0.2, 0.04, 'sine', undefined, 0.12);
   }
 
   /** Contract paid / success flourish. */

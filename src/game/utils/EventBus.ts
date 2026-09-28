@@ -25,8 +25,12 @@ export interface DropZoneStatus {
    * late     the aim point is already past them
    */
   cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late';
-  /** How far until you should start down, km. */
+  /** How far until you should start down, km — the edge of the gun-free corridor. */
   descendInKm: number;
+  /** While descending: the sink rate that reaches the band in time, m/s. */
+  descentRate: number;
+  /** Crates still aboard. */
+  aboard: number;
   /**
    * The drop meter, once the flare is up: metres from where a crate would
    * land now to the people (positive = still ahead of it), the half-width of
@@ -85,6 +89,8 @@ export interface GameEvents {
     total?: number;
     keys?: string[];
     training?: boolean;
+    /** From the coach — shown as a lesson panel rather than a one-line hint. */
+    coach?: boolean;
   };
   /** Flight school's debrief: how it went, and what it paid. */
   'flight:training-complete': {
@@ -97,6 +103,8 @@ export interface GameEvents {
   /** The debrief's two buttons. */
   'flight:training-exit': { again: boolean };
   'flight:skip-training': void;
+  /** Stop the coach on a real flight — the player knows what they are doing. */
+  'flight:hide-tips': void;
   'flight:status': {
     engineFailed: boolean;
     underFire: boolean;

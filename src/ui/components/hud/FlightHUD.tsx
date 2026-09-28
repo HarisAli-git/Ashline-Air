@@ -42,7 +42,7 @@ export function FlightHUD(): React.ReactElement | null {
   const compact = vp.isCompact;
   const styles = hudStyles(
     vp.uiScale, compact, vp.isTouch, event ? event.choices.length : 0,
-    compact && !!tutorial?.training,
+    compact && !!(tutorial?.training || tutorial?.coach),
   );
 
   const { def } = SaveService.getActiveAircraft();
@@ -211,7 +211,7 @@ export function FlightHUD(): React.ReactElement | null {
         * the keyboard legend sits (FlightScene hides that while this shows,
         * so they can never overlap).
         */}
-      {tutorial && (tutorial.training
+      {tutorial && (tutorial.training || tutorial.coach
         ? <TrainingPanel lesson={tutorial} scale={vp.uiScale} compact={compact} touch={vp.isTouch} />
         : <div style={styles.tutorial}>{tutorial.text}</div>)}
       <TrainingDebrief scale={vp.uiScale} compact={compact} />
@@ -236,12 +236,14 @@ function DropCard({ s, zone, compact, touch }: {
   const band = `${zone.lo}–${zone.hi} m`;
   const cue: Record<DropZoneStatus['cue'], { text: string; tone: string; pulse?: boolean }> = {
     hold: {
-      text: zone.descendInKm > 0.05
-        ? `HOLD · start down in ${zone.descendInKm.toFixed(1)} km`
-        : `HOLD · then down to ${band}`,
+      // Outside the corridor the guns can still reach you low — say so
+      text: `HOLD HEIGHT · safe to descend in ${Math.max(0.1, zone.descendInKm).toFixed(1)} km`,
       tone: '#c8b888',
     },
-    descend: { text: `▼ DESCEND to ${band}`, tone: '#ffd080', pulse: true },
+    descend: {
+      text: `▼ DESCEND to ${band}${zone.descentRate > 0.5 ? ` · ~${Math.round(zone.descentRate)} m/s` : ''}`,
+      tone: '#ffd080', pulse: true,
+    },
     window: { text: `IN THE BAND · wait for the pin`, tone: '#9fe8b0' },
     release: { text: touch ? 'PIN ON THEM · DROP NOW' : 'PIN ON THEM · SPACE', tone: '#b8ffc8', pulse: true },
     low: { text: `▲ TOO LOW · climb to ${zone.lo} m`, tone: '#ff8844', pulse: true },
@@ -261,9 +263,19 @@ function DropCard({ s, zone, compact, touch }: {
             <span key={i} style={{
               ...s.dropPip,
               background: i < zone.got ? '#9fe8b0' : 'transparent',
-              border: `1px solid ${i < zone.got ? '#9fe8b0' : '#6a7a5a'}`,
+              border: `1px solid ${i < zone.got ? '#9fe8b0' : '#ffd080'}`,
             }} />
           ))}
+        </span>
+        {/*
+          * Said in words as well as boxes. The pips alone were the only place
+          * the count appeared, and nobody read four tiny squares as "they
+          * need two more crates".
+          */}
+        <span style={s.dropNeed}>
+          {zone.got >= zone.need ? 'SUPPLIED'
+            : `NEEDS ${zone.need - zone.got} CRATE${zone.need - zone.got > 1 ? 'S' : ''}`}
+          <span style={s.dropAboard}>{compact ? ` · ${zone.aboard} left` : ` · ${zone.aboard} aboard`}</span>
         </span>
       </div>
       <div style={{

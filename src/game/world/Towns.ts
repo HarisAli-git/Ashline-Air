@@ -104,7 +104,13 @@ export interface Town {
  * No gun may reach any of it unless the site is besieged on purpose.
  * Before = the last ~10 s in the band; after = the climb back out.
  */
-export const DROP_RUN_BEFORE_PX = 1100 * M;
+export const DROP_RUN_BEFORE_PX = 1600 * M;
+/**
+ * Where the green band starts, before the site. From the corridor entry to
+ * here is the descent; from here to the site you are in the band. The band's
+ * floor clears everything in this last stretch.
+ */
+export const DROP_BAND_RUN_PX = 600 * M;
 export const DROP_RUN_AFTER_PX = 450 * M;
 /** The longest reach of any raider weapon (AA, 3200 px) plus a margin. */
 export const GUN_REACH_PX = 3300;

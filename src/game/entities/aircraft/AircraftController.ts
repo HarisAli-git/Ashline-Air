@@ -88,6 +88,18 @@ export const TUNING = {
    * the honest reading — a prop under power makes thrust, not drag.
    */
   idleDragCD: 0.09,
+  /**
+   * Thrust follows the lever on a curve, not a straight line.
+   *
+   * Linear, a quarter throttle still held level flight at ~42% of cruise in
+   * every aircraft — the bottom half of the lever barely mattered, and
+   * "cut the power" did not feel like cutting anything. Real fixed-pitch
+   * props lose thrust faster than rpm at part power, so thrust goes as
+   * lever^powerCurve: full power is unchanged, half is ~35%, a quarter is
+   * ~11% and will not hold height. The top speed and the climb, which are
+   * set at full power, do not move.
+   */
+  powerCurve: 1.6,
   idleDragCurve: 3,
   flapsCL: 0.45,            // extra lift from flaps
   flapsCD: 0.028,           // and the drag that comes with it
@@ -426,7 +438,7 @@ export class AircraftController {
      * stop the take-off roll being a catapult launch.
      */
     const propEff = 0.42 + 0.58 * clamp(s.speed / (this.vCruise * 0.55), 0, 1);
-    const aT = effThrottle * this.tMax * propEff * Math.pow(sigma, THRUST_LAPSE)
+    const aT = Math.pow(effThrottle, TUNING.powerCurve) * this.tMax * propEff * Math.pow(sigma, THRUST_LAPSE)
       * (1 - s.engineTemp * 0.3)
       * (1 - clamp(1 - s.integrity / 100, 0, 1) * 0.45);
 

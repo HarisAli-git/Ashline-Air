@@ -132,7 +132,8 @@ export function DispatchBoard({ settlementId, onContractAccepted }: Props): Reac
           const tag = TYPE_TAG[c.type];
           // What else is on the way: people to drop to, and whether any of
           // them are under fire. Same layout the flight will use.
-          const drops = km > 0 ? previewDrops(c.id, km) : null;
+          const drops = km > 0 && here && dest
+            ? previewDrops(c.id, km, here.field?.runwayM ?? 600, dest.field?.runwayM ?? 600) : null;
           return (
             <button
               key={c.id}
@@ -157,7 +158,7 @@ export function DispatchBoard({ settlementId, onContractAccepted }: Props): Reac
                 {tag && <span style={{ ...s.fig, color: tag.tone }}>{tag.label}</span>}
                 {drops && drops.sites > 0 && (
                   <span style={{ ...s.fig, color: '#9fe8b0' }}>
-                    📦 {drops.sites} drop{drops.sites > 1 ? 's' : ''}
+                    📦 {drops.sites} drop{drops.sites > 1 ? 's' : ''} · {drops.crates} crate{drops.crates > 1 ? 's' : ''}
                     {drops.besieged > 0 && <span style={{ color: '#ff8844' }}> · 1 under fire</span>}
                   </span>
                 )}

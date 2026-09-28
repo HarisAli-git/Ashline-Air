@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { drawFighter, type FighterPalette } from './Figures';
 import { drawUndead, undeadKindFor, type CrowdStyle } from './Crowds';
-import { DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, type Town } from './Towns';
+import { DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, DROP_BAND_RUN_PX, GUN_REACH_PX, type Town } from './Towns';
 import type { Hazard } from './Hazards';
 
 /**
@@ -127,6 +127,17 @@ export interface DropEvents {
   completed: Array<{ site: DropSite; bonus: number }>;
 }
 
+/**
+ * The drop window to fly into, and — while descending or climbing to it —
+ * the path from the aircraft to where the band begins, in world coordinates.
+ */
+export interface DropGuide {
+  lo: number;
+  hi: number;
+  fade: number;
+  path?: { x0: number; alt0: number; x1: number; alt1: number } | null;
+}
+
 /** What the drops need to know about the route they are laid along. */
 export interface DropWorld {
   towns: ReadonlyArray<Town>;
@@ -236,10 +247,14 @@ export class SupplyDrops {
     const n = Math.max(1, Math.round(routeEndPx / PER));
     const start = routeEndPx * 0.14, span = routeEndPx * 0.72;
     const nearTown = (x: number): boolean =>
-      towns.some(t => x > t.x0 - 700 * M && x < t.x1 + 700 * M)
+      // Never on top of an airfield, whatever the route length
+      x < 1200 * M || x > routeEndPx - 1500 * M
+      || towns.some(t => x > t.x0 - 700 * M && x < t.x1 + 700 * M)
       // A camp is never put where a gun can reach its drop run
       || (world?.zones ?? []).some(([a, b]) =>
-        x > a - GUN_REACH_PX - DROP_RUN_AFTER_PX && x < b + GUN_REACH_PX + DROP_RUN_BEFORE_PX);
+        x > a - GUN_REACH_PX - DROP_RUN_AFTER_PX && x < b + GUN_REACH_PX + DROP_RUN_BEFORE_PX)
+      // ...and nothing tall standing in the way of the descent to it
+      || (!!world && world.tallestBetween(x - DROP_RUN_BEFORE_PX, x + 90 * M) > 40);
     for (let i = 0; i < (opts.camps === false ? 0 : n); i++) {
       const slice = span / n;
       let x = start + slice * (i + 0.2 + rnd(seed * 13 + i) * 0.6);
@@ -276,7 +291,7 @@ export class SupplyDrops {
        */
       // The run-in and the site, not the far side: once the crates are out
       // the obstacle calls take over again
-      const top = world ? world.tallestBetween(s.x - 340 * M, s.x + 90 * M) : 0;
+      const top = world ? world.tallestBetween(s.x - DROP_BAND_RUN_PX, s.x + 90 * M) : 0;
       s.bandLo = Math.round(Math.max(s.surfaceM + 14, top + 7, 18));
       s.bandHi = s.bandLo + 24;
     }
@@ -684,7 +699,7 @@ export class SupplyDrops {
     g: Phaser.GameObjects.Graphics, scrollX: number, groundY: number, pxPerM: number,
     width: number, t: number,
     reticle: { x: number; altM: number; onTarget: boolean; spreadM: number } | null,
-    guide: { lo: number; hi: number; fade: number } | null,
+    guide: DropGuide | null,
     planeScreenX = 300,
   ): void {
     /*
@@ -711,6 +726,38 @@ export class SupplyDrops {
       g.fillStyle(0x9fe8b0, 0.8 * guide.fade * pulse);
       const my = (yHi + yLo) / 2;
       g.fillTriangle(width - 6, my, width - 16, my - 7, width - 16, my + 7);
+
+      /*
+       * The way down: a dashed line from the aircraft to where the band
+       * starts, with chevrons marching along it. Descending into a band you
+       * cannot see the end of was guesswork; this is the slope to fly.
+       */
+      if (guide.path) {
+        const p = guide.path;
+        const ax = p.x0 - scrollX, ay = groundY - p.alt0 * pxPerM;
+        const bx = p.x1 - scrollX, by = groundY - p.alt1 * pxPerM;
+        const len = Math.hypot(bx - ax, by - ay);
+        if (len > 10) {
+          const ux = (bx - ax) / len, uy = (by - ay) / len;
+          const reach = Math.min(len, Math.max(0, width - ax));
+          g.lineStyle(2, 0xffd080, 0.55 * guide.fade);
+          for (let d = 60; d < reach; d += 24) {
+            g.lineBetween(ax + ux * d, ay + uy * d, ax + ux * Math.min(reach, d + 12), ay + uy * Math.min(reach, d + 12));
+          }
+          // Chevrons along the line, moving toward the band
+          const march = (t * 90) % 110;
+          g.fillStyle(0xffd080, 0.85 * guide.fade);
+          for (let d = 90 + march; d < reach; d += 110) {
+            const cx = ax + ux * d, cy = ay + uy * d;
+            const nx = -uy, ny = ux;   // perpendicular
+            g.fillTriangle(
+              cx + ux * 9, cy + uy * 9,
+              cx - ux * 5 + nx * 7, cy - uy * 5 + ny * 7,
+              cx - ux * 5 - nx * 7, cy - uy * 5 - ny * 7,
+            );
+          }
+        }
+      }
     }
 
     // ── Green smoke once they have called, so the site is findable ────────
@@ -725,6 +772,34 @@ export class SupplyDrops {
         g.fillStyle(0x6ad08a, 0.16 * (1 - k * 0.7));
         g.fillEllipse(sx + 14 + drift, base - 6 - k * 120, 8 + k * 22, 6 + k * 14);
       }
+    }
+
+    // ── How many they need, hung over the site ──────────────────────────
+    // The card says it too, but this is what you see when you look at them:
+    // a crate for each one wanted, filled in as they arrive.
+    for (const s of this.sites) {
+      if (s.inboundT < 0 || s.state === 'served' && s.resultT > 3) continue;
+      const sx = s.x - scrollX;
+      if (sx < -80 || sx > width + 80) continue;
+      const base = groundY - s.surfaceM * pxPerM;
+      const y = base - 64;
+      const w = s.need * 13 + 8;
+      g.fillStyle(0x0c0a06, 0.72);
+      g.fillRoundedRect(sx - w / 2, y - 8, w, 16, 3);
+      g.lineStyle(1, 0x9fe8b0, 0.7);
+      g.strokeRoundedRect(sx - w / 2, y - 8, w, 16, 3);
+      for (let i = 0; i < s.need; i++) {
+        const cx = sx - w / 2 + 6 + i * 13;
+        if (i < s.got) {
+          g.fillStyle(0x9fe8b0, 1);
+          g.fillRect(cx, y - 4, 9, 8);
+        } else {
+          g.lineStyle(1.4, 0xffd080, 0.95);
+          g.strokeRect(cx, y - 4, 9, 8);
+        }
+      }
+      g.lineStyle(1, 0x9fe8b0, 0.5);
+      g.lineBetween(sx, y + 8, sx, base - 20);
     }
 
     // ── Flares: up fast, then hang and drift down under a smoke trail ──────
