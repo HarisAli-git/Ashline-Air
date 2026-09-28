@@ -171,6 +171,12 @@ export function biomeFor(id: string | undefined): BiomeId {
   }
 }
 
+/** Hermite ease between two edges — 0 below `e0`, 1 above `e1`. */
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
 function mix(a: number, b: number, t: number): number {
   const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
   const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
@@ -190,6 +196,23 @@ export function blendBiome(from: BiomeId, to: BiomeId, progress: number): Biome 
   const p = Math.max(0, Math.min(1, progress));
   const a = BIOMES[from], b = BIOMES[to], mid = BIOMES.ashland;
 
+  /*
+   * ── You cross a border, you do not fade through one ───────────────────
+   *
+   * The blend used to be linear in route progress, which sounds right and is
+   * badly wrong: at any point in the middle you are looking at a 50/50
+   * AVERAGE of two palettes, and an average of two distinctive countries
+   * resembles neither of them. Measured, only 45% of a flight looked clearly
+   * like either end — the other 55% was mush, which is the whole of "there is
+   * not much difference between the locations".
+   *
+   * An S-curve fixes it: you fly in the origin's country for the first third,
+   * cross over during the middle, and are unmistakably somewhere else for the
+   * last quarter. The land now changes because you are ARRIVING somewhere,
+   * which is the only time it should.
+   */
+  const t = smoothstep(0.38, 0.74, p);
+
   // Weight the two endpoints against the neutral middle
   /*
    * A light touch of neutral wasteland in the middle, not a wash of it.
@@ -199,9 +222,11 @@ export function blendBiome(from: BiomeId, to: BiomeId, progress: number): Biome 
    * looked the same. That was doing more to make the world feel samey than the
    * duplicated biomes were.
    */
-  const wMid = Math.sin(Math.PI * p) * 0.16;
-  const wA = (1 - p) * (1 - wMid);
-  const wB = p * (1 - wMid);
+  // Neutral wasteland only WHILE crossing, so it is the border rather than a
+  // wash laid over the whole route.
+  const wMid = Math.sin(Math.PI * t) * 0.16;
+  const wA = (1 - t) * (1 - wMid);
+  const wB = t * (1 - wMid);
   const total = wA + wB + wMid || 1;
 
   const lerp3 = (ca: number, cb: number, cm: number): number => {

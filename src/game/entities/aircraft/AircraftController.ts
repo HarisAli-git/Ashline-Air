@@ -283,6 +283,16 @@ export class AircraftController {
   /** Full-throttle thrust acceleration, solved so level flight tops out at vMax. */
   private readonly tMax: number;
   private readonly gearFixed: boolean;
+  /**
+   * True when the undercarriage does not retract.
+   *
+   * The controller already knew this (it does not charge gear drag to a
+   * fixed-gear aeroplane) but nothing else did, so the crop duster and the
+   * bush plane — both on fixed legs — still offered a GEAR button, printed
+   * "G: Gear" in the legend, and had the tutorial tell a new player to raise
+   * something that is bolted down.
+   */
+  get hasRetractableGear(): boolean { return !this.gearFixed; }
 
   private accumulator = 0;
 
@@ -405,7 +415,17 @@ export class AircraftController {
      *
      * At and above cruise the factor is 1, so vMax and the climb are untouched.
      */
-    const propEff = 0.42 + 0.58 * clamp(s.speed / this.vCruise, 0, 1);
+    /*
+     * Recovers by 55% of cruise, not at cruise.
+     *
+     * Ramping all the way to cruise speed meant only 63% of thrust was
+     * available during the CLIMB-OUT — which is precisely the part of the
+     * flight the player is watching the speed tape, and why the crop duster
+     * felt like it never got going. A real propeller is back to full
+     * efficiency well before cruise; the low-speed penalty only exists to
+     * stop the take-off roll being a catapult launch.
+     */
+    const propEff = 0.42 + 0.58 * clamp(s.speed / (this.vCruise * 0.55), 0, 1);
     const aT = effThrottle * this.tMax * propEff * Math.pow(sigma, THRUST_LAPSE)
       * (1 - s.engineTemp * 0.3)
       * (1 - clamp(1 - s.integrity / 100, 0, 1) * 0.45);

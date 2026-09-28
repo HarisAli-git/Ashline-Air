@@ -160,6 +160,27 @@ class ProgressionServiceClass {
   }
 
   /** How far off the next locked settlement is, for the map's progress line. */
+  /**
+   * What one particular locked place is still waiting for, in a few words —
+   * or null if it is already open.
+   *
+   * The chart only ever said "LOCKED" over a grey dot, and the requirement
+   * for just the NEXT place sat in tiny truncated text in the corner. Every
+   * locked marker now carries its own line, so the map answers "what do I
+   * need to do to go there" at the place itself.
+   */
+  requirementFor(settlementId: string, save: SaveData = SaveService.get()): string | null {
+    if (save.player.unlockedSettlementIds.includes(settlementId)) return null;
+    const rule = UNLOCKS.find(r => r.settlementId === settlementId);
+    if (!rule) return 'not open to you';
+    const needD = Math.max(0, rule.deliveries - save.player.completedContractIds.length);
+    const needR = Math.max(0, rule.reputation - bestReputation(save));
+    const parts: string[] = [];
+    if (needD > 0) parts.push(`${needD} more deliver${needD === 1 ? 'y' : 'ies'}`);
+    if (needR > 0) parts.push(`${needR} standing`);
+    return parts.length ? parts.join(' · ') : 'opens on your next landing';
+  }
+
   nextUnlockHint(save: SaveData = SaveService.get()): string | null {
     const deliveries = save.player.completedContractIds.length;
     const rep = bestReputation(save);

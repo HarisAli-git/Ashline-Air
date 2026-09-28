@@ -53,38 +53,24 @@ export class PreFlightScene extends Phaser.Scene {
       });
 
     // "Fly" button — enabled only when a contract is active
-    this.buildFlyButton(cx, height - 40);
+    this.wireDeparture();
   }
 
-  private buildFlyButton(cx: number, y: number): void {
-    const text = this.add.text(cx, y, 'Select a contract first', {
-      fontSize: '22px',
-      color: '#4a4030',
-      fontFamily: 'monospace',
-      fontStyle: 'bold',
-    }).setOrigin(0.5, 1);
-
-    let enabled = false;
-    const enable = (): void => {
-      if (enabled) return;
-      enabled = true;
-      text.setText('FLY →').setStyle({ color: '#ffd080' });
-      text.setInteractive({ useHandCursor: true });
-      text.on('pointerover', () => text.setStyle({ color: '#ffffff' }));
-      text.on('pointerout',  () => text.setStyle({ color: '#ffd080' }));
-      text.on('pointerdown', () => {
-        const s = SaveService.get();
-        if (!s.player.activeContractId) return;
-        EventBus.emit('scene:start-flight', { contractId: s.player.activeContractId });
-        fadeToScene(this, 'FlightScene', { contractId: s.player.activeContractId });
-      });
-    };
-
-    if (SaveService.get().player.activeContractId !== null) enable();
-
-    // React enables the button after contract acceptance; guard against
-    // stacking duplicate pointer handlers on repeated accepts.
-    const unsubAccepted = EventBus.on('contract:accepted', enable);
-    this.events.once('shutdown', unsubAccepted);
+  /*
+   * The FLY control used to live here, as a Phaser text object at the bottom
+   * of the canvas — underneath the React panel that lists the contracts. It
+   * was covered on every screen size, which is why it kept being reported.
+   *
+   * It is now the "Depart" button inside the dispatch board itself, a sibling
+   * of the list rather than a layer beneath it, so it cannot be occluded. All
+   * this scene does is listen for the board's decision.
+   */
+  private wireDeparture(): void {
+    const off = EventBus.on('scene:depart', ({ contractId }) => {
+      EventBus.emit('scene:start-flight', { contractId });
+      fadeToScene(this, 'FlightScene', { contractId });
+    });
+    this.events.once('shutdown', off);
   }
+
 }

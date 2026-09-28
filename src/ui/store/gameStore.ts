@@ -37,6 +37,13 @@ export function useInFlight(): boolean {
   return flying;
 }
 
+/** The current tutorial line, or null. First flight of a save only. */
+export function useTutorial(): string | null {
+  const [line, setLine] = useState<string | null>(null);
+  useEffect(() => EventBus.on('flight:tutorial', ({ text }) => setLine(text)), []);
+  return line;
+}
+
 export function useMoney(): number {
   const [money, setMoney] = useState<number>(() => SaveService.get().player.money);
   useEffect(() => {
@@ -72,6 +79,9 @@ export interface FlightStatus {
   trafficAvoid: 1 | -1 | null;
   /** Projected fuel fraction left in the tank on arrival. See FlightScene. */
   fuelAtArrival: number;
+  retractableGear: boolean;
+  dropReady: boolean;
+  cratesLeft: number;
   weatherCaution: string | null;
   iceLoad: number;
   avionicsOut: boolean;

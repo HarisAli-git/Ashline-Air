@@ -35,7 +35,7 @@ function makeDefaultSave(): SaveData {
       ownedAircraft: [
         {
           definitionId: 'crop_duster',
-          fuel: 80,
+          fuel: 70,
           integrity: 100,
           engineTemp: 0,
           cargoSlots: [],
@@ -125,6 +125,14 @@ class SaveServiceClass {
    * `activeAircraftId` is stored as a stringified array index; fall back to
    * slot 0 rather than crashing on a stale or malformed id.
    */
+  /**
+   * The active aircraft, with its tank clamped to what it can actually hold.
+   *
+   * A save written before an aircraft's capacity changed (or the default
+   * 80 L against a 70 L crop duster) reported more fuel than the tank holds,
+   * which put "80 / 70 L" on the dispatch gauge and made the range maths
+   * nonsense. Clamped on read so no caller has to remember.
+   */
   getActiveAircraft(): { owned: OwnedAircraft; def: AircraftDefinition } {
     const save = this.get();
     const idx = Number.parseInt(save.player.activeAircraftId, 10);
@@ -133,6 +141,8 @@ class SaveServiceClass {
       save.player.ownedAircraft[0];
     const def = window.gameData.aircraft.find(a => a.id === owned.definitionId);
     if (!def) throw new Error(`[SaveService] Unknown aircraft definition: ${owned.definitionId}`);
+    // Never hand back more than the tank holds — see the note above.
+    if (owned.fuel > def.stats.fuelCapacity) owned.fuel = def.stats.fuelCapacity;
     return { owned, def };
   }
 

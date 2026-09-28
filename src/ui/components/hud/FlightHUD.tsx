@@ -1,5 +1,5 @@
 import React from 'react';
-import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo, useFlightStatus } from '../../store/gameStore';
+import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo, useFlightStatus, useTutorial } from '../../store/gameStore';
 import { EventBus } from '../../../game/utils/EventBus';
 import { SaveService } from '../../../services/SaveService';
 import { useViewport } from '../../viewport';
@@ -29,6 +29,7 @@ export function FlightHUD(): React.ReactElement | null {
   const vp = useViewport();
   const state = useFlightState();
   const event = useEventModal();
+  const tutorial = useTutorial();
   const { gearDown, flapsDeployed } = useGearFlaps();
   const cargo = useCargo();
   const route = useRouteInfo();
@@ -167,6 +168,10 @@ export function FlightHUD(): React.ReactElement | null {
         )}
 
         {/* Only when they matter — see the note at the top of this file */}
+        {/* Crates aboard — only while there is someone to drop them on */}
+        {status?.dropReady && (
+          <Mini s={styles} label="CRATES" value={`${status.cratesLeft}`} tone="#9fe8b0" />
+        )}
         {warnTemp && <Mini s={styles} label="ENG" value={`${tempPct}%`} tone="#ff8844" />}
         {warnHull && (
           <Mini s={styles} label="HULL" value={`${integrity.toFixed(0)}%`}
@@ -177,13 +182,24 @@ export function FlightHUD(): React.ReactElement | null {
         )}
 
         <div style={styles.configRow}>
-          <span style={{ color: gearDown ? '#9fe8b0' : '#5a5040' }}>GEAR</span>
+          {/* Two of the four aircraft are on fixed legs — no chip for a
+              control they do not have. */}
+          {status?.retractableGear !== false && (
+            <span style={{ color: gearDown ? '#9fe8b0' : '#5a5040' }}>GEAR</span>
+          )}
           <span style={{ color: flapsDeployed ? '#ffd080' : '#5a5040' }}>FLAP</span>
         </div>
       </div>
 
       {/* ── The radio call ──────────────────────────────────────────────── */}
       {event && <RadioStrip s={styles} event={event} compact={compact} />}
+      {/*
+        * One line of teaching at the bottom centre — the only part of the
+        * screen the HUD redesign left completely clear, and the same place
+        * the keyboard legend sits (FlightScene hides that while this shows,
+        * so they can never overlap).
+        */}
+      {tutorial && <div style={styles.tutorial}>{tutorial}</div>}
     </>
   );
 }

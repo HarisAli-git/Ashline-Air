@@ -10,6 +10,8 @@ import { SoundEngine } from '../audio/SoundEngine';
 import { distance, pixelsToKm } from '../utils/math';
 import type { SettlementDefinition } from '../../types';
 import { canOperate, fieldSummary } from '../../services/AirfieldService';
+import { BIOMES, biomeFor } from '../world/Biomes';
+import { maxRouteKm, routeBlock, GAMEPLAY_KM_PER_LORE_KM } from '../../services/RouteService';
 
 
 
@@ -50,6 +52,8 @@ export class MapScene extends Phaser.Scene {
     this.routeGfx = this.add.graphics();
     this.drawRouteLabels(settlements, unlocked);
 
+    this.drawRangeRing(settlements, save.player.currentLocationId);
+
     for (const settlement of settlements) {
       this.createMarker(settlement, unlocked.includes(settlement.id));
     }
@@ -86,8 +90,10 @@ export class MapScene extends Phaser.Scene {
     const offset = (this.t * 14) % 16;
     const hereId = save.player.currentLocationId;
     const pairs = this.routePairs(settlements, unlocked);
+    const active = SaveService.getActiveAircraft().def;
     for (const [a, b] of pairs) {
-      const flyable = a.id === hereId || b.id === hereId;
+      // Live only if it leaves from here AND this aircraft can actually do it
+      const flyable = (a.id === hereId || b.id === hereId) && routeBlock(active, a, b) === null;
       this.dashedLine(
         this.routeGfx, a.position.x, a.position.y, b.position.x, b.position.y,
         7, 9, offset, flyable,
@@ -242,7 +248,27 @@ export class MapScene extends Phaser.Scene {
     g.fillEllipse(width * 0.63, height * 0.88, width * 0.26, height * 0.11);
 
     // ── Irradiated zone: hatched and ringed, pinned to the top-right ──────
-    const zx = width - Math.min(140, width * 0.13), zy = height * 0.17;
+    /*
+     * Placed in the emptiest part of the chart, not at a fixed corner.
+     *
+     * Pinned top-right it sat under the HANGAR button; moved down-left by
+     * hand it landed squarely on Cinder Flats. Both were guesses about a
+     * canvas whose width follows the device. Searching a coarse grid for the
+     * point furthest from every settlement and every piece of chrome puts it
+     * somewhere genuinely empty at any size.
+     */
+    let zx = width * 0.5, zy = height * 0.5, bestD = -1;
+    const places = window.gameData.settlements.map(p2 => p2.position);
+    for (let gx = 0.12; gx <= 0.88; gx += 0.04) {
+      for (let gy2 = 0.2; gy2 <= 0.82; gy2 += 0.04) {
+        const x = width * gx, y = height * gy2;
+        let d = Infinity;
+        for (const q of places) d = Math.min(d, Math.hypot(q.x - x, q.y - y));
+        // Keep off the chrome: the header, the hangar corner, the compass
+        if (y < 120 || (x > width - 260 && y < 190) || (x > width - 150 && y > height - 150)) continue;
+        if (d > bestD) { bestD = d; zx = x; zy = y; }
+      }
+    }
     const zr = Math.min(56, height * 0.11);
     g.lineStyle(1, 0x6a3a14, 0.42);
     for (let i = -6; i <= 6; i++) {
@@ -261,6 +287,50 @@ export class MapScene extends Phaser.Scene {
   }
 
   private drawTerritories(settlements: SettlementDefinition[], unlocked: string[]): void {
+    /*
+     * ── Regions ─────────────────────────────────────────────────────────
+     *
+     * Every place now has its own country in flight — rust mesas, drowned
+     * coast, black ash, alpine — and the chart showed none of it: one murky
+     * brown sheet with six dots on it. A wide wash of each biome's own land
+     * colour under each settlement makes the map read as six different
+     * places, and it is the same colour you will see out of the window.
+     */
+    const rg = this.add.graphics();
+    for (const s of settlements) {
+      const biome = BIOMES[biomeFor(s.id)];
+      const land = biome.palette.hillLight;
+      const open = unlocked.includes(s.id);
+      // Strong enough to change what the chart reads as, not just tint it
+      for (let k = 7; k >= 1; k--) {
+        rg.fillStyle(land, (open ? 0.085 : 0.05) * (8 - k) / 7 * 1.6);
+        rg.fillCircle(s.position.x, s.position.y, 18 + k * 17);
+      }
+      // The drowned coast gets water on the chart too — it is the whole point
+      if (biome.shape.water > 0.2) {
+        rg.lineStyle(2, 0x3a7d92, open ? 0.45 : 0.22);
+        for (let i = 0; i < 5; i++) {
+          const a0 = i * 1.25 + 0.4;
+          rg.beginPath();
+          rg.moveTo(s.position.x + Math.cos(a0) * 34, s.position.y + Math.sin(a0) * 22);
+          rg.lineTo(s.position.x + Math.cos(a0) * 92, s.position.y + Math.sin(a0) * 58);
+          rg.strokePath();
+        }
+      }
+      // High country: snow marks
+      if (biome.shape.caps > 0.8) {
+        rg.fillStyle(0xe8f0ff, open ? 0.35 : 0.16);
+        for (let i = 0; i < 6; i++) {
+          const a0 = i * 1.05 + 0.2;
+          rg.fillTriangle(
+            s.position.x + Math.cos(a0) * 58 - 6, s.position.y + Math.sin(a0) * 40 + 4,
+            s.position.x + Math.cos(a0) * 58 + 6, s.position.y + Math.sin(a0) * 40 + 4,
+            s.position.x + Math.cos(a0) * 58, s.position.y + Math.sin(a0) * 40 - 6,
+          );
+        }
+      }
+    }
+
     for (const s of settlements) {
       const faction = window.gameData.factions.find(f => f.id === s.factionId);
       const color = faction ? parseInt(faction.color.replace('#', ''), 16) : 0x888888;
@@ -278,6 +348,40 @@ export class MapScene extends Phaser.Scene {
         ease: 'Sine.easeInOut',
       });
     }
+  }
+
+  /**
+   * How far the aircraft you are flying can go from here, drawn on the chart.
+   *
+   * The whole range system — the reason a bigger aircraft is worth buying —
+   * was invisible on the one screen where you plan: you found out a place was
+   * out of reach by clicking it. A ring around YOU ARE HERE answers it at a
+   * glance, and when you buy something with longer legs the ring visibly
+   * grows, which is the upgrade you paid for.
+   */
+  private drawRangeRing(settlements: SettlementDefinition[], hereId: string): void {
+    const here = settlements.find(x => x.id === hereId);
+    if (!here) return;
+    const def = SaveService.getActiveAircraft().def;
+    // gameplay km -> lore km -> chart px
+    const r = (maxRouteKm(def) / GAMEPLAY_KM_PER_LORE_KM) / KM_PER_PIXEL;
+    const g = this.add.graphics();
+    g.fillStyle(0xffd080, 0.035);
+    g.fillCircle(here.position.x, here.position.y, r);
+    // Dashed edge, so it reads as a limit rather than another territory
+    const segs = Math.max(24, Math.round(r / 7));
+    g.lineStyle(1.5, 0xffd080, 0.45);
+    for (let i = 0; i < segs; i += 2) {
+      const a0 = (i / segs) * Math.PI * 2, a1 = ((i + 1) / segs) * Math.PI * 2;
+      g.beginPath();
+      g.moveTo(here.position.x + Math.cos(a0) * r, here.position.y + Math.sin(a0) * r);
+      g.lineTo(here.position.x + Math.cos(a1) * r, here.position.y + Math.sin(a1) * r);
+      g.strokePath();
+    }
+    // Labelled on its top edge, clear of the reticle
+    this.add.text(here.position.x, here.position.y - r - 4, `${def.name} range`, {
+      fontSize: '10px', color: '#c8a868', fontFamily: 'monospace',
+    }).setOrigin(0.5, 1).setAlpha(0.8);
   }
 
   private routePairs(
@@ -394,9 +498,10 @@ export class MapScene extends Phaser.Scene {
     drawDot(false);
 
     // The position reticle reaches ±34, so the name has to clear it
+    // Locked names were #4a4030 on a brown chart — genuinely unreadable.
     const label = this.add.text(0, isHere ? 38 : 22, settlement.name, {
       fontSize: '12px',
-      color: unlocked ? '#e8d5b7' : '#4a4030',
+      color: unlocked ? '#e8d5b7' : '#8a7a5a',
       fontFamily: 'monospace',
     }).setOrigin(0.5, 0);
 
@@ -414,9 +519,11 @@ export class MapScene extends Phaser.Scene {
     container.add([dot, label, strip]);
 
     if (!unlocked) {
-      const lock = this.add.text(0, -24, 'LOCKED', {
-        fontSize: '9px', color: '#4a4030', fontFamily: 'monospace', letterSpacing: 2,
-      }).setOrigin(0.5);
+      // Say what it takes, at the place itself — not just "LOCKED"
+      const need = ProgressionService.requirementFor(settlement.id) ?? '';
+      const lock = this.add.text(0, (isHere ? 38 : 22) + 27, `🔒 ${need}`, {
+        fontSize: '10px', color: '#c8a868', fontFamily: 'monospace',
+      }).setOrigin(0.5, 0);
       container.add(lock);
       return;
     }
@@ -535,8 +642,12 @@ export class MapScene extends Phaser.Scene {
       fontSize: '12px', color: '#ffd080', fontFamily: 'monospace', letterSpacing: 1,
     }).setOrigin(0, 0.5);
     const hint = ProgressionService.nextUnlockHint(save);
-    this.add.text(20, 70, hint ? `LOCKED:  ${hint}` : 'All destinations open.', {
-      fontSize: '11px', color: '#6a5a3a', fontFamily: 'monospace',
+    // The next goal, readable. It was #6a5a3a at 11 px and routinely
+    // truncated — the most important progression line on the chart was the
+    // least visible thing on it.
+    this.add.text(20, 72, hint ? `Next: ${hint.replace(/^[A-Z ]+(?= —)/, n2 => titleCase(n2))}` : 'Every destination is open.', {
+      fontSize: '12px', color: '#c8a868', fontFamily: 'monospace',
+      wordWrap: { width: Math.max(260, this.cameras.main.width * 0.5) },
     }).setOrigin(0, 0.5);
 
     // Scale bar
@@ -631,4 +742,9 @@ function mulberry32(seed: number): () => number {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** "HIGHREACH RELAY" -> "Highreach Relay". */
+function titleCase(t: string): string {
+  return t.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 }

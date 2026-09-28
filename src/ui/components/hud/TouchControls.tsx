@@ -64,6 +64,8 @@ export function TouchControls(): React.ReactElement | null {
    */
   const nearGround = state.altitude < 130;
   const engineOut = status?.engineFailed === true || state.enginePower < 0.02;
+  // No GEAR control for the two aircraft that sit on fixed legs.
+  const retractable = status?.retractableGear !== false;
 
   const leverH = Math.max(84, Math.min(Math.round(vp.canvas.height * 0.34), Math.round(150 * s)));
   const stickSize = Math.max(48, Math.min(Math.round(62 * s), Math.round((vp.canvas.height - deck - pad(70)) / 2)));
@@ -106,10 +108,17 @@ export function TouchControls(): React.ReactElement | null {
           <PulseButton label="▶ START" scale={s} control="engine" wide danger />
         )}
 
+        {/* Survivors signalling: the drop is the only thing that matters now */}
+        {!engineOut && status?.dropReady && (
+          <PulseButton label={`📦 DROP ${status.cratesLeft}`} scale={s} control="drop" wide />
+        )}
+
         {/* Near the ground: the two things a takeoff or an approach needs */}
         {!engineOut && nearGround && (
           <>
-            <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
+            {retractable && (
+              <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
+            )}
             <PulseButton label={flapsDeployed ? 'FLAP ▼' : 'FLAP ▲'} scale={s} control="flaps" wide />
           </>
         )}
@@ -127,7 +136,9 @@ export function TouchControls(): React.ReactElement | null {
         {drawerOpen && (
           <>
             {/* Everything, always — the contextual set is a shortcut, not a cage */}
-            <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
+            {retractable && (
+              <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
+            )}
             <PulseButton label={flapsDeployed ? 'FLAP ▼' : 'FLAP ▲'} scale={s} control="flaps" wide />
             <PulseButton label="ENGINE" scale={s} control="engine" wide />
             <PulseButton label="TIME ⏩" scale={s} control="time" wide />

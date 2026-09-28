@@ -1228,7 +1228,14 @@ class SoundEngineClass {
     // is the moment the whole effect exists for.
     const shift = 1 + Math.max(-0.35, Math.min(0.35, doppler)) * 0.18;
 
-    this.trafGain.gain.setTargetAtTime(p * p * 0.085, t, 0.18);
+    /*
+     * Audible. At 0.085 peak — and squared, so it collapsed the moment they
+     * were not right on top of you — another aeroplane passing close by made
+     * essentially no sound, which is a strange thing in a game whose whole
+     * traffic mechanic is about noticing them. Raised, and eased to p^1.5 so
+     * it carries further out before fading.
+     */
+    this.trafGain.gain.setTargetAtTime(Math.pow(p, 1.5) * 0.34, t, 0.18);
     this.trafOsc.frequency.setTargetAtTime(62 * shift, t, 0.12);
     this.trafOsc2.frequency.setTargetAtTime(93 * shift, t, 0.12);
     this.trafChop.frequency.setTargetAtTime(44 * shift, t, 0.12);

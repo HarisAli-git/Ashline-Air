@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ContractBoard } from './ContractBoard';
+import { DispatchBoard } from './DispatchBoard';
 import { EconomyScreen } from './EconomyScreen';
 
 type Tab = 'contracts' | 'economy';
@@ -33,9 +33,15 @@ export function PreFlightOverlay({ settlementId }: Props): React.ReactElement {
       </div>
 
       {/* Content */}
-      <div className="aa-scroll" style={styles.content}>
+      {/*
+        * NOT scrollable. The board manages its own scrolling internally so
+        * that its dispatch bar can stay pinned; a scroll container here would
+        * carry the bar off the bottom with the list, which is the whole bug
+        * this screen had.
+        */}
+      <div style={styles.content}>
         {tab === 'contracts' && (
-          <ContractBoard
+          <DispatchBoard
             settlementId={settlementId}
             onContractAccepted={() => setContractAccepted(true)}
           />
@@ -56,7 +62,8 @@ const styles: Record<string, React.CSSProperties> = {
     left: '50%',
     transform: 'translateX(-50%)',
     width: 'min(560px, calc(100% - 24px))',
-    maxHeight: 'calc(100% - 112px)',
+    height: 'calc(100% - 88px)',
+    maxHeight: 'calc(100% - 88px)',
     pointerEvents: 'auto',
     background: 'rgba(10,8,4,0.96)',
     border: '1px solid #3a2a10',
@@ -89,9 +96,11 @@ const styles: Record<string, React.CSSProperties> = {
     borderBottomColor: '#ffd080',
   },
   content: {
-    overflowY: 'auto',
     flex: 1,
     minHeight: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
   },
   toast: {
     background: 'rgba(10,8,4,0.95)',

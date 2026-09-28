@@ -558,6 +558,35 @@ export class AirTraffic {
       // Fuselage stripe
       poly([[L(22), -1.2], [L(-29), -1.8], [L(-29), -0.2], [L(22), 0.4]], pal.trim, 0.6, 0);
 
+      /*
+       * ── Repairs ─────────────────────────────────────────────────────────
+       *
+       * Nothing out here has been manufactured in decades, so nothing is
+       * unbroken. Mismatched panels riveted over the hull and soot streaming
+       * back from the exhaust are what separate a scavenged airframe from a
+       * clean one — the silhouette was right, but the surface was factory
+       * fresh, and at distance the surface is most of what you read.
+       */
+      {
+        const patches: Array<[number, number, number, number]> = [
+          [-4, -4.6, 8, 3.4], [-19, -3.2, 6, 3.0], [12, 1.2, 7, 2.6], [-26, 0.6, 5, 2.4],
+        ];
+        for (let i = 0; i < patches.length; i++) {
+          if (rnd(p.seed * 17 + i * 31) < 0.45) continue;
+          const [px, py, pw, ph] = patches[i];
+          poly([
+            [L(px), py], [L(px + pw), py - 0.5],
+            [L(px + pw), py + ph], [L(px), py + ph + 0.4],
+          ], i % 2 ? pal.dark : pal.hi, 0.55, 0.9);
+        }
+        // Exhaust soot trailing aft of the engine line
+        for (let i = 0; i < 3; i++) {
+          const ex = L(kind === 'courier' ? 20 - i * 7 : 8 - i * 7);
+          poly([[ex, -1.4 + i * 0.5], [ex - 7, -1.0 + i * 0.5],
+                [ex - 7, 0.6 + i * 0.5], [ex, 0.2 + i * 0.5]], 0x15120e, 0.30 - i * 0.07, 0);
+        }
+      }
+
       // ── Engines: nacelles hung on the wing, props clear of the leading edge
       if (kind === 'hauler' || kind === 'gunship') {
         for (const ex of [0, -13]) {
@@ -631,15 +660,31 @@ export class AirTraffic {
     t: number, seed: number, r: number, spinning: boolean,
   ): void {
     if (spinning) {
-      // Kept faint: a bright disc at this size reads as a hole in the aeroplane
-      g.fillStyle(0xb8c0c8, 0.085);
-      g.fillEllipse(at.x, at.y, r * 0.5, r * 1.9);
+      /*
+       * A propeller you can actually see.
+       *
+       * At 8% alpha with two hairline blades, the disc was invisible at
+       * distance and every other aeroplane in the sky read as a jet — which
+       * is most of why the traffic looked too modern for a world where
+       * nothing has been manufactured in decades. A turning prop is the
+       * single strongest cue that something is old and piston-driven, so it
+       * gets a real disc, a bright rim where the tips are, and four blades
+       * you can catch.
+       */
+      g.fillStyle(0xc8d0d8, 0.16);
+      g.fillEllipse(at.x, at.y, r * 0.62, r * 2.0);
+      // Tip rim — the brightest part of a real prop disc
+      g.lineStyle(1.6, 0xe8f0f6, 0.30);
+      g.strokeEllipse(at.x, at.y, r * 0.62, r * 2.0);
       const a = t * 46 + seed;
-      for (let b = 0; b < 2; b++) {
-        const ang = a + b * Math.PI;
-        g.lineStyle(1.1, 0xdfe6ec, 0.2);
-        g.lineBetween(at.x, at.y, at.x + Math.cos(ang) * r * 0.26, at.y + Math.sin(ang) * r * 0.95);
+      for (let b = 0; b < 4; b++) {
+        const ang = a + (b * Math.PI) / 2;
+        g.lineStyle(1.5, 0xdfe6ec, 0.42);
+        g.lineBetween(at.x, at.y, at.x + Math.cos(ang) * r * 0.3, at.y + Math.sin(ang) * r * 1.0);
       }
+      // Spinner boss
+      g.fillStyle(0x1a1e18, 0.9);
+      g.fillCircle(at.x, at.y, Math.max(1.5, r * 0.11));
     } else {
       // Windmilling / stopped — you can see the blades
       const a = t * 2 + seed;
