@@ -128,6 +128,11 @@ export function TouchControls(): React.ReactElement | null {
           <PulseButton label="TIME ⏩" scale={s} control="time" wide />
         )}
 
+        {/* Turn round — loud when you have just flown past the strip */}
+        {!engineOut && status?.canTurn && (status.overshot || !nearGround || status.dropZone) && (
+          <PulseButton label="↺ TURN" scale={s} control="turn" wide danger={status.overshot} />
+        )}
+
         <PulseButton
           label={drawerOpen ? '✕' : '☰'}
           scale={s}

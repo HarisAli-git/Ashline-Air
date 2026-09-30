@@ -43,6 +43,8 @@ export interface CoachContext {
   crateHits: number;
   weatherAhead: { kind: string; km: number } | null;
   traffic: boolean;
+  /** Flew past the destination strip and still heading away from it. */
+  overshot: boolean;
 }
 
 export interface CoachView {
@@ -126,6 +128,16 @@ const BASICS: Lesson[] = [
 ];
 
 const MOMENTS: Lesson[] = [
+  {
+    id: 'turn', title: 'Missed it? Turn round', priority: 95,
+    text: c => (c.touch
+      ? 'You flew past the strip. Tap TURN — the aeroplane comes round in a few seconds'
+      : 'You flew past the strip. Press R — the aeroplane comes round in a few seconds')
+      + ' and bleeds some speed doing it. Then line up and try again.',
+    keys: ['R'], touchKeys: ['↺ TURN'],
+    when: (_s, c) => c.overshot,
+    done: (_s, c, t) => !c.overshot || t > 15,
+  },
   {
     id: 'drop-release', title: 'Release', priority: 100,
     text: c => (c.touch

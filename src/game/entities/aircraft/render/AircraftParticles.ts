@@ -25,6 +25,9 @@ export class AircraftParticles {
   private smokeOn = false;
 
   private readonly spec: AircraftVisualSpec;
+  /** Emitters that throw particles backwards, with their authored speed range. */
+  private flippable: Array<[Phaser.GameObjects.Particles.ParticleEmitter, number, number]> = [];
+  private trailSign: 1 | -1 = 1;
 
   constructor(scene: Phaser.Scene, spec: AircraftVisualSpec) {
     this.spec = spec;
@@ -136,15 +139,35 @@ export class AircraftParticles {
     if (on) this.fuelMist.start(); else this.fuelMist.stop();
   }
 
-  /** Reposition + toggle emitters. (x, y) = container position, rot = body rotation. */
-  update(state: FlightState, x: number, y: number, rot: number, engineOn: boolean, groundY: number): void {
+  /**
+   * Reposition + toggle emitters. (x, y) = container position, rot = body
+   * rotation, `xs` = the side view's signed horizontal scale: -1 when the
+   * aeroplane faces left, and anywhere between during a turn.
+   */
+  update(state: FlightState, x: number, y: number, rot: number, engineOn: boolean, groundY: number, xs = 1): void {
     const s = this.spec.scale;
     const cos = Math.cos(rot), sin = Math.sin(rot);
     const at = (lx: number, ly: number): [number, number] => {
-      // Body-local design units → scene coords (body sits groundContactY above container origin)
+      // Body-local design units → scene coords (body sits groundContactY above
+      // container origin), mirrored and squashed exactly as the sprite is
       const bx = lx * s, by = (ly - this.spec.groundContactY) * s;
-      return [x + bx * cos - by * sin, y + bx * sin + by * cos];
+      return [x + xs * (bx * cos - by * sin), y + bx * sin + by * cos];
     };
+    // Everything that trails behind has to trail the other way once turned
+    const sign: 1 | -1 = xs >= 0 ? 1 : -1;
+    if (sign !== this.trailSign) {
+      this.trailSign = sign;
+      if (this.flippable.length === 0) {
+        this.flippable = [
+          [this.exhaust, -140, -60], [this.fire, -60, -15], [this.embers, -160, -80],
+          [this.rollDust, -90, -35], [this.burst, -120, 60], [this.fuelMist, -170, -100],
+          [this.damageSmoke, -190, -90], [this.hitSparks, -320, -40],
+        ];
+      }
+      for (const [em, lo, hi] of this.flippable) {
+        em.speedX = sign > 0 ? { min: lo, max: hi } : { min: -hi, max: -lo };
+      }
+    }
 
     // Exhaust — throttle-scaled; darkens and thickens when hot or damaged
     const distress = state.engineTemp > 0.85 || state.integrity < 35;
@@ -204,15 +227,15 @@ export class AircraftParticles {
       if (wantRoll) this.rollDust.start(); else this.rollDust.stop();
     }
     if (wantRoll) {
-      this.rollDust.setPosition(x + (this.spec.gear.mainX - 14) * s, groundY + 2);
+      this.rollDust.setPosition(x + xs * (this.spec.gear.mainX - 14) * s, groundY + 2);
       this.rollDust.frequency = Math.max(18, 70 - state.speed * 1.4);
     }
   }
 
   /** One-shot dust burst at touchdown, scaled by impact severity. */
-  touchdownBurst(x: number, groundY: number, vSpeedAtImpact: number): void {
+  touchdownBurst(x: number, groundY: number, vSpeedAtImpact: number, facing: 1 | -1 = 1): void {
     const n = Math.round(Phaser.Math.Clamp(8 + Math.abs(vSpeedAtImpact) * 6, 8, 50));
-    this.burst.explode(n, x + this.spec.gear.mainX * this.spec.scale, groundY);
+    this.burst.explode(n, x + facing * this.spec.gear.mainX * this.spec.scale, groundY);
   }
 
   destroy(): void {

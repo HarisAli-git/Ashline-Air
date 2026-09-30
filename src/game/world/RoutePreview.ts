@@ -89,6 +89,7 @@ export function previewDrops(
     zones: hz.zones,
     tallestBetween: (x0, x1) => hz.tallestBetween(x0, x1),
     surfaceAt: x => hz.surfaceAt(x),
+    camps: hz.campAnchors,
   });
   const out: DropPreview = {
     sites: drops.sites.length,

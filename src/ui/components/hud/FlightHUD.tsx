@@ -110,6 +110,9 @@ export function FlightHUD(): React.ReactElement | null {
             <Chip s={styles} tone={status.rangedOn > 0.75 ? '#ff4a3a' : '#ff8844'}
               text={status.rangedOn > 0.75 ? 'THEY HAVE YOUR NUMBER — JINK' : 'GUNNERS RANGING YOU'} />
           )}
+          {status.overshot && (
+            <Chip s={styles} tone="#ffd080" text={`OVERSHOT — ${press('turn').toUpperCase()} TO TURN BACK`} />
+          )}
           {status.obstacleAheadM !== null && (
             <Chip s={styles} tone="#ffd080"
               text={`${status.obstacleLabel ?? 'OBSTACLE'} ${Math.round(status.obstacleAheadM)}m — CLIMB`} />
@@ -236,9 +239,12 @@ function DropCard({ s, zone, compact, touch }: {
   const band = `${zone.lo}–${zone.hi} m`;
   const cue: Record<DropZoneStatus['cue'], { text: string; tone: string; pulse?: boolean }> = {
     hold: {
-      // Outside the corridor the guns can still reach you low — say so
-      text: `HOLD HEIGHT · safe to descend in ${Math.max(0.1, zone.descendInKm).toFixed(1)} km`,
-      tone: '#c8b888',
+      // Outside the corridor the guns can still reach you low — say so. From
+      // the far side they may cover the whole approach.
+      text: zone.covered
+        ? 'HOLD HEIGHT · guns cover this side — come in from the other way'
+        : `HOLD HEIGHT · safe to descend in ${Math.max(0.1, zone.descendInKm).toFixed(1)} km`,
+      tone: zone.covered ? '#ff8844' : '#c8b888',
     },
     descend: {
       text: `▼ DESCEND to ${band}${zone.descentRate > 0.5 ? ` · ~${Math.round(zone.descentRate)} m/s` : ''}`,

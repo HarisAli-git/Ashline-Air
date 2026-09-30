@@ -31,6 +31,8 @@ interface CrashOptions {
   verticalSpeed: number;
   /** Belly landing: more sparks, less bounce. */
   gearUp: boolean;
+  /** Which way it was flying: the wreck is thrown forward, the debris back. */
+  dir?: 1 | -1;
 }
 
 interface Chunk {
@@ -112,21 +114,22 @@ export class CrashSequence {
         .setScale(scale).setDepth(6.6).setRotation(Math.random() * Math.PI);
       this.chunks.push({ img, vx, vy, spin, grounded: false });
     };
-    chunk(tex.wingNear, 0.5 * sev, -150 - Math.random() * 120, -230 * sev, 7);
-    chunk(tex.propBlade, 0.42, -240 - Math.random() * 160, -180 * sev, 14);
-    if (sev > 0.8) chunk(tex.gearDoor, 0.4, -90 - Math.random() * 80, -160, -9);
-    if (sev > 1.1) chunk(tex.flap, 0.45, -60 - Math.random() * 90, -210, 11);
+    const d = opts.dir ?? 1;
+    chunk(tex.wingNear, 0.5 * sev, d * (-150 - Math.random() * 120), -230 * sev, 7 * d);
+    chunk(tex.propBlade, 0.42, d * (-240 - Math.random() * 160), -180 * sev, 14 * d);
+    if (sev > 0.8) chunk(tex.gearDoor, 0.4, d * (-90 - Math.random() * 80), -160, -9 * d);
+    if (sev > 1.1) chunk(tex.flap, 0.45, d * (-60 - Math.random() * 90), -210, 11 * d);
 
     // ── The wreck itself: given real motion, not a tween ──────────────────
     // Thrown forward and up off the first impact, spinning hard. Everything
     // after this is integrated in update().
     this.wreck = {
       x: c.x, y: c.y,
-      vx: 40 + opts.speed * 1.1,
+      vx: d * (40 + opts.speed * 1.1),
       vy: -(120 + 190 * sev) * (opts.gearUp ? 0.45 : 1),
       rot: c.rotation,
       // Nose-over, not a flywheel: enough to put it on its nose or its back.
-      spin: (Math.random() < 0.35 ? -1 : 1) * (0.9 + sev * 1.9),
+      spin: d * (Math.random() < 0.35 ? -1 : 1) * (0.9 + sev * 1.9),
       bounces: 0,
       settled: false,
       // Comes to rest broken: nose buried, or over onto its back

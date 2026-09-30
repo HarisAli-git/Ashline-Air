@@ -585,18 +585,39 @@ export class Raiders {
    * The worst weapon in the next hostile stretch, so the aircraft can be told
    * to start climbing while there is still room to do it.
    */
-  threatAhead(worldX: number, rangePx: number): { label: string; ceilingM: number; distancePx: number } | null {
+  threatAhead(
+    worldX: number, rangePx: number, dir: 1 | -1 = 1,
+  ): { label: string; ceilingM: number; distancePx: number } | null {
     let best: { label: string; ceilingM: number; distancePx: number } | null = null;
     for (const e of this.list) {
       const w = WEAPONS[e.kind];
       if (!w) continue;
-      const d = e.x - worldX;
+      const d = (e.x - worldX) * dir;
       if (d <= 0 || d > rangePx) continue;
       if (!best || w.ceilingM > best.ceilingM) {
         best = { label: w.label, ceilingM: w.ceilingM, distancePx: d };
       }
     }
     return best;
+  }
+
+  /**
+   * The highest ceiling of any gun that can reach some part of [x0, x1], or
+   * 0 if none can. The layout keeps every drop site's run-in out of reach
+   * from the side you normally come from; turn round and come back at it
+   * from the other side and this is how the card knows whether that side is
+   * covered too.
+   */
+  gunsReach(x0: number, x1: number): number {
+    const a = Math.min(x0, x1), b = Math.max(x0, x1);
+    let top = 0;
+    for (const e of this.list) {
+      const w = WEAPONS[e.kind];
+      if (!w) continue;
+      const d = e.x < a ? a - e.x : e.x > b ? e.x - b : 0;
+      if (d <= w.rangePx) top = Math.max(top, w.ceilingM);
+    }
+    return top;
   }
 
   private pendingFlak: Array<{ wx: number; y: number; in: number; big: boolean }> = [];

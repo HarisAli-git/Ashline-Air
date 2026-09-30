@@ -86,6 +86,8 @@ export interface FlightStatus {
   dropReady: boolean;
   cratesLeft: number;
   dropZone: DropZoneStatus | null;
+  overshot: boolean;
+  canTurn: boolean;
   weatherCaution: string | null;
   iceLoad: number;
   avionicsOut: boolean;

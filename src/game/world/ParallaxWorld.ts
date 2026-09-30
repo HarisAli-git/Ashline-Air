@@ -149,6 +149,8 @@ export interface WorldFrame {
   minutesOfDay: number; // world-clock minutes 0–1439, drives the day/night cycle
   visibility: number;   // 0–1 from weather, dims the sun/moon
   planeScreenX?: number; // for tracer fire aimed at the aircraft
+  /** +1 flying down the route, -1 back up it — the drop guide runs ahead of it. */
+  heading?: 1 | -1;
   planeScreenY?: number;
   planeWorldX?: number;  // world px, so the guns can lay on a real position
   speedFrac?: number;   // 0–1 airspeed, drives near-field blur and streaks
@@ -328,7 +330,7 @@ export class ParallaxWorld {
     this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
     const home = this.biomeFrom;
     const marks = this.hazards.generateTraining(routeKm, townName, () => home);
-    this.raiders.layout(this.hazards.zones, seed, () => false, ['nest']);
+    this.raiders.layout(this.hazards.zones, seed, () => false, ['nest', 'technical']);
     this.air.reset(seed);
     this.air.setObstacles(this.hazards.all
       .filter(h => h.heightM >= 14)
@@ -453,7 +455,7 @@ export class ParallaxWorld {
     this.traffic.draw(this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
     this.drops.drawAir(
       this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t,
-      this.dropReticle, this.dropGuide ?? this.trainGuide,
+      this.dropReticle, this.dropGuide ?? this.trainGuide, f.planeScreenX ?? 300,
     );
   }
 
@@ -474,8 +476,15 @@ export class ParallaxWorld {
   }
 
   /** Worst weapon in the stretch ahead, so the climb can start in time. */
-  threatAhead(worldX: number, rangePx: number): { label: string; ceilingM: number; distancePx: number } | null {
-    return this.raiders.threatAhead(worldX, rangePx);
+  threatAhead(
+    worldX: number, rangePx: number, dir: 1 | -1 = 1,
+  ): { label: string; ceilingM: number; distancePx: number } | null {
+    return this.raiders.threatAhead(worldX, rangePx, dir);
+  }
+
+  /** Highest gun ceiling that covers any of a stretch, 0 if none. */
+  gunsReach(x0: number, x1: number): number {
+    return this.raiders.gunsReach(x0, x1);
   }
 
   destroy(): void {

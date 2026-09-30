@@ -133,6 +133,8 @@ export class AirTraffic {
       planeWorldX: number;
       planeAlt: number;
       planeSpeedPx: number;   // player's ground speed in world px/s
+      /** Which way the player is flying: +1 down the route, -1 back up it. */
+      heading?: 1 | -1;
       airborne: boolean;
       routeEndPx: number;
       /** The Director's budget, 0-1. Sets the gap between encounters and how
@@ -193,7 +195,7 @@ export class AirTraffic {
     // Nothing new joins the party once you are on the approach — a traffic
     // conflict thrown at you while you are configured to land is not a
     // decision, it is an ambush.
-    if (ctx.routeEndPx - ctx.planeWorldX < 3000) return;
+    if (Math.abs(ctx.routeEndPx - ctx.planeWorldX) < 3000) return;
     const pressure = Phaser.Math.Clamp(ctx.pressure ?? 0.5, 0, 1);
     // In a respite two aeroplanes at once would undo the quiet, so the second
     // slot only opens when the Director is actually spending.
@@ -206,9 +208,10 @@ export class AirTraffic {
   }
 
   private spawn(
-    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; routeEndPx: number },
+    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; routeEndPx: number; heading?: 1 | -1 },
     pressure = 0.5,
   ): void {
+    const h = ctx.heading ?? 1;
     const id = this.seed * 7919 + Math.floor(this.elapsed * 13);
     const r = rnd(id);
     const headOn = r < 0.4;
@@ -241,15 +244,15 @@ export class AirTraffic {
     let wx: number, vx: number, dir: 1 | -1;
     if (headOn) {
       // Well beyond the screen, so the advisory lands before they are visible
-      wx = ctx.planeWorldX + 5200 + rnd(id + 19) * 2600;
-      vx = -(300 + rnd(id + 23) * 230);
-      dir = -1;
+      wx = ctx.planeWorldX + h * (5200 + rnd(id + 19) * 2600);
+      vx = -h * (300 + rnd(id + 23) * 230);
+      dir = -h as 1 | -1;
     } else {
       // Same direction, slower: you run them down over several seconds
       const slower = Phaser.Math.Clamp(ctx.planeSpeedPx * (0.55 + rnd(id + 29) * 0.28), 140, 420);
-      wx = ctx.planeWorldX + 2600 + rnd(id + 31) * 2200;
-      vx = slower;
-      dir = 1;
+      wx = ctx.planeWorldX + h * (2600 + rnd(id + 31) * 2200);
+      vx = h * slower;
+      dir = h;
     }
 
     // Pilot quality is rolled per aeroplane and never shown. You find out
@@ -291,12 +294,15 @@ export class AirTraffic {
    */
   private think(
     p: TrafficPlane, dt: number,
-    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; airborne: boolean },
+    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; airborne: boolean; heading?: 1 | -1 },
   ): void {
     if (!ctx.airborne) return;
 
-    const dx = p.wx - ctx.planeWorldX;
-    const closure = ctx.planeSpeedPx - p.vx;
+    // Measured along the way the player is pointing, so a turn-around does
+    // not leave every other pilot convinced you are still going the other way
+    const h = ctx.heading ?? 1;
+    const dx = (p.wx - ctx.planeWorldX) * h;
+    const closure = (h * ctx.planeSpeedPx - p.vx) * h;
     const dAlt = p.alt - ctx.planeAlt;
     const converging = closure > 20 && dx > 0;
     const seconds = converging ? dx / closure : Infinity;
@@ -342,12 +348,12 @@ export class AirTraffic {
     if (p.alt < TRAFFIC_FLOOR_M && p.vAlt < 0) p.vAlt *= Math.max(0, 1 - dt * 4);
   }
 
-  advisory(planeWorldX: number, planeAlt: number, planeSpeedPx: number): TrafficAdvisory | null {
+  advisory(planeWorldX: number, planeAlt: number, planeSpeedPx: number, heading: 1 | -1 = 1): TrafficAdvisory | null {
     let best: TrafficAdvisory | null = null;
     for (const p of this.list) {
       if (p.doom !== null) continue;
-      const dx = p.wx - planeWorldX;
-      const closure = planeSpeedPx - p.vx;     // px/s we are eating the gap at
+      const dx = (p.wx - planeWorldX) * heading;
+      const closure = (heading * planeSpeedPx - p.vx) * heading;     // px/s we are eating the gap at
       if (closure <= 20 || dx <= 0) continue;
       const seconds = dx / closure;
       if (seconds > ADVISORY_SECONDS) continue;

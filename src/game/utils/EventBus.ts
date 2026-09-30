@@ -31,6 +31,8 @@ export interface DropZoneStatus {
   descentRate: number;
   /** Crates still aboard. */
   aboard: number;
+  /** Coming at it from the far side, where guns cover the run-in. */
+  covered?: boolean;
   /**
    * The drop meter, once the flare is up: metres from where a crate would
    * land now to the people (positive = still ahead of it), the half-width of
@@ -166,6 +168,10 @@ export interface GameEvents {
      * calling or the hold is empty.
      */
     dropZone: DropZoneStatus | null;
+    /** Flew past the destination strip, still heading away from it. */
+    overshot: boolean;
+    /** Airborne, high enough and not already turning — the TURN control is live. */
+    canTurn: boolean;
     /** Icing / sand / avionics caution from the weather, or null. */
     weatherCaution: string | null;
     /** 0–1 ice on the airframe, for the gauge. */

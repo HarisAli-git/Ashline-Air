@@ -6,6 +6,7 @@ import {
 import { ensureAircraftTextures, SS, type AircraftTexKeys } from './render/AircraftPainter';
 import { AircraftParticles } from './render/AircraftParticles';
 import { drawMainLeg, drawNoseLeg, drawTailSpring, drawSpat, type GearStyle } from './render/GearArt';
+import { drawTailView } from './render/TailView';
 
 /**
  * Fully procedural aircraft renderer.
@@ -92,6 +93,17 @@ export class AircraftSprite {
   private t = 0;              // local clock
   private coneOn = false;
   private turb = 0;           // weather turbulence 0–1, rocks the airframe
+
+  // ── Turning round ──────────────────────────────────────────────────────────
+  /** Which way the nose points on screen: +1 right, -1 left. */
+  private facing: 1 | -1 = 1;
+  /** 0→1 through a 180, or null when not turning. */
+  private turnP: number | null = null;
+  private turnFrom: 1 | -1 = 1;
+  /** The aeroplane from behind, for the middle of the turn. See TailView. */
+  private readonly tailView: Phaser.GameObjects.Container;
+  private readonly tailGfx: Phaser.GameObjects.Graphics;
+  private tailGearDrawn = true;
 
   constructor(
     scene: Phaser.Scene,
@@ -180,6 +192,11 @@ export class AircraftSprite {
       img(this.tex.nacelle, e.x, e.y);
       this.props.push(this.buildProp(e.x + e.cowlLen / 2 + 6, e.y, 1));
     }
+
+    // The tail-on view, hidden until a turn needs it
+    this.tailGfx = scene.add.graphics();
+    drawTailView(this.tailGfx, spec, true, this.contactY);
+    this.tailView = scene.add.container(0, 0, [this.tailGfx]).setScale(spec.scale).setVisible(false);
 
     // Beacon strobe on the fin tip
     this.beaconGlow = img('px_soft', spec.beacon.x, spec.beacon.y)
@@ -372,7 +389,7 @@ export class AircraftSprite {
   /** Called by FlightScene at the moment of touchdown. */
   notifyTouchdown(vSpeedAtImpact: number): void {
     this.oleoKick = Phaser.Math.Clamp(Math.abs(vSpeedAtImpact) / 6, 0.15, 1);
-    this.particles?.touchdownBurst(this.container.x, this.groundY, vSpeedAtImpact);
+    this.particles?.touchdownBurst(this.container.x, this.groundY, vSpeedAtImpact, this.facing);
   }
 
   /** Persistent fuel-mist trail from the wing (fuel-leak event). */
@@ -486,15 +503,81 @@ export class AircraftSprite {
     this.updateAttitude(state);
     this.updateShadow(state);
 
+    const xs = this.applyTurn();
     this.particles?.update(
-      state, this.container.x, this.container.y, this.body.rotation, this.engineOn, this.groundY,
+      state, this.container.x, this.container.y, this.body.rotation, this.engineOn, this.groundY, xs,
     );
   }
 
   destroy(): void {
     this.particles?.destroy();
     this.shadowImg.destroy();
+    this.tailView.destroy();
     this.container.destroy();
+  }
+
+  /** Point the nose one way or the other, instantly (e.g. a new flight). */
+  setFacing(f: 1 | -1): void {
+    this.facing = f;
+    this.turnP = null;
+  }
+
+  /**
+   * Progress through a 180-degree turn, 0→1, starting from `from`; null ends
+   * it, leaving the aeroplane facing the other way.
+   */
+  setTurn(progress: number | null, from: 1 | -1): void {
+    if (progress === null) {
+      if (this.turnP !== null) this.facing = (-this.turnFrom) as 1 | -1;
+      this.turnP = null;
+      return;
+    }
+    this.turnP = Phaser.Math.Clamp(progress, 0, 1);
+    this.turnFrom = from;
+  }
+
+  /**
+   * Apply the turn to the picture: the side view narrows to nothing as the
+   * nose swings away, the tail view comes up in its place — banked into the
+   * turn and a little smaller, because it is going away from you — and then
+   * the mirrored side view widens back out. Returns the signed horizontal
+   * scale of the side view, which the particles use to trail the right way.
+   */
+  private applyTurn(): number {
+    const s = this.spec.scale;
+    let xs: number;
+    let bank = 0, away = 0;
+    if (this.turnP === null) {
+      xs = this.facing;
+    } else {
+      const psi = Math.PI * this.turnP;
+      xs = this.turnFrom * Math.cos(psi);
+      away = Math.sin(psi);
+      bank = -this.turnFrom * 0.62 * away;
+    }
+    const k = Math.abs(xs);
+    const smooth = (a: number, b: number, v: number): number => {
+      const u = Phaser.Math.Clamp((v - a) / (b - a), 0, 1);
+      return u * u * (3 - 2 * u);
+    };
+    this.container.scaleX = s * (xs >= 0 ? 1 : -1) * Math.max(0.02, k);
+    this.container.scaleY = s;
+    this.container.alpha = this.turnP === null ? 1 : smooth(0.14, 0.5, k);
+
+    const tailA = this.turnP === null ? 0 : 1 - smooth(0.22, 0.62, k);
+    this.tailView.setVisible(tailA > 0.01);
+    if (tailA > 0.01) {
+      const gearNow = this.gearProgress > 0.5;
+      if (gearNow !== this.tailGearDrawn) {
+        this.tailGearDrawn = gearNow;
+        drawTailView(this.tailGfx, this.spec, gearNow, this.contactY);
+      }
+      this.tailView.setAlpha(tailA);
+      this.tailView.setRotation(bank);
+      this.tailView.setScale(s * (1 - 0.14 * away));
+      this.tailView.setPosition(this.container.x, this.container.y + this.body.y * s);
+    }
+    return xs;
   }
 
   // ── Private updaters ───────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import { DROP_REWARD, cratesFor, siteReply, type DropSite } from '../world/Suppl
 import { STRUCTURE_NAME, DROP_RUN_BEFORE_PX, DROP_BAND_RUN_PX } from '../world/Towns';
 import { routeSeed, originStripPx, destStripPx } from '../world/RoutePreview';
 import { press } from '../utils/controls';
+import { destStripPx as destStripOf } from '../world/RoutePreview';
 import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
 
@@ -245,6 +246,20 @@ export class FlightScene extends Phaser.Scene {
   private fireHeat = 0;
   /** Ground clearance under the aircraft, obstacles included, in metres. */
   private clearanceM = 999;
+  /**
+   * Where the aeroplane is along the route, world px — the one number every
+   * system reads. The scroll is derived from it, never the other way round,
+   * because the aeroplane can now turn round and the screen position it is
+   * drawn at slides across to keep the view ahead of it.
+   */
+  private planeX = AIRCRAFT_X;
+  /** +1 flying down the route, -1 flying back up it. */
+  private heading: 1 | -1 = 1;
+  /** Where the aircraft sits on screen; eases across during a turn. */
+  private planeScreenX = AIRCRAFT_X;
+  /** A 180 in progress: seconds into it, how long it takes, and from which way. */
+  private turn: { t: number; dur: number; from: 1 | -1 } | null = null;
+  private overshotCalled = false;
   /** Where the aircraft was last frame — a cable is crossed, not touched. */
   private prevHazardX = 0;
   private prevHazardAlt = 0;
@@ -271,6 +286,11 @@ export class FlightScene extends Phaser.Scene {
     this.crashing            = false;
     this.hasBeenAirborne     = false;
     this.scrollX             = 0;
+    this.planeX              = AIRCRAFT_X;
+    this.heading             = 1;
+    this.planeScreenX        = AIRCRAFT_X;
+    this.turn                = null;
+    this.overshotCalled      = false;
     this.smoothDt            = 1 / 60;
     this.shakeDuration       = 0;
     this.gearToggleCooldown  = 0;
@@ -321,6 +341,40 @@ export class FlightScene extends Phaser.Scene {
     this.fx?.resize(width, height);
     this.approachText?.setPosition(width / 2, height / 2 - 30);
     this.keyHintText?.setPosition(width / 2, this.cameras.main.height - 4);
+    // Flying back up the route the aircraft sits on the right; keep it there
+    if (!this.turn) this.planeScreenX = this.anchorFor(this.heading);
+  }
+
+  /** Where the aircraft sits on screen for a heading: a third in from the back. */
+  private anchorFor(h: 1 | -1): number {
+    return h === 1 ? AIRCRAFT_X : this.cameras.main.width - AIRCRAFT_X;
+  }
+
+  /**
+   * Turn round.
+   *
+   * A 180 at a sensible bank: a few seconds, some speed spent on the way
+   * round, and the aircraft keeps moving through it — forward progress runs
+   * down to nothing and then builds the other way. The picture (see
+   * AircraftSprite.applyTurn) and the camera (the aircraft slides across the
+   * screen so there is room to see where you are now going) follow the same
+   * clock.
+   */
+  private startTurn(): void {
+    if (this.turn || this.landed || this.crashing) return;
+    if (!this.hasBeenAirborne || this.state.altitude < 12) {
+      EventBus.emit('ui:show-notification', { message: 'Get some height first — you need room to turn.', type: 'warning' });
+      return;
+    }
+    if (this.state.speed < this.controller.vStall * 1.15) {
+      EventBus.emit('ui:show-notification', { message: 'Too slow to turn — build some speed first.', type: 'warning' });
+      return;
+    }
+    this.disengageWarp('turning');
+    // A heavy takes longer to come round than a crop duster
+    const dur = 3.2 + Math.min(1.6, (this.controller.vStall - 19) * 0.08);
+    this.turn = { t: 0, dur, from: this.heading };
+    SoundEngine.flapMove();
   }
 
   create(): void {
@@ -436,6 +490,7 @@ export class FlightScene extends Phaser.Scene {
           zones: hz.zones,
           tallestBetween: (a, b) => hz.tallestBetween(a, b),
           surfaceAt: x => hz.surfaceAt(x),
+          camps: hz.campAnchors,
         },
         // The lesson is one crowd in one square — rooftops come later
         this.training ? { squaresOnly: true, camps: false } : {},
@@ -581,8 +636,8 @@ export class FlightScene extends Phaser.Scene {
     // it can get.
     // G only appears for an aeroplane that actually has a retractable one.
     const keyLegend = this.aircraft.hasRetractableGear
-      ? 'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine   SPACE: Drop   T: Time   M: Mute   ESC: Abort'
-      : 'W/S: Throttle   A/D: Pitch   F: Flaps   E: Engine   SPACE: Drop   T: Time   M: Mute   ESC: Abort';
+      ? 'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort'
+      : 'W/S: Throttle   A/D: Pitch   F: Flaps   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort';
     this.keyHintText = this.add.text(width / 2, height - 4, keyLegend,
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
@@ -603,6 +658,7 @@ export class FlightScene extends Phaser.Scene {
       G:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
       F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
       T:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.T),
+      R:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.R),
       M:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.M),
       ESC: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ESC),
       SPACE: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE),
@@ -814,6 +870,7 @@ export class FlightScene extends Phaser.Scene {
       // No toast: the FLAP mark on the HUD and the sound say it, and a
       // paragraph about lift every time you touched the lever was noise.
     }
+    if (Phaser.Input.Keyboard.JustDown(this.keys.R) || TouchInput.consume('turn')) this.startTurn();
     if ((Phaser.Input.Keyboard.JustDown(this.keys.T) || TouchInput.consume('time'))) {
       if (this.timeScale === 4) {
         this.timeScale = 8;
@@ -845,7 +902,7 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Weather → wind ─────────────────────────────────────────────────────
     this.weather.update(
-      delta * this.timeScale, this.scrollX + AIRCRAFT_X, this.director.pressure,
+      delta * this.timeScale, this.planeX, this.director.pressure,
     );
     /*
      * Wind aloft.
@@ -867,11 +924,11 @@ export class FlightScene extends Phaser.Scene {
     // Sampled at the aircraft's own world position, then handed to the
     // controller as a vertical wind so the aerodynamics stay untouched: the
     // wing does not know it is in a thermal, it just goes up with the air.
-    const airX = this.scrollX + AIRCRAFT_X;
+    const airX = this.planeX;
     // Convection dies under cloud, and with the sun. An overcast route has
     // dead air and has to be flown on the engine.
     // Cloud over your head shuts the heating off — straight from the cell.
-    const wx = this.world.weatherField.sample(airX);
+    const wx = this.world.weatherField.sample(airX, this.heading);
     const cover = wx.convection;
     const minutes = this.baseTimestamp + this.state.elapsedSeconds;
     const dayFrac = ((minutes / 60) % 24) / 24;
@@ -952,7 +1009,7 @@ export class FlightScene extends Phaser.Scene {
 
     // ── Warp auto-disengage: anything needing attention hands control back ─
     if (this.timeScale > 1) {
-      const remaining = this.routeKm - this.state.distanceTravelled;
+      const remaining = Math.abs(this.routeKm - this.state.distanceTravelled);
       if (this.state.engineTemp >= 0.85)      this.disengageWarp('engine overheating');
       else if (this.state.fuel < 15)          this.disengageWarp('fuel critical');
       else if (remaining <= 1.8)              this.disengageWarp('destination ahead');
@@ -1002,7 +1059,7 @@ export class FlightScene extends Phaser.Scene {
       const result = this.evaluateLanding(vs, speed);
       this.aircraft.notifyTouchdown(vs);
       SoundEngine.touchdown(vs);
-      this.world.addSkidMark(this.scrollX + AIRCRAFT_X);
+      this.world.addSkidMark(this.planeX);
       this.cargo.applyDamage(result.cargoDamagePercent);
 
       if (result.quality === 'crash') {
@@ -1038,18 +1095,39 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // ── Approach / arrival callouts ────────────────────────────────────────
-    const remainingKm = this.routeKm - this.state.distanceTravelled;
+    // A distance, whichever side of the field you are on — flying away from
+    // it after an overshoot is not "runway below".
+    const remainingKm = Math.abs(this.routeKm - this.state.distanceTravelled);
+    const towardField = this.heading * (this.routeKm - this.state.distanceTravelled) >= -0.05;
     if (!this.notifiedApproach && remainingKm <= 1.5 && this.hasBeenAirborne) {
       this.notifiedApproach = true;
       EventBus.emit('ui:show-notification', {
         message: `${this.destinationName} ahead — begin your approach`, type: 'info',
       });
     }
-    if (!this.notifiedArrival && remainingKm <= 0.15 && this.hasBeenAirborne) {
+    if (!this.notifiedArrival && remainingKm <= 0.15 && towardField && this.hasBeenAirborne) {
       this.notifiedArrival = true;
       EventBus.emit('ui:show-notification', {
         message: `Runway below — land now to deliver`, type: 'success',
       });
+    }
+    /*
+     * Overshot. The strip is a few hundred metres long now, and missing it
+     * used to leave you flying on into nowhere with no way back. Say so, and
+     * say how to fix it: turn round and come back at it.
+     */
+    if (this.hasBeenAirborne && !this.landed && this.state.altitude > 3) {
+      const [, stripEnd] = destStripOf(this.routeKm, this.destRunwayM);
+      const past = this.heading === 1 && this.planeX > stripEnd + 120 * WORLD_PX_PER_M;
+      if (past && !this.overshotCalled) {
+        this.overshotCalled = true;
+        SoundEngine.radio(`Ashline flight, you have overflown ${this.destinationName}. Come round and try again.`,
+          { kind: 'control', station: 'ASHLINE CONTROL' });
+        EventBus.emit('ui:show-notification', {
+          message: `↺ Overshot ${this.destinationName} — ${press('turn')} to turn back`, type: 'warning',
+        });
+      }
+      if (!past && this.heading === -1) this.overshotCalled = false;
     }
 
     // Flight events — only once airborne, at most one check every 3 seconds
@@ -1059,7 +1137,7 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // ── Hazards: obstacles are solid, raider ground is hostile ────────────
-    const worldX = this.scrollX + AIRCRAFT_X;
+    const worldX = this.planeX;
     this.updateHazards(worldX, sdt);
 
     // Another aeroplane you can HEAR closing is the oldest traffic alert there
@@ -1074,8 +1152,38 @@ export class FlightScene extends Phaser.Scene {
     if (!this.training) this.updateTraffic(worldX, sdt);
     if (this.landed) return;
 
+    // ── Moving along the route, either way ────────────────────────────────
+    let along: number = this.heading;
+    if (this.turn) {
+      const tr = this.turn;
+      tr.t += sdt;
+      const p = clamp(tr.t / tr.dur, 0, 1);
+      const eased = 0.5 - Math.cos(Math.PI * p) / 2;
+      const psi = Math.PI * eased;
+      // Progress along the route runs down through zero and builds the other way
+      along = tr.from * Math.cos(psi);
+      // A banked turn costs energy: bleed some speed, more in the middle
+      this.state.speed = Math.max(this.controller.vStall * 1.05,
+        this.state.speed - 2.6 * Math.sin(psi) * sdt);
+      // The camera slides the aircraft across so the view opens up ahead
+      const k = clamp((eased - 0.1) / 0.9, 0, 1);
+      const kk = k * k * (3 - 2 * k);
+      this.planeScreenX = this.anchorFor(tr.from) + (this.anchorFor((-tr.from) as 1 | -1) - this.anchorFor(tr.from)) * kk;
+      this.aircraft.setTurn(eased, tr.from);
+      if (p >= 1) {
+        this.heading = (-tr.from) as 1 | -1;
+        this.turn = null;
+        this.aircraft.setTurn(null, tr.from);
+        this.planeScreenX = this.anchorFor(this.heading);
+      }
+    }
+    this.planeX += along * this.state.groundSpeed * sdt * WORLD_PX_PER_M;
+    this.scrollX = this.planeX - this.planeScreenX;
+    // Progress is where you ARE, not how far you have flown — the two part
+    // company the moment you turn round
+    this.state.distanceTravelled = (this.planeX - AIRCRAFT_X) / (WORLD_PX_PER_M * 1000);
+
     // ── World & weather visuals ────────────────────────────────────────────
-    this.scrollX += this.state.groundSpeed * sdt * WORLD_PX_PER_M;
     this.world.update(sdt, {
       scrollX: this.scrollX,
       altitude: this.state.altitude,
@@ -1088,7 +1196,8 @@ export class FlightScene extends Phaser.Scene {
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
-      planeScreenX: AIRCRAFT_X,
+      planeScreenX: this.planeScreenX,
+      heading: this.heading,
       planeScreenY: this.world.altitudeToScreenY(this.state.altitude),
       planeWorldX: worldX,
       speedFrac: clamp(this.state.groundSpeed / 55, 0, 1),
@@ -1104,7 +1213,7 @@ export class FlightScene extends Phaser.Scene {
     // pitch rate and flight path, so a manoeuvre is something you can see
     // rather than a number that changed. It never slides with airspeed.
     this.rig.update(sdt, this.state, turbulence, this.state.altitude <= 0.5);
-    this.aircraft.container.setX(AIRCRAFT_X + this.rig.offsetX);
+    this.aircraft.container.setX(this.planeScreenX + this.heading * this.rig.offsetX);
     this.aircraft.container.setY(
       this.world.altitudeToScreenY(this.state.altitude) + this.rig.offsetY,
     );
@@ -1150,7 +1259,8 @@ export class FlightScene extends Phaser.Scene {
   private updateCrashSlide(dt: number): void {
     const sdt = Math.min(dt, 0.05);
     this.crash.update(sdt);
-    this.scrollX += this.crash.slideSpeed() * sdt * WORLD_PX_PER_M;
+    this.planeX += this.heading * this.crash.slideSpeed() * sdt * WORLD_PX_PER_M;
+    this.scrollX = this.planeX - this.planeScreenX;
     this.world.update(sdt, {
       scrollX: this.scrollX,
       altitude: 0,
@@ -1163,9 +1273,9 @@ export class FlightScene extends Phaser.Scene {
       condition: this.weather.current.condition,
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
-      planeScreenX: AIRCRAFT_X,
+      planeScreenX: this.planeScreenX,
       planeScreenY: this.world.altitudeToScreenY(0),
-      planeWorldX: this.scrollX + AIRCRAFT_X,
+      planeWorldX: this.planeX,
       speedFrac: 0,
       progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
     });
@@ -1204,7 +1314,7 @@ export class FlightScene extends Phaser.Scene {
       // airframe and the mast standing there untouched — is what makes the
       // world read as scenery instead of something you are moving through.
       hz.damageAt(hit, 0.75);
-      this.spawnImpactDebris(AIRCRAFT_X, this.world.altitudeToScreenY(alt), 30);
+      this.spawnImpactDebris(this.planeScreenX, this.world.altitudeToScreenY(alt), 30);
       SoundEngine.impact();
       this.cameras.main.shake(500, 0.012);
       this.state.integrity = clamp(this.state.integrity - 45, 0, 100);
@@ -1227,7 +1337,7 @@ export class FlightScene extends Phaser.Scene {
         return;
       }
       // Shove the aircraft clear so a single structure can't register twice
-      this.scrollX += hit.halfWidth * 2 + 40;
+      this.planeX += this.heading * (hit.halfWidth * 2 + 40);
     }
 
     /*
@@ -1243,7 +1353,7 @@ export class FlightScene extends Phaser.Scene {
     if (wire) {
       const power = wire.kind === 'power';
       hz.cutSpan(wire, worldX);
-      this.spawnImpactDebris(AIRCRAFT_X, this.world.altitudeToScreenY(alt), power ? 22 : 10);
+      this.spawnImpactDebris(this.planeScreenX, this.world.altitudeToScreenY(alt), power ? 22 : 10);
       SoundEngine.impact();
       this.cameras.main.shake(power ? 380 : 220, power ? 0.01 : 0.006);
       if (power) this.cameras.main.flash(120, 190, 220, 255);
@@ -1287,7 +1397,7 @@ export class FlightScene extends Phaser.Scene {
     const lookAhead = (seconds: number): number => Math.max(
       2200, this.state.groundSpeed * seconds * WORLD_PX_PER_M,
     );
-    const ahead = hz.ahead(worldX, lookAhead(7), alt);
+    const ahead = hz.ahead(worldX, lookAhead(7), alt, this.heading);
     // Height over whatever is actually below, not over sea level. A mast in
     // the way means the ground has effectively risen to meet you, and that is
     // exactly how it should feel to the Director.
@@ -1363,7 +1473,7 @@ export class FlightScene extends Phaser.Scene {
     // Advance call on the next stretch, so there is room to climb over it.
     // Only worth saying if their guns actually out-reach our current height.
     // Ten seconds: a climb over an AA ceiling takes longer than a dodge.
-    const threat = this.world.threatAhead(worldX, lookAhead(10));
+    const threat = this.world.threatAhead(worldX, lookAhead(10), this.heading);
     this.coachThreat = threat && alt < threat.ceilingM ? { label: threat.label, ceilingM: threat.ceilingM } : null;
     if (threat && alt < threat.ceilingM &&
         this.nagThreat.due(this.state.elapsedSeconds)) {
@@ -1520,7 +1630,7 @@ export class FlightScene extends Phaser.Scene {
        */
       {
         const def = SaveService.getActiveAircraft().def;
-        const remainingKm = Math.max(0, this.routeKm - this.state.distanceTravelled);
+        const remainingKm = Math.abs(this.routeKm - this.state.distanceTravelled);
         const kmPerSec = Math.max(0.0005, this.state.groundSpeed / 1000);
         const burnPerSec = (def.stats.fuelBurnRate * this.state.throttle) / 60;
         const needed = (burnPerSec / kmPerSec) * remainingKm;
@@ -1557,7 +1667,7 @@ export class FlightScene extends Phaser.Scene {
       }
 
       this.director.update(sdt, {
-        routeFrac: clamp(this.scrollX / (this.routeKm * 1000 * WORLD_PX_PER_M), 0, 1),
+        routeFrac: clamp(this.planeX / (this.routeKm * 1000 * WORLD_PX_PER_M), 0, 1),
         onGround: alt <= 0.5,
         hullLostRate: this.hullLostRate,
         roundsNear: this.fireHeat,
@@ -1603,6 +1713,8 @@ export class FlightScene extends Phaser.Scene {
       dropReady: this.world.dropReticle !== null,
       cratesLeft: this.world.drops.cratesLeft,
       dropZone: this.dropZone,
+      overshot: this.overshotCalled && this.heading === 1,
+      canTurn: this.hasBeenAirborne && !this.landed && this.state.altitude > 12 && this.turn === null,
     });
   }
 
@@ -1686,7 +1798,7 @@ export class FlightScene extends Phaser.Scene {
    */
   private updateDrops(sdt: number): void {
     const drops = this.world.drops;
-    const worldX = this.scrollX + AIRCRAFT_X;
+    const worldX = this.planeX;
     const alt = this.state.altitude;
     const airborne = this.hasBeenAirborne && alt > 3 && !this.landed;
     const gs = Math.max(25, this.state.groundSpeed);
@@ -1701,13 +1813,14 @@ export class FlightScene extends Phaser.Scene {
      */
     const inboundPx = Math.max(2800, gs * 40) * WORLD_PX_PER_M;
     const signalPx = Math.max(900, gs * 12) * WORLD_PX_PER_M;
-    const ev = drops.update(sdt, worldX, airborne, inboundPx, signalPx);
+    const dir = this.heading;
+    const ev = drops.update(sdt, worldX, airborne, inboundPx, signalPx, dir);
     const touch = isTouchDevice();
     const seen = SaveService.get().player.stats.supplyDrops ?? 0;
 
     if (ev.inbound && drops.cratesLeft > 0) {
       const site = ev.inbound;
-      const km = (site.x - worldX) / (WORLD_PX_PER_M * 1000);
+      const km = Math.abs(site.x - worldX) / (WORLD_PX_PER_M * 1000);
       const where = site.kind === 'rooftop' ? `on a rooftop in ${site.place}`
         : site.kind === 'square' ? `in ${site.place} square` : `at ${site.place}`;
       const crates = `${site.need} crate${site.need > 1 ? 's' : ''}`;
@@ -1737,12 +1850,12 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // Reticle while there is someone to aim at
-    const site = airborne ? drops.activeSite(worldX) : null;
+    const site = airborne ? drops.activeSite(worldX, dir) : null;
     let meter: { gapM: number; windowM: number; releaseIn: number } | null = null;
     if (site && drops.cratesLeft > 0) {
-      const imp = drops.predictImpact(worldX, alt, this.state.groundSpeed);
+      const imp = drops.predictImpact(worldX, alt, this.state.groundSpeed, dir);
       const windowM = site.kind === 'rooftop' && site.roof ? site.roof.halfWidth / WORLD_PX_PER_M : 30;
-      const gapM = (site.x - imp.x) / WORLD_PX_PER_M;
+      const gapM = dir * (site.x - imp.x) / WORLD_PX_PER_M;
       const onTarget = site.kind === 'rooftop' && site.roof
         ? Math.abs(imp.x - site.roof.x) <= site.roof.halfWidth && imp.altM > 1
         : Math.abs(gapM) <= windowM;
@@ -1795,28 +1908,36 @@ export class FlightScene extends Phaser.Scene {
      * appears, and a path is drawn from the aircraft to where the band
      * starts, with the sink rate that gets you there.
      */
-    const next = airborne && drops.cratesLeft > 0 ? drops.nextCalling(worldX) : null;
+    const next = airborne && drops.cratesLeft > 0 ? drops.nextCalling(worldX, dir) : null;
     this.dropGuideFade = next
       ? Math.min(1, this.dropGuideFade + sdt / 1.2)
       : Math.max(0, this.dropGuideFade - sdt / 0.8);
     if (next) {
-      const km = Math.max(0, (next.x - worldX) / (WORLD_PX_PER_M * 1000));
+      const km = Math.max(0, dir * (next.x - worldX) / (WORLD_PX_PER_M * 1000));
       const corridorKm = DROP_RUN_BEFORE_PX / (WORLD_PX_PER_M * 1000) - 0.05;
-      const inCorridor = km <= corridorKm;
+      /*
+       * The layout keeps the run-in out of gun range from the side you
+       * normally come from. Turn round and come back at it from the other
+       * side and there is no such promise, so ask the guns: if they cover
+       * this approach the card says so and the band stays away.
+       */
+      const approachFrom = next.x - dir * DROP_RUN_BEFORE_PX;
+      const covered = !next.besieged && dir === -1 && this.world.gunsReach(approachFrom, next.x) > 0;
+      const inCorridor = km <= corridorKm && !covered;
       let cue: DropZoneStatus['cue'];
       // The crates carry forward as they fall, so once the aim point is past
       // them any crate out of the door now lands beyond them
       const aimPast = this.world.dropReticle !== null && next.state === 'signalled'
-        && (this.world.dropReticle.x - next.x) / WORLD_PX_PER_M > 30;
+        && dir * (this.world.dropReticle.x - next.x) / WORLD_PX_PER_M > 30;
       if (!inCorridor) cue = 'hold';
       else if (aimPast) cue = 'late';
       else if (alt < next.bandLo - 2) cue = 'low';
       else if (alt <= next.bandHi + 3) cue = this.world.dropReticle?.onTarget ? 'release' : 'window';
       else cue = 'descend';
       // Where the band starts, and the sink rate that reaches it from here
-      const bandStartX = next.x - DROP_BAND_RUN_PX;
+      const bandStartX = next.x - dir * DROP_BAND_RUN_PX;
       const bandMid = (next.bandLo + next.bandHi) / 2;
-      const secsToBand = Math.max(1, (bandStartX - worldX) / WORLD_PX_PER_M / gs);
+      const secsToBand = Math.max(1, dir * (bandStartX - worldX) / WORLD_PX_PER_M / gs);
       const descentRate = cue === 'descend' ? Math.max(0, (alt - bandMid) / secsToBand) : 0;
       if (cue === 'descend' && !this.descentCalled.has(next)) {
         this.descentCalled.add(next);
@@ -1829,6 +1950,7 @@ export class FlightScene extends Phaser.Scene {
         place: next.place, kind: next.kind, km, need: next.need, got: next.got,
         lo: next.bandLo, hi: next.bandHi, besieged: next.besieged, cue,
         descendInKm: Math.max(0, km - corridorKm),
+        covered,
         descentRate,
         aboard: drops.cratesLeft,
         gapM: meter && site === next ? meter.gapM : null,
@@ -1836,14 +1958,14 @@ export class FlightScene extends Phaser.Scene {
         releaseIn: meter && site === next ? meter.releaseIn : null,
       };
       // The band only once it is safe to use; the path only while getting to it
-      const path = cue === 'descend' && bandStartX > worldX
+      const path = cue === 'descend' && dir * (bandStartX - worldX) > 0
         ? { x0: worldX, alt0: alt, x1: bandStartX, alt1: bandMid }
         : cue === 'low'
-          ? { x0: worldX, alt0: alt, x1: worldX + 260 * WORLD_PX_PER_M, alt1: bandMid }
+          ? { x0: worldX, alt0: alt, x1: worldX + dir * 260 * WORLD_PX_PER_M, alt1: bandMid }
           : null;
       this.world.dropGuide = cue === 'hold'
         ? null
-        : { lo: next.bandLo, hi: next.bandHi, fade: this.dropGuideFade, path };
+        : { lo: next.bandLo, hi: next.bandHi, fade: this.dropGuideFade, path, dir };
     } else {
       this.dropZone = null;
       this.world.dropGuide = this.dropGuideFade > 0 && this.world.dropGuide
@@ -1855,7 +1977,7 @@ export class FlightScene extends Phaser.Scene {
     if (pressed && airborne) {
       if (drops.cratesLeft <= 0) {
         EventBus.emit('ui:show-notification', { message: 'No crates left aboard.', type: 'info' });
-      } else if (drops.release(worldX, alt, this.state.groundSpeed)) {
+      } else if (drops.release(worldX, alt, this.state.groundSpeed, dir)) {
         this.dropStats.dropped++;
         SoundEngine.gearMove(false);    // the door and the thump of it going
       }
@@ -1934,13 +2056,14 @@ export class FlightScene extends Phaser.Scene {
       planeWorldX: worldX,
       planeAlt: this.state.altitude,
       planeSpeedPx: speedPx,
+      heading: this.heading,
       airborne: this.hasBeenAirborne && !this.rollout,
       routeEndPx: this.routeKm * 1000 * WORLD_PX_PER_M,
       pressure: this.director.pressure,
     });
 
     // ── Advisory: relative height and which way to go, like the real box ──
-    const ra = traffic.advisory(worldX, this.state.altitude, speedPx);
+    const ra = traffic.advisory(worldX, this.state.altitude, speedPx, this.heading);
     this.trafficAdvisory = ra ? Math.round(ra.dAltM) : null;
     this.trafficAvoid = ra ? ra.avoid : null;
     if (!ra) this.nagTraffic.clear();
@@ -1989,7 +2112,7 @@ export class FlightScene extends Phaser.Scene {
    * screen space at the aircraft, held for a few frames.
    */
   private drawLightningStrike(): void {
-    const ax = AIRCRAFT_X + this.rig.offsetX;
+    const ax = this.planeScreenX + this.heading * this.rig.offsetX;
     const ay = this.world.altitudeToScreenY(this.state.altitude) + this.rig.offsetY;
     const g = this.add.graphics().setDepth(9);
 
@@ -2105,7 +2228,7 @@ export class FlightScene extends Phaser.Scene {
     // Only on an actual approach. Any descent below 90 m used to light up
     // "GOOD APPROACH" — including a routine level-off three kilometres out,
     // which is guidance about a runway that is nowhere near you.
-    const remainingKm = this.routeKm - this.state.distanceTravelled;
+    const remainingKm = Math.abs(this.routeKm - this.state.distanceTravelled);
     if (!this.hasBeenAirborne || this.state.altitude > 90 || remainingKm > 1.2) {
       this.approachText.setAlpha(0);
       return;
@@ -2307,7 +2430,7 @@ export class FlightScene extends Phaser.Scene {
       loadingLeft: this.loadingLeft,
       landed: this.landed,
       timeWarp: this.timeScale,
-      remainingKm: Math.max(0, this.routeKm - this.state.distanceTravelled),
+      remainingKm: Math.abs(this.routeKm - this.state.distanceTravelled),
       vrKmh: Math.round(this.controller.vStall * 1.3 * 3.6),
       obstacle: this.coachObstacle,
       threat: this.coachThreat,
@@ -2315,6 +2438,7 @@ export class FlightScene extends Phaser.Scene {
       crateHits: this.dropStats.hits,
       weatherAhead: this.weatherAhead,
       traffic: this.trafficAdvisory !== null,
+      overshot: this.overshotCalled && this.heading === 1,
     });
     this.coachGuideFade = view?.guide
       ? Math.min(1, this.coachGuideFade + sdt / 1.2)
@@ -2351,7 +2475,7 @@ export class FlightScene extends Phaser.Scene {
     this.emitCoachView(null);
     this.world.trainGuide = null;
     const crashed = result.quality === 'crash';
-    const onRunway = this.isOnRunway(this.scrollX + AIRCRAFT_X);
+    const onRunway = this.isOnRunway(this.planeX);
     const passed = !crashed && onRunway;
     const save = SaveService.get();
     const firstTime = passed && !save.player.stats.trainingDone;
@@ -2381,7 +2505,7 @@ export class FlightScene extends Phaser.Scene {
     this.state.verticalSpeed = 0;
     this.state.throttle = 0;
     this.crash.play(
-      { speed: this.state.speed, verticalSpeed: Math.abs(result.verticalSpeed), gearUp: !this.state.gearDown },
+      { speed: this.state.speed, verticalSpeed: Math.abs(result.verticalSpeed), gearUp: !this.state.gearDown, dir: this.heading },
       debrief,
     );
   }
@@ -2414,7 +2538,7 @@ export class FlightScene extends Phaser.Scene {
       finalState: this.state,
       cargoSlots: this.cargo.slots,
       reachedDestination: this.state.distanceTravelled >= this.routeKm * 0.9,
-      landedOnRunway: this.isOnRunway(this.scrollX + AIRCRAFT_X),
+      landedOnRunway: this.isOnRunway(this.planeX),
       closeCalls: this.closeCalls,
       // What the world has worked out about you, in words. An adaptive system
       // nobody can see is indistinguishable from an unfair one.
@@ -2435,7 +2559,7 @@ export class FlightScene extends Phaser.Scene {
 
     // Whatever it comes down on gets wrecked too. Sixty tonnes of aeroplane
     // arriving at a lattice mast is not something the mast walks away from.
-    const crashX = this.scrollX + AIRCRAFT_X;
+    const crashX = this.planeX;
     for (const h of this.world.hazards.near(crashX, 70)) {
       this.world.hazards.damageAt(h, 0.9);
     }
@@ -2448,7 +2572,7 @@ export class FlightScene extends Phaser.Scene {
       engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
       overspeed: false, obstacleAheadM: null, obstacleLabel: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true,
-      dropReady: false, cratesLeft: 0, dropZone: null,
+      dropReady: false, cratesLeft: 0, dropZone: null, overshot: false, canTurn: false,
     });
     this.state.speed = 0;
     this.state.verticalSpeed = 0;
@@ -2466,6 +2590,7 @@ export class FlightScene extends Phaser.Scene {
         speed: this.state.speed,
         verticalSpeed: Math.abs(result.verticalSpeed),
         gearUp: !this.state.gearDown,
+        dir: this.heading,
       },
       () => fadeToScene(this, 'PostFlightScene', data),
     );
