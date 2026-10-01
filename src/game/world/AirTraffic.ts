@@ -1,4 +1,6 @@
 import Phaser from 'phaser';
+import { AircraftModel, type ModelLight } from '../entities/aircraft/render/AircraftModel';
+import { specFor } from '../entities/aircraft/render/AircraftVisualSpec';
 
 /**
  * Other people are still flying out here.
@@ -112,7 +114,44 @@ export class AirTraffic {
   private seed = 1;
   private elapsed = 0;
 
+  /**
+   * Give traffic a scene to draw real aeroplanes in. Without it (the route
+   * preview builds an AirTraffic with no scene) the old flat drawing is used.
+   */
+  attachModels(scene: Phaser.Scene, depth: number): void {
+    this.scene = scene;
+    this.modelDepth = depth;
+  }
+
+  private scene: Phaser.Scene | null = null;
+  private modelDepth = 5;
+  private readonly models = new Map<TrafficPlane, AircraftModel>();
+
+  /** On-screen length of each kind, px — the same scale as your own aircraft. */
+  private static readonly SIZE: Record<TrafficKind, number> = {
+    hauler: 196, courier: 152, ultralight: 104, gunship: 196,
+  };
+
+  private modelFor(p: TrafficPlane): AircraftModel {
+    let m = this.models.get(p);
+    if (!m) {
+      const spec = specFor(`traffic_${p.kind}`);
+      const g = spec.gear;
+      m = new AircraftModel(this.scene!, spec, g.hingeY + g.strutLen + g.wheelR, 'low');
+      m.setDepth(this.modelDepth);
+      this.models.set(p, m);
+    }
+    return m;
+  }
+
+  private dropModels(keep: (p: TrafficPlane) => boolean): void {
+    for (const [p, m] of this.models) {
+      if (!keep(p)) { m.destroy(); this.models.delete(p); }
+    }
+  }
+
   reset(seed: number): void {
+    this.dropModels(() => false);
     this.list = [];
     this.wrecks = [];
     this.seed = seed;
@@ -415,7 +454,11 @@ export class AirTraffic {
     width: number,
     t: number,
     dl: number,
+    light: ModelLight | null = null,
   ): void {
+    // Aeroplanes that have left the route take their models with them
+    if (this.models.size) this.dropModels(p => this.list.includes(p));
+    for (const m of this.models.values()) m.setVisible(false);
     // Burning wrecks on the ground, where they came down
     for (const w of this.wrecks) {
       const sx = w.wx - scrollX;
@@ -454,8 +497,38 @@ export class AirTraffic {
       if (sx < -160 || sx > width + 160) continue;
       const sy = groundScreenY - p.alt * pxPerM;
       if (sy < -140 || sy > 4000) continue;
-      this.drawPlane(g, sx, sy, p, t, dl);
+      if (this.scene && light) this.drawModel(p, sx, sy, t, light);
+      else this.drawPlane(g, sx, sy, p, t, dl);
     }
+  }
+
+  /**
+   * One aircraft as a lit 3D model — the same renderer as your own, with an
+   * airframe old enough to still be flying out here. It banks as it turns,
+   * pitches with its climb and descent, and goes down in a real spiral.
+   */
+  private drawModel(p: TrafficPlane, sx: number, sy: number, t: number, light: ModelLight): void {
+    const m = this.modelFor(p);
+    const spec = specFor(`traffic_${p.kind}`);
+    const scale = AirTraffic.SIZE[p.kind] / spec.length;
+    const speed = Math.max(20, Math.abs(p.vx) / 9);
+    const climb = Math.atan2(p.vAlt, speed);
+    const pitch = p.doom === null ? Phaser.Math.Clamp(climb, -0.3, 0.3) : Phaser.Math.Clamp(-p.doom * 0.35, -1.0, 0);
+    m.setVisible(true);
+    m.render(sx, sy, 0, scale, 1, {
+      yaw: p.dir > 0 ? -0.14 : Math.PI + 0.14,
+      roll: p.bank + Math.sin(t * 0.8 + p.seed) * 0.04,
+      pitch,
+      flapDeg: 0, aileron: 0, elevator: 0, rudder: 0,
+      gear: 0,
+      propAngle: t * 42 + p.seed,
+      propSpeed: p.doom === null ? 1 : 0.3,
+      damage: p.doom === null ? 0 : 3,
+      ice: 0,
+      beacon: (t * 1.1 + p.seed) % 1 < 0.07 ? 1 : 0,
+      landingLight: false,
+      shed: false,
+    }, light);
   }
 
   /** One aircraft, drawn in its own local frame then banked into place. */

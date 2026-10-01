@@ -88,6 +88,12 @@ export interface FlightStatus {
   dropZone: DropZoneStatus | null;
   overshot: boolean;
   canTurn: boolean;
+  /** Flap notches (deg), limit speeds, and whether they are out too fast. */
+  flaps: { stops: number[]; limitKmh: number | null; nextLimitKmh: number | null; overspeed: boolean; blownBack?: boolean } | null;
+  /** 1g stall speed in the current configuration and air, km/h. */
+  stallKmh: number;
+  /** Climb left at this height as a fraction of sea level. */
+  climbReserve: number;
   weatherCaution: string | null;
   iceLoad: number;
   avionicsOut: boolean;

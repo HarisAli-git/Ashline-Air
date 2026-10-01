@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { isTouchDevice } from '../utils/device';
 import type { ApproachKind, WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
 import { Raiders, MAX_ENGAGEMENT_M, type RaiderFireReport } from './Raiders';
@@ -12,6 +13,7 @@ import {
 import { blendBiome, dominantBiome, BIOMES, type BiomeId, type BiomeShape } from './Biomes';
 import { SupplyDrops, type DropGuide } from './SupplyDrops';
 import { routeSpanPx, originStripPx, destStripPx } from './RoutePreview';
+import { CloudSprites, ensureSkyTextures, GLOW_TEX } from './CloudSprites';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -50,6 +52,16 @@ export const RUNWAY_DECK = 34;
 export const RUNWAY_FAR = Math.round(RUNWAY_DECK * 0.38);
 /** Depth of the packed-earth apron beyond the far edge that structures stand on. */
 export const RUNWAY_APRON = 10;
+/**
+ * Depth of ground drawn BEHIND the line everything stands on, in px.
+ *
+ * The hills, the mountains and the distant ruins all used to stand directly
+ * on the ground line, so there was no ground behind anything — the world was
+ * a stage flat with scenery glued to its back edge, and a roof or a side wall
+ * given any depth hung out over the hills with nothing under it. This band is
+ * the plain receding from the action line to the foot of the hills.
+ */
+export const BACK_BAND = 40;
 
 interface Palette {
   skyTop: number; skyBot: number; glow: number;
@@ -118,6 +130,13 @@ function propRand(i: number): number {
   return x - Math.floor(x);
 }
 
+/** Smooth lattice noise, 0..1 — the notches and crags a sum of sines cannot make. */
+function vnoise(x: number, seed: number): number {
+  const i = Math.floor(x), f = x - i;
+  const a = propRand(i * 1.37 + seed * 31.7), b = propRand((i + 1) * 1.37 + seed * 31.7);
+  return a + (b - a) * f * f * (3 - 2 * f);
+}
+
 /**
  * Multi-octave ridge profile, continuous in world space — no tiling, no
  * repeating triangles. Returns roughly -1..1.
@@ -183,6 +202,11 @@ export class ParallaxWorld {
   private readonly mountainGfx: Phaser.GameObjects.Graphics;
   private readonly deckGfx: Phaser.GameObjects.Graphics;
   private readonly cloudGfx: Phaser.GameObjects.Graphics;
+  /** Painted cumulus for the weather cells and the cloud decks (WebGL only). */
+  private readonly cellClouds: CloudSprites | null = null;
+  private readonly skyClouds: CloudSprites | null = null;
+  /** The sun's glow, a soft falloff instead of three nested discs. */
+  private readonly sunGlow: Phaser.GameObjects.Image | null = null;
   private readonly hillGfx: Phaser.GameObjects.Graphics;
   private readonly scrubGfx: Phaser.GameObjects.Graphics;
   private readonly groundGfx: Phaser.GameObjects.Graphics;
@@ -211,6 +235,12 @@ export class ParallaxWorld {
   dropReticle: { x: number; altM: number; onTarget: boolean; spreadM: number } | null = null;
   /** The drop window to fly into, while a site is calling. */
   dropGuide: DropGuide | null = null;
+  /**
+   * The approach to fly, while one is being flown: the touchdown point on the
+   * strip, the angle down to it, which way you are coming from, and how
+   * strongly to draw it. Set by FlightScene; null hides it.
+   */
+  landingGuide: { aimX: number; angleDeg: number; dir: 1 | -1; fade: number } | null = null;
   /** A height band the training script wants you in. Drawn like the drop window. */
   trainGuide: { lo: number; hi: number; fade: number } | null = null;
   /** The moving air the aircraft actually flies through. */
@@ -219,6 +249,24 @@ export class ParallaxWorld {
   readonly weatherField = new WeatherField();
 
   private pal: Palette = resolve('clear');   // final: biome + weather + daylight
+
+  /**
+   * The light an object in the sky is lit by, from the same graded palette
+   * the scenery uses: the sky's colour from above, the ground's from below,
+   * the low sun's glow, and the murk of the weather. The aircraft model reads
+   * this so it never looks pasted in front of the world it is flying through.
+   */
+  modelLight(visibility: number): { sky: number; ground: number; sun: number; daylight: number; haze: number; hazeColor: number } {
+    const p = this.pal;
+    return {
+      sky: lerpColor(p.skyTop, p.skyBot, 0.55),
+      ground: lerpColor(p.ground, p.hill, 0.5),
+      sun: lerpColor(0xfff4e0, p.glow, 0.35),
+      daylight: this.dl,
+      haze: Math.max(0, Math.min(0.55, (1 - visibility) * 0.6)),
+      hazeColor: p.skyBot,
+    };
+  }
   private shape: BiomeShape = blendBiome('ashland', 'ashland', 0).shape;
   /**
    * True while the aircraft is still on the apron being loaded.
@@ -248,6 +296,13 @@ export class ParallaxWorld {
   /** Scratch buffers for ridge sampling — reused so no per-frame allocation. */
   private readonly rsX: number[] = [];
   private readonly rsH: number[] = [];
+  private readonly rsTop: number[] = [];
+  private readonly rsMid: number[] = [];
+  private readonly rsUp: number[] = [];
+  /** WebGL can shade per corner; the canvas fallback gets flat fills. */
+  private readonly webgl: boolean;
+  /** How much ground cover to skip: a phone gets a sparser plain. */
+  private readonly coverSkip = isTouchDevice() ? 0.62 : 0.4;
 
   /**
    * Re-fit the world to a new canvas size, in place.
@@ -268,13 +323,19 @@ export class ParallaxWorld {
     this.width = width;
     this.height = height;
     this.groundY = groundY;
+    this.webgl = scene.sys.game.renderer.type === Phaser.WEBGL;
 
-    // Creation order = draw order (back → front)
+    // Creation order = draw order (back → front). Each sprite pool is made
+    // straight after the layer it belongs to, so it draws at that depth.
+    const painted = this.webgl && ensureSkyTextures(scene);
     this.skyGfx = scene.add.graphics();
+    if (painted) this.sunGlow = scene.add.image(0, 0, GLOW_TEX).setVisible(false);
     this.farGfx = scene.add.graphics();
     this.mountainGfx = scene.add.graphics();
     this.deckGfx = scene.add.graphics();
+    if (painted) this.cellClouds = new CloudSprites(scene, 120);
     this.cloudGfx = scene.add.graphics();
+    if (painted) this.skyClouds = new CloudSprites(scene, 40);
     this.hillGfx = scene.add.graphics();
     this.scrubGfx = scene.add.graphics();
     this.groundGfx = scene.add.graphics();
@@ -285,6 +346,7 @@ export class ParallaxWorld {
     // creates after this class, at depth 0). A conflicting aeroplane that
     // passes behind your own tail is a conflict you never see coming.
     this.trafficGfx = scene.add.graphics().setDepth(5);
+    this.traffic.attachModels(scene, 5.05);
     this.tracerGfx = scene.add.graphics().setDepth(5.5);
     // Near-field strip and vignette sit ABOVE the aircraft; they occupy the
     // bottom edge only, so they frame the shot without hiding the plane.
@@ -300,7 +362,7 @@ export class ParallaxWorld {
   }
 
   /** Lay out the route's obstacles, hostile stretches and the militia in them. */
-  setRoute(routeKm: number, seed: number, originRunwayM = 600, destRunwayM = 600): void {
+  setRoute(routeKm: number, seed: number, originRunwayM = 600, destRunwayM = 600, threat = 1): void {
     this.routeSeed = seed;
     this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
     // The same span the dispatch board previews — see RoutePreview
@@ -310,7 +372,7 @@ export class ParallaxWorld {
     this.hazards.generate(spanA, spanB, seed, x => dominantBiome(from, to, x / end));
     // The layout needs to know which positions are afloat, so a stretch over
     // the channels comes out as gun barges rather than sandbag nests.
-    this.raiders.layout(this.hazards.zones, seed, x => this.waterAt(x) > 0.25, null, this.hazards.zoneWeapons);
+    this.raiders.layout(this.hazards.zones, seed, x => this.waterAt(x) > 0.25, null, this.hazards.zoneWeapons, threat);
     // The air has to know what it is flowing around, or there is no rotor.
     this.air.reset(seed);
     // Only what is tall enough to shed a rotor — a town is forty sheds
@@ -383,6 +445,7 @@ export class ParallaxWorld {
 
   update(dt: number, f: WorldFrame): void {
     this.t += dt;
+    this.planeScreenYForGuide = f.planeScreenY ?? null;
 
     // Palette pipeline: regional biome → weather tint → time of day.
     // The biome is the base, so crossing from basin into red rock changes the
@@ -452,7 +515,9 @@ export class ParallaxWorld {
     // Other aircraft ride the SAME altitude mapping as the player's, so a
     // conflict on screen is a conflict in the collision test.
     this.trafficGfx.clear();
-    this.traffic.draw(this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl);
+    this.traffic.draw(this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl,
+      this.modelLight(f.visibility));
+    if (this.landingGuide) this.drawLandingGuide(this.trafficGfx, f.scrollX, gy, f.planeWorldX ?? 0);
     this.drops.drawAir(
       this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t,
       this.dropReticle, this.dropGuide ?? this.trainGuide, f.planeScreenX ?? 300,
@@ -482,6 +547,78 @@ export class ParallaxWorld {
     return this.raiders.threatAhead(worldX, rangePx, dir);
   }
 
+  /**
+   * The glide path, drawn in the sky where it is.
+   *
+   * Landings were the part of every mission testers could not finish: the
+   * strip is a few hundred metres long and there was nothing to say whether
+   * the descent you were on would put you onto it, short of it or a
+   * kilometre past it — the only cue was your sink rate. This is what real
+   * fields give a pilot: a path to sit on and lights that tell you if you are
+   * on it. Dashes run back up the approach at the angle to fly, chevrons point
+   * at the touchdown point, and four lamps by the threshold (a PAPI) show two
+   * white and two red when you are on the path — more white too high, more
+   * red too low.
+   */
+  private drawLandingGuide(g: Phaser.GameObjects.Graphics, scrollX: number, gy: number, planeX: number): void {
+    const G = this.landingGuide!;
+    const tanA = Math.tan((G.angleDeg * Math.PI) / 180);
+    const ppm = this.pxPerM;
+    const aimSx = G.aimX - scrollX;
+    const a = G.fade;
+    // Dashes from the touchdown point back up the approach
+    for (let d = 10; d < 3200; d += 9) {
+      const wx = G.aimX - G.dir * d * WORLD_PX_PER_M;
+      const sx = wx - scrollX;
+      if (sx < -60 || sx > this.width + 60) continue;
+      const y = gy - d * tanA * ppm;
+      // Brightest ahead of the aeroplane, fading behind it
+      const ahead = G.dir * (wx - planeX) > 0 ? 1 : 0.3;
+      const k = G.dir;
+      // A dash along the path's own slope
+      // (further from the runway is higher: the slope is the path's own)
+      const dx = 22, slope = (tanA * ppm) / WORLD_PX_PER_M;
+      g.lineStyle(2.4, 0x9fe8b0, 0.75 * a * ahead);
+      g.lineBetween(sx - k * dx, y - slope * dx, sx + k * dx * 0.2, y + slope * dx * 0.2);
+      // A chevron every few dashes, pointing at the runway
+      if (Math.round(d / 9) % 4 === 0) {
+        g.lineStyle(2, 0xcff8d8, 0.8 * a * ahead);
+        g.lineBetween(sx - k * 8, y - 8, sx + k * 2, y);
+        g.lineBetween(sx - k * 8, y + 8, sx + k * 2, y);
+      }
+    }
+    // The touchdown point itself
+    if (aimSx > -40 && aimSx < this.width + 40) {
+      g.lineStyle(2, 0x9fe8b0, 0.8 * a);
+      g.lineBetween(aimSx - 12, gy - 9, aimSx - 12, gy - 2);
+      g.lineBetween(aimSx + 12, gy - 9, aimSx + 12, gy - 2);
+      g.lineBetween(aimSx - 12, gy - 9, aimSx - 6, gy - 9);
+      g.lineBetween(aimSx + 12, gy - 9, aimSx + 6, gy - 9);
+    }
+    // PAPI: four lamps beside the threshold, white above the path, red below
+    const papiX = aimSx - G.dir * 30;
+    if (papiX > -40 && papiX < this.width + 40) {
+      const altM = Math.max(0, (gy - (this.planeScreenYForGuide ?? gy)) / ppm);
+      const distM = Math.max(1, G.dir * (G.aimX - planeX) / WORLD_PX_PER_M);
+      const ang = (Math.atan2(altM, distM) * 180) / Math.PI;
+      const thresholds = [G.angleDeg + 0.9, G.angleDeg + 0.3, G.angleDeg - 0.3, G.angleDeg - 0.9];
+      for (let i = 0; i < 4; i++) {
+        const lit = ang > thresholds[i];
+        const lx = papiX - G.dir * (i * 9);
+        const ly = gy - RUNWAY_FAR - 5 - i * 1.2;
+        g.fillStyle(0x14120e, 0.9);
+        g.fillRect(lx - 3.5, ly - 1, 7, 5);
+        const col = lit ? 0xfff4e0 : 0xff3a28;
+        g.fillStyle(col, 0.25 * a);
+        g.fillCircle(lx, ly + 1.5, 6);
+        g.fillStyle(col, 0.95 * a);
+        g.fillCircle(lx, ly + 1.5, 2.1);
+      }
+    }
+  }
+  /** The aircraft's screen y, for the PAPI's sight line — set each frame. */
+  planeScreenYForGuide: number | null = null;
+
   /** Highest gun ceiling that covers any of a stretch, 0 if none. */
   gunsReach(x0: number, x1: number): number {
     return this.raiders.gunsReach(x0, x1);
@@ -491,6 +628,9 @@ export class ParallaxWorld {
     for (const g of [this.skyGfx, this.farGfx, this.mountainGfx, this.deckGfx,
       this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundGfx, this.hazardGfx,
       this.foreGfx, this.vignetteGfx]) g.destroy();
+    this.cellClouds?.destroy();
+    this.skyClouds?.destroy();
+    this.sunGlow?.destroy();
   }
 
   // ── Layers ─────────────────────────────────────────────────────────────────
@@ -563,23 +703,140 @@ export class ParallaxWorld {
     }
   }
 
-  /** Soft cinematic vignette — drawn once, purely framing. */
+  /**
+   * Soft cinematic vignette — drawn once, purely framing.
+   *
+   * It was 26 stacked hard-edged rectangles from each side, and the eye
+   * found their edges as a pair of pale vertical bands framing the picture.
+   * Four alpha gradients have no edge to find.
+   */
   private drawVignette(): void {
     const g = this.vignetteGfx;
     g.clear();
-    // Many thin bands rather than a few thick ones, so the falloff is smooth
-    const steps = 26;
-    for (let i = 0; i < steps; i++) {
-      const t = i / steps;
-      const a = 0.016 * (1 - t) * (1 - t);
-      g.fillStyle(0x000000, a);
-      const vBand = 54 * (1 - t);
-      const hBand = 88 * (1 - t);
-      g.fillRect(0, 0, this.width, vBand);
-      g.fillRect(0, this.height - vBand, this.width, vBand);
-      g.fillRect(0, 0, hBand, this.height);
-      g.fillRect(this.width - hBand, 0, hBand, this.height);
+    const W = this.width, H = this.height;
+    const k = 0x000000;
+    if (this.webgl) {
+      const side = W * 0.16, top = H * 0.14;
+      g.fillGradientStyle(k, k, k, k, 0.22, 0, 0.22, 0);
+      g.fillRect(0, 0, side, H);
+      g.fillGradientStyle(k, k, k, k, 0, 0.22, 0, 0.22);
+      g.fillRect(W - side, 0, side, H);
+      g.fillGradientStyle(k, k, k, k, 0.16, 0.16, 0, 0);
+      g.fillRect(0, 0, W, top);
+      g.fillGradientStyle(k, k, k, k, 0, 0, 0.2, 0.2);
+      g.fillRect(0, H - top, W, top);
+    } else {
+      g.fillStyle(k, 0.06);
+      g.fillRect(0, 0, W * 0.05, H);
+      g.fillRect(W * 0.95, 0, W * 0.05, H);
     }
+  }
+
+  /**
+   * A cumulus: a flat, shadowed base with domed puffs piled on it, each lit on
+   * the side facing the low sun. Clouds were three flat ellipses and a
+   * highlight, which is a cartoon of a cloud; this is a lump of water vapour
+   * with light falling on it.
+   */
+  private softCloud(
+    g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number, seed: number,
+    alpha: number, body: number, shade: number, hi: number,
+  ): void {
+    /*
+     * Near-opaque puffs, lowest first, each a little brighter the higher it
+     * sits — light comes from above, and the base of a cumulus is in its own
+     * shadow. Translucent puffs read as soap bubbles: every overlap drew its
+     * own ring. Distance is carried by COLOUR (the caller mixes toward the
+     * sky), not by seeing through the cloud.
+     */
+    const n = 6 + Math.floor(propRand(seed) * 4);
+    const puffs: Array<[number, number, number]> = [];
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);
+      const dome = Math.sin(t * Math.PI);
+      const r = h * (0.3 + dome * 0.42) * (0.85 + propRand(seed + i * 3) * 0.3);
+      const px = x + (t - 0.5) * w * 0.8 + (propRand(seed + i) - 0.5) * w * 0.08;
+      const py = y - dome * h * 0.24 + (propRand(seed + i * 5) - 0.5) * h * 0.12;
+      puffs.push([px, py, r]);
+    }
+    puffs.sort((p, q) => q[1] - p[1]);
+    // A soft fringe all round, then the flat dark base
+    for (const [px, py, r] of puffs) {
+      g.fillStyle(body, alpha * 0.16);
+      g.fillCircle(px, py, r * 1.16);
+    }
+    g.fillStyle(shade, alpha * 0.92);
+    g.fillEllipse(x, y + h * 0.2, w * 0.96, h * 0.42);
+    const top = y - h * 0.5, span = h * 0.9;
+    // One body colour for the whole mass, so no puff draws its own outline…
+    const mass = lerpColor(shade, body, 0.8);
+    for (const [px, py, r] of puffs) {
+      g.fillStyle(mass, alpha * 0.94);
+      g.fillCircle(px, py, r);
+    }
+    // …then the light: faint, overlapping, strongest on the high puffs
+    for (const [px, py, r] of puffs) {
+      const lift = Phaser.Math.Clamp(1 - (py + r * 0.4 - top) / span, 0, 1);
+      g.fillStyle(lerpColor(body, hi, 0.4), alpha * 0.16 * lift);
+      g.fillCircle(px - r * 0.18, py - r * 0.22, r * 0.72);
+    }
+    // and the underside in its own shadow
+    g.fillStyle(shade, alpha * 0.3);
+    g.fillEllipse(x + w * 0.04, y + h * 0.14, w * 0.86, h * 0.3);
+  }
+
+  /** A cumulus: the painted sprite when there is a pool, the Graphics one if not. */
+  private cumulus(
+    pool: CloudSprites | null, g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number,
+    seed: number, alpha: number, body: number, shade: number, hi: number,
+  ): void {
+    if (!pool) {
+      this.softCloud(g, x, y, w, h, seed, alpha, body, shade, hi);
+      return;
+    }
+    // A touch more solid than the discs were: the painted edge is already soft
+    pool.draw(x, y, w, h, seed, Math.min(1, alpha * 1.12), lerpColor(body, hi, 0.5), lerpColor(body, shade, 0.2), this.width);
+  }
+
+  /**
+   * A rectangle of haze with no edges: alpha fades top to bottom, and the
+   * left and right ends fade out over `edge` pixels. For rain curtains, dust
+   * walls and fog banks — anything that used to be a hard box.
+   */
+  private softRect(
+    g: Phaser.GameObjects.Graphics, x0: number, x1: number, y0: number, y1: number,
+    color: number, aTop: number, aBot: number, edge: number,
+  ): void {
+    if (x1 - x0 <= 2 * edge || y1 <= y0) return;
+    if (!this.webgl) {
+      g.fillStyle(color, (aTop + aBot) / 2);
+      g.fillRect(x0 + edge, y0, x1 - x0 - 2 * edge, y1 - y0);
+      return;
+    }
+    const c = color;
+    g.fillGradientStyle(c, c, c, c, 0, aTop, 0, aBot);
+    g.fillRect(x0, y0, edge, y1 - y0);
+    g.fillGradientStyle(c, c, c, c, aTop, aTop, aBot, aBot);
+    g.fillRect(x0 + edge, y0, x1 - x0 - 2 * edge, y1 - y0);
+    g.fillGradientStyle(c, c, c, c, aTop, 0, aBot, 0);
+    g.fillRect(x1 - edge, y0, edge, y1 - y0);
+  }
+
+  /** A slanted curtain (rain), fading from the cloud base to the ground. */
+  private curtain(
+    g: Phaser.GameObjects.Graphics, xTop: number, yTop: number, xBot: number, yBot: number, w: number,
+    color: number, aTop: number, aBot: number,
+  ): void {
+    if (!this.webgl) {
+      g.fillStyle(color, (aTop + aBot) / 2);
+      g.fillTriangle(xTop, yTop, xTop + w, yTop, xBot, yBot);
+      return;
+    }
+    const c = color;
+    g.fillGradientStyle(c, c, c, c, aTop, aTop, aBot, aBot);
+    g.fillTriangle(xTop, yTop, xTop + w, yTop, xBot, yBot);
+    g.fillGradientStyle(c, c, c, c, aTop, aBot, aBot, aBot);
+    g.fillTriangle(xTop + w, yTop, xBot + w, yBot, xBot, yBot);
   }
 
   private drawSky(f: WorldFrame): void {
@@ -606,9 +863,16 @@ export class ParallaxWorld {
       // Low sun is redder
       const lowSun = 1 - Math.sin(sunT * Math.PI);
       const sunCol = lerpColor(0xfff2cc, 0xff9a50, lowSun * 0.8);
-      g.fillStyle(sunCol, 0.08 * sa); g.fillCircle(sx, sy, 52);
-      g.fillStyle(sunCol, 0.16 * sa); g.fillCircle(sx, sy, 32);
-      g.fillStyle(sunCol, 0.9 * sa);  g.fillCircle(sx, sy, 16);
+      if (this.sunGlow) {
+        this.sunGlow.setPosition(sx, sy).setDisplaySize(260, 260).setTint(sunCol)
+          .setAlpha(Math.min(1, sa)).setVisible(true);
+      } else {
+        g.fillStyle(sunCol, 0.08 * sa); g.fillCircle(sx, sy, 52);
+        g.fillStyle(sunCol, 0.16 * sa); g.fillCircle(sx, sy, 32);
+        g.fillStyle(sunCol, 0.9 * sa);  g.fillCircle(sx, sy, 16);
+      }
+    } else {
+      this.sunGlow?.setVisible(false);
     }
 
     // Moon rides the night arc, with a crescent bite
@@ -671,6 +935,8 @@ export class ParallaxWorld {
     opts: {
       alpha?: number; shade?: number; highlight?: number;
       snow?: number; snowMin?: number; trees?: number;
+      /** Surface marks — scrub, rock, scree — scaled by how near the layer is, 0 = none. */
+      texture?: number;
     } = {},
   ): void {
     const step = 12;
@@ -697,6 +963,14 @@ export class ParallaxWorld {
         const terraced = (lo + e * e * (3 - 2 * e)) * stepH;
         h = h + (terraced - h) * sh.plateau;
       }
+      /*
+       * Rock does not come in sine waves. Two octaves of lattice noise break
+       * the crest into shoulders, notches and crags — the silhouette detail
+       * that separates a mountain from a smooth blob. Mesa tops stay flat.
+       */
+      const rk = (ampBase + ampVar) * (0.045 + sh.roughness * 0.035);
+      h += (vnoise(wx / 84, seed) - 0.5) * rk * 2 * (1 - sh.plateau * 0.8)
+        + (vnoise(wx / 30, seed + 17) - 0.5) * rk * (1 - sh.plateau * 0.6);
       return Math.max(6, h);
     };
 
@@ -722,36 +996,166 @@ export class ParallaxWorld {
       return hs[a] + (hs[a + 1] - hs[a]) * (k - a);
     };
 
-    // Silhouette
-    g.fillStyle(color, opts.alpha ?? 1);
-    g.beginPath();
-    g.moveTo(xs[0], baseY + 60);
-    for (let i = 0; i < n; i++) g.lineTo(xs[i], baseY - hs[i]);
-    g.lineTo(xs[n - 1], baseY + 60);
-    g.closePath();
-    g.fillPath();
+    /*
+     * ── The face, lit by the same low sun as everything else ─────────────
+     *
+     * The layers used to be one flat colour with four nested darker
+     * silhouettes laid over it — hard-edged bands that read as stacked paper.
+     * Now each column of the ridge is filled with its own vertical gradient:
+     * the crest takes the light according to which way that bit of slope
+     * faces (the sun is low on the left, so a face rising to the right is
+     * lit and one falling away is in shadow), the body darkens down the face,
+     * and the foot dissolves into the haze lying in the valley. The result
+     * is relief — gullies, spurs and shoulders — instead of a cut-out.
+     */
+    const alpha = opts.alpha ?? 1;
+    const lit = opts.highlight ?? lerpColor(color, 0xffffff, 0.22);
+    const dark = opts.shade ?? lerpColor(color, 0x000000, 0.3);
+    const hazeFoot = lerpColor(color, this.pal.skyBot, 0.42);
+    const texK = opts.texture ?? 0;
+    const vegTint = lerpColor(this.pal.hill, this.pal.scrub, 0.35);
+    if (this.webgl) {
+      // Light per VERTEX from the slope either side of it, so neighbouring
+      // columns share their edge colours and the shading flows instead of
+      // striping column by column.
+      /*
+       * Two scales of light. The crags in the crest catch it bit by bit, but
+       * only for the top of the face; below that the face is lit by the broad
+       * shape of the mountain. Carrying each crag's light all the way down
+       * striped the face into curtains.
+       */
+      const tops = this.rsTop, mids = this.rsMid, ups = this.rsUp;
+      tops.length = 0; mids.length = 0; ups.length = 0;
+      for (let i = 0; i < n; i++) {
+        const a = hs[Math.max(0, i - 1)], b = hs[Math.min(n - 1, i + 1)];
+        const slope = (b - a) / (2 * step);
+        const ia = Math.max(0, i - 4), ib = Math.min(n - 1, i + 4);
+        const broad = ib > ia ? (hs[ib] - hs[ia]) / ((ib - ia) * step) : 0;
+        const k = Phaser.Math.Clamp(0.45 + slope * 0.9, 0, 1);
+        const kb = Phaser.Math.Clamp(0.45 + broad * 0.9, 0, 1);
+        const wxv = (i0 + i) * step;
+        const veg = 0.5 + 0.5 * Math.sin(wxv * 0.0042 + seed) * Math.sin(wxv * 0.0013 + seed * 1.7);
+        tops.push(lerpColor(lerpColor(dark, lit, k), vegTint, veg * 0.18 * texK));
+        ups.push(lerpColor(lerpColor(lerpColor(dark, lit, kb), color, 0.35), vegTint, veg * 0.26 * texK));
+        mids.push(lerpColor(lerpColor(color, dark, 0.35 + (1 - kb) * 0.25), vegTint, veg * 0.38 * texK));
+      }
+      const yb = baseY + 60;
+      for (let i = 0; i + 1 < n; i++) {
+        const x0 = xs[i], x1 = xs[i + 1];
+        const y0 = baseY - hs[i], y1 = baseY - hs[i + 1];
+        const yu0 = baseY - hs[i] * 0.84, yu1 = baseY - hs[i + 1] * 0.84;
+        const ym0 = baseY - hs[i] * 0.45, ym1 = baseY - hs[i + 1] * 0.45;
+        const t0 = tops[i], t1 = tops[i + 1], m0 = mids[i], m1 = mids[i + 1];
+        const u0 = ups[i], u1 = ups[i + 1];
+        // crest → just under it: the crags' own light
+        g.fillGradientStyle(t0, t1, u0, u0, alpha, alpha, alpha, alpha);
+        g.fillTriangle(x0, y0, x1, y1, x0, yu0);
+        g.fillGradientStyle(t1, u1, u0, u0, alpha, alpha, alpha, alpha);
+        g.fillTriangle(x1, y1, x1, yu1, x0, yu0);
+        // → mid-face, lit by the mountain's broad shape
+        g.fillGradientStyle(u0, u1, m0, m0, alpha, alpha, alpha, alpha);
+        g.fillTriangle(x0, yu0, x1, yu1, x0, ym0);
+        g.fillGradientStyle(u1, m1, m0, m0, alpha, alpha, alpha, alpha);
+        g.fillTriangle(x1, yu1, x1, ym1, x0, ym0);
+        // mid-face → hazy foot
+        g.fillGradientStyle(m0, m1, hazeFoot, hazeFoot, alpha, alpha, alpha, alpha);
+        g.fillTriangle(x0, ym0, x1, ym1, x0, yb);
+        g.fillGradientStyle(m1, hazeFoot, hazeFoot, hazeFoot, alpha, alpha, alpha, alpha);
+        g.fillTriangle(x1, ym1, x1, yb, x0, yb);
+      }
+    } else {
+      g.fillStyle(color, alpha);
+      g.beginPath();
+      g.moveTo(xs[0], baseY + 60);
+      for (let i = 0; i < n; i++) g.lineTo(xs[i], baseY - hs[i]);
+      g.lineTo(xs[n - 1], baseY + 60);
+      g.closePath();
+      g.fillPath();
+    }
 
     /*
-     * ── Light falls off down the face ────────────────────────────────────
+     * ── What the land is made of ─────────────────────────────────────────
      *
-     * Every layer used to be ONE flat colour with a single shade band under
-     * it, which is the cut-paper look — "the world behind is way too boxy".
-     * Four nested silhouettes at shrinking heights, each a little darker,
-     * give the crests the light and the valleys the shadow while following
-     * the terrain's own shape rather than a flat horizontal gradient.
+     * A smooth gradient on a smooth silhouette is a CG mesh with no texture
+     * on it — "an unfinished 3D model" was exactly right. Real hillsides are
+     * broken up: scrub and trees gathered in the folds, bare rock on the
+     * shoulders catching the sun, scree under the crags. Marks are scattered
+     * per column from the world position (so they scroll with the land and
+     * never shimmer), sized by how near the layer is, and coloured from the
+     * layer's own palette so they sit in it rather than on it.
      */
-    if (opts.shade !== undefined) {
-      const bands: Array<[number, number]> = [[0.80, 0.22], [0.62, 0.32], [0.44, 0.42], [0.26, 0.5]];
-      for (const [frac, a2] of bands) {
-        g.fillStyle(opts.shade, a2);
-        g.beginPath();
-        g.moveTo(xs[0], baseY + 60);
-        for (let i = 0; i < n; i++) g.lineTo(xs[i], baseY - hs[i] * frac);
-        g.lineTo(xs[n - 1], baseY + 60);
-        g.closePath();
-        g.fillPath();
+    if (texK > 0) {
+      const rockLit = lerpColor(lit, 0xffffff, 0.12);
+      const rockDark = lerpColor(dark, 0x000000, 0.3);
+      const scrubCol = lerpColor(vegTint, 0x000000, 0.35);
+      const marks = Math.max(1, Math.round(1 + texK * 2.2));
+      for (let i = 0; i + 1 < n; i++) {
+        const wx = (i0 + i) * step;
+        const veg = 0.5 + 0.5 * Math.sin(wx * 0.0042 + seed) * Math.sin(wx * 0.0013 + seed * 1.7);
+        const slope = (hs[i + 1] - hs[i]) / step;
+        for (let k = 0; k < marks; k++) {
+          const r1 = propRand(wx * 0.37 + k * 13.1 + seed);
+          const r2 = propRand(wx * 0.11 + k * 7.3 + seed * 3);
+          const fy = 0.06 + r1 * 0.82;               // how far down the face
+          const h = hs[i] + (hs[i + 1] - hs[i]) * r2;
+          const x = xs[i] + r2 * step;
+          const y = baseY - h * (1 - fy);
+          if (fy > 0.4 && veg > 0.45) {
+            // Scrub and trees in the folds, thinning out into the haze
+            const sz = (1 + r2 * 1.8) * (0.45 + texK * 0.8);
+            g.fillStyle(lerpColor(lerpColor(scrubCol, color, 0.3), hazeFoot, (fy - 0.4) * 0.9), 0.5 * alpha);
+            g.fillEllipse(x, y, sz * 2.4, sz * 1.5);
+            if (r1 > 0.6) g.fillEllipse(x + sz * 1.3, y + sz * 0.3, sz * 1.8, sz * 1.2);
+          } else if (fy < 0.55) {
+            // Rock: lit on the faces that look at the sun, dark on the rest
+            const lw = Math.max(0.7, 1.2 * texK);
+            g.lineStyle(lw, slope > 0 ? rockLit : rockDark, 0.32 * alpha);
+            g.lineBetween(x, y, x + (2 + r1 * 5) * (0.5 + texK), y + (1.5 + r2 * 4) * (0.5 + texK));
+          } else {
+            // Scree: a scatter of pale grit down the lower slope
+            g.fillStyle(lerpColor(color, rockLit, 0.4), 0.25 * alpha);
+            g.fillCircle(x, y, 0.8 + r2 * texK);
+          }
+        }
       }
+    }
 
+    if (opts.shade !== undefined) {
+      /*
+       * Gullies: erosion runs straight down the fall line from the crest, so
+       * a few dark strokes from the high points down the face are what turn a
+       * smooth ridge into rock.
+       */
+      const ga = 0.2 + this.shape.roughness * 0.06;
+      if (this.webgl) {
+        /*
+         * Wedges, not wires: a gully is widest where it bites into the crest
+         * and fades out down the face, and the spur beside it catches the
+         * sun. A dark stroke of constant width read as a seam in a mesh.
+         */
+        const sc = opts.shade, lc = lit;
+        for (let i = 1; i + 1 < n; i++) {
+          if (hs[i] < hs[i - 1] || hs[i] < hs[i + 1]) continue;   // off the local highs
+          const r1 = propRand(i0 + i), r2 = propRand(i0 + i + 7);
+          if (r1 < 0.2) continue;
+          const len = hs[i] * (0.3 + r1 * 0.35);
+          const lean = (r2 - 0.5) * 14;
+          const w = 2 + r1 * 3;
+          const x = xs[i], y = baseY - hs[i] + 1;
+          g.fillGradientStyle(sc, sc, sc, sc, ga, ga, 0, 0);
+          g.fillTriangle(x - w * 0.2, y, x + w, y + 2, x + lean, y + len);
+          g.fillGradientStyle(lc, lc, lc, lc, ga * 0.35, ga * 0.35, 0, 0);
+          g.fillTriangle(x - w * 1.3, y + 2, x - w * 0.3, y, x - w * 0.5 + lean * 0.6, y + len * 0.55);
+        }
+      } else {
+        g.lineStyle(1.2, opts.shade, ga);
+        for (let i = 2; i + 2 < n; i += 2) {
+          if (hs[i] < hs[i - 2] || hs[i] < hs[i + 2]) continue;
+          const len = hs[i] * (0.35 + propRand(i0 + i) * 0.3);
+          const lean = (propRand(i0 + i + 7) - 0.5) * 10;
+          g.lineBetween(xs[i], baseY - hs[i] + 2, xs[i] + lean, baseY - hs[i] + len);
+        }
+      }
       /*
        * Strata. Broken contour lines at fixed fractions of the local height,
        * so they follow the land. On sandstone they are bedding planes, on
@@ -785,25 +1189,55 @@ export class ParallaxWorld {
 
     // Snow along the high crests
     if (opts.snow !== undefined && opts.snowMin !== undefined) {
-      g.lineStyle(2.6, opts.snow, 0.8);
-      let open = false;
-      for (let i = 0; i < n; i++) {
-        if (hs[i] > opts.snowMin) {
-          if (!open) { g.beginPath(); g.moveTo(xs[i], baseY - hs[i]); open = true; }
-          else g.lineTo(xs[i], baseY - hs[i]);
-        } else if (open) { g.strokePath(); open = false; }
+      if (this.webgl) {
+        /*
+         * A cap, not a line: deepest over the high points, thinning to
+         * nothing at the snow line, ragged where it runs down into the
+         * gullies. A stroke along the crest read as a wire laid on the hill.
+         */
+        const sm = opts.snowMin, sc = opts.snow;
+        const depth = (k: number): number => {
+          const over = hs[k] - sm;
+          // Ragged along the range, but on a scale of tens of metres — a
+          // random depth per vertex striped the face like a curtain
+          return over <= 0 ? 0
+            : Math.min(hs[k] * 0.3, over * 0.6 + 3, 34) * (0.6 + vnoise((i0 + k) * step / 46, seed + 5) * 0.8);
+        };
+        for (let i = 0; i + 1 < n; i++) {
+          const d0 = depth(i), d1 = depth(i + 1);
+          if (d0 <= 0 && d1 <= 0) continue;
+          const a0 = d0 > 0 ? 0.92 : 0, a1 = d1 > 0 ? 0.92 : 0;
+          const y0 = baseY - hs[i], y1 = baseY - hs[i + 1];
+          const b0 = y0 + Math.max(1, d0), b1 = y1 + Math.max(1, d1);
+          g.fillGradientStyle(sc, sc, sc, sc, a0, a1, 0, 0);
+          g.fillTriangle(xs[i], y0, xs[i + 1], y1, xs[i], b0);
+          g.fillGradientStyle(sc, sc, sc, sc, a1, 0, 0, 0);
+          g.fillTriangle(xs[i + 1], y1, xs[i + 1], b1, xs[i], b0);
+        }
+      } else {
+        g.lineStyle(2.6, opts.snow, 0.8);
+        let open = false;
+        for (let i = 0; i < n; i++) {
+          if (hs[i] > opts.snowMin) {
+            if (!open) { g.beginPath(); g.moveTo(xs[i], baseY - hs[i]); open = true; }
+            else g.lineTo(xs[i], baseY - hs[i]);
+          } else if (open) { g.strokePath(); open = false; }
+        }
+        if (open) g.strokePath();
       }
-      if (open) g.strokePath();
     }
 
     // Tree silhouettes planted on the surface — nature returning, but a lot
     // of it burned: a mix of live conifers and dead snags
     if (opts.trees !== undefined) {
-      const spacing = 64;
+      // Trees stand in stands, not in a picket line: a slow pattern decides
+      // where the woods are, and inside a wood they are close together
+      const spacing = 22;
       const first = Math.floor((off - 40) / spacing);
       const density = Phaser.Math.Clamp(this.shape.trees, 0, 1);
       for (let i = first; i < first + Math.ceil(this.width / spacing) + 2; i++) {
-        if (propRand(i + 400) > density) continue;
+        const wood = 0.5 + 0.5 * Math.sin(i * spacing * 0.0031 + seed * 2.1) * Math.sin(i * spacing * 0.0009 + seed);
+        if (propRand(i + 400) > density * (wood > 0.55 ? 1.6 : 0.25)) continue;
         const sx = i * spacing + propRand(i) * 40 - off;
         if (sx < -20 || sx > this.width + 20) continue;
         const ty = baseY - surfaceAt(sx);
@@ -864,7 +1298,8 @@ export class ParallaxWorld {
          * where the front has come off — which is what says "this was a
          * building" rather than "this is a shape".
          */
-        const base = propRand(c + b) > 0.5 ? 0x171310 : 0x1d1813;
+        // Out at the foot of the hills: they take on the colour of distance
+        const base = lerpColor(propRand(c + b) > 0.5 ? 0x171310 : 0x1d1813, this.pal.far, 0.42);
         const col = base;
         const litFace = lerpColor(base, this.pal.glow, 0.16);
         const darkFace = lerpColor(base, 0x000000, 0.45);
@@ -968,24 +1403,37 @@ export class ParallaxWorld {
   private drawFar(scrollX: number, sink: number, hMult: number): void {
     const g = this.farGfx;
     g.clear();
-    const baseY = this.groundY + sink;
+    const baseY = this.groundY + sink - BACK_BAND;
 
-    // Two overlapping far ranges for a deep horizon
+    // Two overlapping far ranges for a deep horizon, the further one paler
     const a = this.shape.ridgeAmp;
-    this.drawRidgeLayer(g, scrollX, 0.022, baseY, 42 * hMult * a, 55 * hMult * a, 13.4, this.pal.far, { alpha: 0.6 });
-    this.drawRidgeLayer(g, scrollX, 0.038, baseY, 55 * hMult * a, 70 * hMult * a, 1.7, this.pal.far, { alpha: 0.85 });
+    const farPale = lerpColor(this.pal.far, this.pal.skyBot, 0.35);
+    this.drawRidgeLayer(g, scrollX, 0.022, baseY, 42 * hMult * a, 55 * hMult * a, 13.4, farPale, { alpha: 0.75 });
+    this.drawRidgeLayer(g, scrollX, 0.038, baseY, 55 * hMult * a, 70 * hMult * a, 1.7, this.pal.far, { alpha: 0.9, texture: 0.25 });
+    this.hazeBand(g, baseY - 150, baseY + 4, 0.22);
+  }
 
-    // Atmospheric distance haze over the far range
-    for (let i = 0; i < 3; i++) {
-      g.fillStyle(this.pal.skyBot, 0.07 - i * 0.018);
-      g.fillRect(0, baseY - 130 + i * 44, this.width, 130 - i * 44);
+  /**
+   * Air lying in front of a distant layer: transparent at the top, thickest
+   * at the foot where the light has the most air to cross. A gradient, so
+   * there is no edge for the eye to catch — the stacked rectangles this
+   * replaces were visible as steps.
+   */
+  private hazeBand(g: Phaser.GameObjects.Graphics, top: number, bottom: number, maxAlpha: number): void {
+    const c = this.pal.skyBot;
+    if (this.webgl) {
+      g.fillGradientStyle(c, c, c, c, 0, 0, maxAlpha, maxAlpha);
+      g.fillRect(0, top, this.width, bottom - top);
+    } else {
+      g.fillStyle(c, maxAlpha * 0.4);
+      g.fillRect(0, (top + bottom) / 2, this.width, (bottom - top) / 2);
     }
   }
 
   private drawMountains(scrollX: number, sink: number, hMult: number): void {
     const g = this.mountainGfx;
     g.clear();
-    const baseY = this.groundY + sink;
+    const baseY = this.groundY + sink - BACK_BAND;
 
     const amp = this.shape.ridgeAmp;
     this.drawRidgeLayer(
@@ -994,14 +1442,12 @@ export class ParallaxWorld {
         highlight: lerpColor(this.pal.mountain, 0xffffff, 0.35),
         snow: this.pal.snow,
         snowMin: (this.shape.caps > 0.4 ? 150 : 1e9) * hMult * amp,
+        texture: 0.55,
       },
     );
 
-    // Light haze at the mountain feet
-    for (let i = 0; i < 2; i++) {
-      g.fillStyle(this.pal.skyBot, 0.05 - i * 0.02);
-      g.fillRect(0, baseY - 70 + i * 34, this.width, 70 - i * 34);
-    }
+    // Haze lying in the valleys at the mountain feet
+    this.hazeBand(g, baseY - 80, baseY + 4, 0.16);
   }
 
   /** High-altitude cloud deck: the tops of the weather layer, far below. */
@@ -1110,63 +1556,89 @@ export class ParallaxWorld {
   private drawWeatherCells(scrollX: number, sink: number): void {
     const g = this.deckGfx;
     const gy = this.groundY + sink;
+    const dl = this.dl;
+    this.cellClouds?.begin();
     for (const c of this.weatherField.all) {
       const strength = this.weatherField.strength(c);
       if (strength < 0.05) continue;
       const sx = c.x - scrollX;
       const r = c.radius;
-      if (sx + r < -200 || sx - r > this.width + 200) continue;
+      if (sx + r < -260 || sx - r > this.width + 260) continue;
 
       const a = strength;
+      const seed = Math.floor(c.x * 0.01);
       switch (c.kind) {
         case 'thunderstorm': {
-          // Anvil, dark base, and rain shafts falling out of it
-          const topY = gy - 460 * this.pxPerM * 0.55;
+          // A towering cell: dark, rain-laden base, cauliflower tower, anvil
+          const baseY = gy - 150 * this.pxPerM * 0.55;
+          const topY = gy - 470 * this.pxPerM * 0.55;
+          // Rain first, falling out of the base and leaning with the wind
+          const lean = 46 + Math.sin(this.t * 0.2 + seed) * 10;
           for (let k = 0; k < 7; k++) {
-            const w = r * (1.15 - k * 0.09);
-            g.fillStyle(lerpColor(0x2a2c34, this.pal.skyBot, 0.18), a * 0.16);
-            g.fillEllipse(sx + Math.sin(k * 1.7) * r * 0.10, topY + k * 26, w * 2, 90 - k * 6);
+            const x0 = sx + (k / 6 - 0.5) * r * 1.3 + Math.sin(this.t * 0.3 + k * 1.7) * 10;
+            const w = r * (0.16 + propRand(seed + k) * 0.12);
+            this.curtain(g, x0, baseY + 10, x0 + lean, gy, w, 0x252a34, a * 0.38, a * 0.08);
           }
-          g.fillStyle(0x14161c, a * 0.30);
-          g.fillEllipse(sx, topY + 190, r * 1.9, 110);
-          // Rain shafts
-          for (let k = 0; k < 12; k++) {
-            const rx = sx + (k / 11 - 0.5) * r * 1.5 + Math.sin(this.t * 0.4 + k) * 8;
-            g.fillStyle(0x3a4048, a * 0.13);
-            g.fillRect(rx, topY + 230, r * 0.11, gy - topY - 230);
+          g.lineStyle(1, 0x8a96a8, a * 0.16);
+          for (let k = 0; k < 26; k++) {
+            const x0 = sx + (propRand(seed + k * 3) - 0.5) * r * 1.5;
+            const y0 = baseY + 20 + ((this.t * 220 + k * 37) % Math.max(40, gy - baseY - 20));
+            g.lineBetween(x0, y0, x0 + 9, y0 + 26);
           }
+          const body = lerpColor(lerpColor(0x4a505c, this.pal.skyBot, 0.25), 0x1a1d24, 1 - dl);
+          const lit = lerpColor(body, lerpColor(0xffffff, this.pal.glow, 0.35), 0.45 * dl);
+          const dark = lerpColor(body, 0x0a0c10, 0.55);
+          const steps = 8;
+          for (let k = 0; k < steps; k++) {
+            const t0 = k / (steps - 1);
+            const y = baseY - (baseY - topY) * t0;
+            // Narrowing up the tower, then spreading into the anvil at the top
+            const wFrac = t0 < 0.72 ? 1.25 - t0 * 0.55 : 0.85 + (t0 - 0.72) * 3.2;
+            const ox = Math.sin(k * 1.3 + seed) * r * 0.08 + (t0 > 0.72 ? (t0 - 0.72) * r * 1.2 : 0);
+            this.cumulus(this.cellClouds, g, sx + ox, y, r * wFrac * 1.6, 70 + (1 - t0) * 30, seed * 7 + k,
+              Math.min(1, a * 1.1), lerpColor(body, lit, t0), k === 0 ? dark : lerpColor(body, dark, 0.25), lit);
+          }
+          // The flat, black underside the rain falls from
+          this.softRect(g, sx - r * 1.05, sx + r * 1.05, baseY - 6, baseY + 22, dark, a * 0.55, a * 0.1, r * 0.3);
           break;
         }
         case 'dust_storm': {
-          // A wall rolling along the deck, boiling at the leading edge
-          const h = 230;
+          // A wall rolling along the deck: billows at the front, a haze of
+          // suspended grit thinning upward behind them
+          const h = 240;
+          const dust = lerpColor(0x8a5a2c, this.pal.glow, 0.25);
+          const dustDark = lerpColor(dust, 0x2a1a0c, 0.45);
+          const dustLit = lerpColor(dust, 0xffe0b0, 0.3 * dl + 0.05);
+          this.softRect(g, sx - r * 1.1, sx + r * 1.1, gy - h * 1.1, gy + 4, dust, 0, a * 0.42, r * 0.35);
           for (let k = 0; k < 9; k++) {
             const t0 = k / 8;
-            g.fillStyle(lerpColor(0x8a5a2c, this.pal.glow, 0.25), a * 0.14);
-            g.fillEllipse(
-              sx + (t0 - 0.5) * r * 1.6 + Math.sin(this.t * 0.6 + k * 1.3) * 16,
-              gy - h * (0.35 + Math.sin(t0 * Math.PI) * 0.55),
-              r * 0.66, h * 0.7,
-            );
+            const roll = Math.sin(this.t * 0.6 + k * 1.3) * 16;
+            this.cumulus(this.cellClouds, g, sx + (t0 - 0.5) * r * 1.8 + roll,
+              gy - h * (0.18 + Math.sin(t0 * Math.PI) * 0.42), r * 0.62, h * 0.55,
+              seed * 5 + k, a * 0.62, dust, dustDark, dustLit);
           }
-          g.fillStyle(lerpColor(0x6b4520, this.pal.glow, 0.15), a * 0.22);
-          g.fillRect(sx - r, gy - h * 0.42, r * 2, h * 0.42);
           break;
         }
         case 'blizzard':
         case 'fog': {
-          g.fillStyle(c.kind === 'fog' ? 0x8a8f96 : 0xc4ccd4, a * 0.16);
-          g.fillEllipse(sx, gy - 120, r * 2, 260);
+          const col = c.kind === 'fog' ? 0x8a8f96 : 0xc4ccd4;
+          this.softRect(g, sx - r * 1.1, sx + r * 1.1, gy - 300, gy + 6, col, 0, a * 0.34, r * 0.45);
+          for (let k = 0; k < 5; k++) {
+            this.cumulus(this.cellClouds, g, sx + (k / 4 - 0.5) * r * 1.6, gy - 120 - (k % 2) * 40, r * 0.7, 80,
+              seed * 3 + k, a * 0.3, col, lerpColor(col, 0x404850, 0.3), lerpColor(col, 0xffffff, 0.4));
+          }
           break;
         }
         default: {
-          // Cloudy / windy: a soft grey mass with a darker base
-          g.fillStyle(0x555b63, a * 0.11);
-          g.fillEllipse(sx, gy - 300 * this.pxPerM * 0.5, r * 1.8, 120);
+          // Cloudy / windy: a broad grey mass with a darker base
+          const y = gy - 300 * this.pxPerM * 0.5;
+          const col = lerpColor(0x6a707a, 0x1a1e24, 1 - dl);
+          this.cumulus(this.cellClouds, g, sx, y, r * 1.8, 90, seed, a * 0.6, col, lerpColor(col, 0x000000, 0.35), lerpColor(col, 0xffffff, 0.35));
           break;
         }
       }
     }
+    this.cellClouds?.end();
   }
 
   private drawClouds(scrollX: number, alt: number): void {
@@ -1174,49 +1646,49 @@ export class ParallaxWorld {
     g.clear();
 
     const groundScreenY = this.groundY + Math.max(0, (alt - ALT_BAND) * this.pxPerM);
-    const body = lerpColor(0x1e2632, 0xffffff, this.dl);           // night clouds go dark
-    const shade = lerpColor(0x141a24, 0x9aa8b4, this.dl);
-    const hi = lerpColor(body, 0xffffff, 0.4);
+    const body = lerpColor(0x2a3240, lerpColor(0xf4f0ea, this.pal.skyBot, 0.18), this.dl);
+    const shade = lerpColor(0x141a24, lerpColor(0x8a96a4, this.pal.skyTop, 0.3), this.dl);
+    const hi = lerpColor(body, lerpColor(0xffffff, this.pal.glow, 0.4), 0.55 * this.dl);
 
+    this.skyClouds?.begin();
     for (let layer = 0; layer < CLOUD_LAYER_ALTS.length; layer++) {
       const layerAlt = CLOUD_LAYER_ALTS[layer];
       const baseY = groundScreenY - layerAlt * this.pxPerM;
-      if (baseY < -160 || baseY > this.height + 160) continue;
+      if (baseY < -200 || baseY > this.height + 200) continue;
 
-      // Higher decks drift more slowly and thin out
+      // Higher decks drift more slowly, and sit further back in the haze
       const drift = 0.05 / (1 + layer * 0.5);
-      const alpha = 0.17 * (1 - layer * 0.11);
+      const alpha = 0.82 - layer * 0.08;
       const seedOff = layer * 137;
+      const far = Math.min(0.5, 0.12 + layer * 0.08);
+      const lb = lerpColor(body, this.pal.skyBot, far), ls = lerpColor(shade, this.pal.skyBot, far);
+      const lh = lerpColor(hi, this.pal.skyBot, far);
 
       for (let i = 0; i < this.cloudOffsets.length; i++) {
-        const span = this.width + 300;
-        const ox = ((this.cloudOffsets[i] + seedOff - scrollX * drift) % span + span) % span - 150;
+        const span = this.width + 400;
+        const ox = ((this.cloudOffsets[i] + seedOff - scrollX * drift) % span + span) % span - 200;
         const oy = baseY + ((i + layer) % 3) * 34;
-        const w = (80 + ((i + layer) % 3) * 40) * (1 - layer * 0.06);
-        g.fillStyle(shade, alpha * 0.8);
-        g.fillEllipse(ox + 4, oy + 7, w * 0.95, 20);
-        g.fillStyle(body, alpha);
-        g.fillEllipse(ox, oy, w, 28);
-        g.fillEllipse(ox + 30, oy - 12, w * 0.7, 22);
-        g.fillEllipse(ox - 20, oy - 8, w * 0.5, 18);
-        g.fillStyle(hi, alpha * 0.5);
-        g.fillEllipse(ox + 8, oy - 14, w * 0.4, 10);
+        const w = (110 + ((i + layer) % 3) * 55) * (1 - layer * 0.06);
+        this.cumulus(this.skyClouds, g, ox, oy, w, w * 0.34, i * 31 + layer * 7, alpha, lb, ls, lh);
       }
     }
+    this.skyClouds?.end();
   }
 
   private drawHills(scrollX: number, sink: number, f: WorldFrame): void {
     const g = this.hillGfx;
     g.clear();
-    const baseY = this.groundY + sink;
+    const baseY = this.groundY + sink - BACK_BAND;
 
     this.drawRidgeLayer(
       g, scrollX, 0.22, baseY, 26 * this.shape.hillAmp, 46 * this.shape.hillAmp, 8.9, this.pal.hill, {
         shade: lerpColor(this.pal.hill, 0x000000, 0.35),
         highlight: this.pal.hillLight,
         trees: lerpColor(this.pal.hill, 0x000000, 0.5),
+        texture: 1,
       },
     );
+    this.hazeBand(g, baseY - 40, baseY + 2, 0.12);
 
     // Bird flocks in fair weather, low altitude
     if ((f.condition === 'clear' || f.condition === 'cloudy') && f.altitude > 20 && sink < 60) {
@@ -1241,7 +1713,9 @@ export class ParallaxWorld {
   private drawScrub(scrollX: number, sink: number): void {
     const g = this.scrubGfx;
     g.clear();
-    const baseY = this.groundY + sink;
+    // The far edge of the plain: ruins and smoke stand out there, not on the
+    // line the aeroplane lands on
+    const baseY = this.groundY + sink - BACK_BAND + 6;
     if (baseY > this.height + 30) return;
 
     this.drawSmokeColumns(g, scrollX, baseY);
@@ -1254,7 +1728,8 @@ export class ParallaxWorld {
       const sx = i * spacing - scroll + (propRand(i) - 0.5) * 120;
       if (sx < -60 || sx > this.width + 60) continue;
       const kind = Math.floor(propRand(i + 50) * 6);
-      const s = 0.7 + propRand(i + 90) * 0.7;
+      // Out at the far edge of the plain, so small
+      const s = (0.7 + propRand(i + 90) * 0.7) * 0.55;
 
       // Cast shadow first, stretched away from the low sun. Without one the
       // rocks and snags read as stickers laid over the ground rather than
@@ -1354,155 +1829,211 @@ export class ParallaxWorld {
     const g = this.groundGfx;
     g.clear();
     const gy = this.groundY + sink;
-    if (gy > this.height + 10) return;
-
-    /**
-     * The ground is a lit SURFACE receding from the camera, not a stack of
-     * bands. It used to be a flat fill, four hard strata and two ruled lines,
-     * which is the same mistake the chart and the cutscene had: no light
-     * source, so no depth.
-     *
-     * Two things do the work. The gradient runs from a hazy, sun-warmed
-     * horizon down to cold shadow right under the camera — that is distance.
-     * And everything that sits on the ground now throws a shadow away from
-     * the sun, which is what makes objects sit ON the dirt rather than float
-     * in front of it.
-     */
-    const depth = Math.max(1, this.height - gy);
-    const BANDS = 18;
-    const lit = lerpColor(this.pal.groundTop, this.pal.glow, 0.28);
-    const deep = lerpColor(this.pal.ground, 0x05060a, 0.62);
-    for (let i = 0; i < BANDS; i++) {
-      const t = i / (BANDS - 1);
-      // Eased so most of the change happens near the horizon, the way real
-      // aerial perspective falls off.
-      const e = Math.pow(t, 0.62);
-      g.fillStyle(lerpColor(lit, deep, e), 1);
-      g.fillRect(0, gy + depth * t, this.width, depth / BANDS + 1.5);
-    }
-    // Haze pooling along the horizon line, so the ground meets the sky in air
-    for (let i = 6; i >= 1; i--) {
-      g.fillStyle(this.pal.glow, 0.035);
-      g.fillRect(0, gy - i * 1.5, this.width, i * 5);
-    }
-    g.lineStyle(2, this.pal.groundLine, 1);
-    g.lineBetween(0, gy, this.width, gy);
+    if (gy - BACK_BAND > this.height + 10) return;
 
     /*
-     * ── Tidal channels ───────────────────────────────────────────────────
+     * ── The ground is a plane, seen in perspective ───────────────────────
      *
-     * Drawn as contiguous runs rather than per-column strips, so each channel
-     * gets one shoreline at each end instead of a shimmering edge every eight
-     * pixels. Water is darker and colder than the dirt around it and takes a
-     * band of sky reflection along its length, which is what separates it
-     * from "a patch of different-coloured ground".
+     * It was a stack of horizontal bands with ruled lines across it — a
+     * backdrop, not a place. Now it is a surface with depth on BOTH sides of
+     * the line things stand on: a plain receding behind it to the foot of the
+     * hills, and ground running toward the camera in front of it. Everything
+     * on it moves at the rate its distance says it should — the far edge of
+     * the plain drifts at under a third of the speed of the action line, the
+     * ground under the camera rushes past at more than twice it — and that
+     * motion parallax is the strongest depth cue a moving picture has.
      */
+    const W = this.width, H = this.height;
+    const by = gy - BACK_BAND;
+    const cx = W / 2;
+    const S_FAR = 0.3, S_NEAR = 2.4;
+    const nearDepth = Math.max(1, H - gy);
+    const sAt = (y: number): number => (y <= gy
+      ? S_FAR + (1 - S_FAR) * Math.max(0, (y - by) / BACK_BAND)
+      : 1 + (S_NEAR - 1) * Math.min(1, (y - gy) / nearDepth));
+    const xAt = (wx: number, sc: number): number => cx + (wx - scrollX - cx) * sc;
+    const wxAt = (sx: number, sc: number): number => scrollX + cx + (sx - cx) / sc;
+
+    // Soil: hazy and pale at the foot of the hills, sunlit at the line, cold
+    // in the shadow under the camera
+    const farSoil = lerpColor(lerpColor(this.pal.groundTop, this.pal.skyBot, 0.5), this.pal.hill, 0.18);
+    const lineSoil = lerpColor(this.pal.groundTop, this.pal.glow, 0.26);
+    const midSoil = lerpColor(this.pal.groundTop, this.pal.ground, 0.6);
+    const deep = lerpColor(this.pal.ground, 0x05060a, 0.62);
+    const grad = (y0: number, y1: number, c0: number, c1: number): void => {
+      if (y1 <= y0) return;
+      if (this.webgl) {
+        g.fillGradientStyle(c0, c0, c1, c1, 1, 1, 1, 1);
+        g.fillRect(0, y0, W, y1 - y0 + 1);
+      } else {
+        g.fillStyle(lerpColor(c0, c1, 0.5), 1);
+        g.fillRect(0, y0, W, y1 - y0 + 1);
+      }
+    };
+    grad(by, gy, farSoil, lineSoil);
+    grad(gy, gy + nearDepth * 0.35, lineSoil, midSoil);
+    grad(gy + nearDepth * 0.35, H + 2, midSoil, deep);
+
+    // ── Water, receding: channels cross the plain into the distance ──────
     if (BIOMES[this.biomeFrom].shape.water > 0.02 || BIOMES[this.biomeTo].shape.water > 0.02) {
-      const STEP = 6;
-      /*
-       * Water has to be COOL against warm ground or it reads as shadow.
-       *
-       * The first version reflected the palette's own sky, which on the marsh
-       * is a pale tan — so the channels came out as muddy patches you could
-       * mistake for a dip in the dirt. Pulling the reflection hard toward a
-       * blue-green keeps it recognisably water under any of the six palettes
-       * while still picking up some of the local light.
-       */
       const skyRefl = lerpColor(lerpColor(this.pal.skyBot, 0x2e7d92, 0.62), 0x0a1622, 0.18);
       const deepWater = 0x0b2430;
-      let runStart = -1;
-      let runDepth = 0;
-      const flush = (endX: number): void => {
-        if (runStart < 0) return;
-        const w = endX - runStart;
-        if (w > 4) {
-          const dep = Math.min(1, runDepth);
-          // The body of the channel, receding the same way the ground does
-          const bodyH = 26 + dep * 44;
-          for (let i = 0; i < 5; i++) {
-            const t = i / 4;
-            g.fillStyle(lerpColor(skyRefl, deepWater, t), 0.92);
-            g.fillRect(runStart, gy + t * bodyH * 0.9, w, bodyH * 0.3 + 2);
+      const strips: Array<[number, number]> = [];
+      for (let y = by; y < gy; y += 5) strips.push([y, Math.min(gy, y + 5)]);
+      for (let y = gy; y < H;) {
+        const hgt = Math.max(5, (y - gy) * 0.18 + 5);
+        strips.push([y, Math.min(H, y + hgt)]);
+        y += hgt;
+      }
+      for (const [y0, y1] of strips) {
+        const sc = sAt((y0 + y1) / 2);
+        const depthT = y0 < gy ? (gy - y0) / BACK_BAND : 0;
+        const col = lerpColor(
+          lerpColor(skyRefl, deepWater, y0 >= gy ? Math.min(1, (y0 - gy) / 90) : 0.2),
+          this.pal.skyBot, depthT * 0.5,
+        );
+        let run = -1;
+        for (let x = -12; x <= W + 12; x += 12) {
+          const wet = this.waterAt(wxAt(x, sc)) > 0;
+          if (wet && run < 0) run = x;
+          if ((!wet || x >= W) && run >= 0) {
+            g.fillStyle(col, 0.94);
+            g.fillRect(run, y0, x - run + 1, y1 - y0 + 0.5);
+            // The bright wet bank at each end of the run
+            g.fillStyle(lerpColor(this.pal.glow, 0xffffff, 0.3), 0.35);
+            g.fillRect(run - 1, y0, 2, y1 - y0);
+            g.fillRect(x - 1, y0, 2, y1 - y0);
+            run = -1;
           }
-          // Wet shoreline — the bright line where land meets water is most of
-          // what sells it, so it gets the sun rather than the ground colour
-          g.fillStyle(lerpColor(this.pal.glow, 0xffffff, 0.35), 0.9);
-          g.fillRect(runStart, gy - 1.5, w, 3);
-          // Darker mud right at each bank, so the edge is not a hard cut
-          g.fillStyle(0x1a2418, 0.5);
-          g.fillRect(runStart, gy + 1.5, 5, bodyH * 0.5);
-          g.fillRect(runStart + w - 5, gy + 1.5, 5, bodyH * 0.5);
-          // Flat sun glitter lying along the surface
-          for (let i = 0; i < 4; i++) {
-            const hy = gy + 5 + i * (bodyH * 0.2);
-            const hx = runStart + ((this.routeSeed * 37 + i * 53 + runStart) % Math.max(1, w * 0.6));
-            g.fillStyle(lerpColor(this.pal.glow, 0xffffff, 0.5), 0.22 - i * 0.04);
-            g.fillRect(hx, hy, Math.min(w - (hx - runStart), w * 0.42), 1.6);
-          }
-        }
-        runStart = -1;
-        runDepth = 0;
-      };
-      for (let x = 0; x <= this.width; x += STEP) {
-        const d = this.waterAt(scrollX + x);
-        if (d > 0) {
-          if (runStart < 0) runStart = x;
-          runDepth = Math.max(runDepth, d);
-        } else {
-          flush(x);
         }
       }
-      flush(this.width);
     }
 
-    // ── Undulating dirt shoulder: the ground line is dead straight because
-    // the aircraft has to land on it, so the RELIEF goes just underneath it.
+    // ── Dirt tracks running off into the distance ────────────────────────
     {
-      const step = 26;
-      const first = Math.floor((scrollX - 60) / step);
-      g.fillStyle(lerpColor(this.pal.ground, 0x000000, 0.22), 0.75);
-      g.beginPath();
-      g.moveTo(-60, gy + 2);
-      for (let i = first; i < first + Math.ceil(this.width / step) + 4; i++) {
-        const wx = i * step;
-        const h = 5 + Math.sin(wx * 0.0031) * 4 + Math.sin(wx * 0.011) * 2.5 + propRand(i) * 3;
-        g.lineTo(wx - scrollX, gy + 2 + h);
+      const [oA, oB] = originStripPx(f.originRunwayM ?? 600);
+      const [dA, dB] = destStripPx(f.routeTotalKm, f.destRunwayM ?? 600);
+      const SP = 2600;
+      const lo = Math.floor(wxAt(-400, S_FAR) / SP), hi = Math.ceil(wxAt(W + 400, S_FAR) / SP);
+      for (let k = lo; k <= hi; k++) {
+        if (propRand(k * 3.1 + 7) > 0.42) continue;
+        const wx = k * SP + propRand(k + 2) * SP * 0.6;
+        if ((wx > oA - 300 && wx < oB + 300) || (wx > dA - 300 && wx < dB + 300)) continue;
+        const hw = 10 + propRand(k + 5) * 8;
+        const lean = (propRand(k + 9) - 0.5) * 260;      // tracks do not run straight at you
+        const pts: Array<[number, number, number]> = [[by, S_FAR, lean * -0.6], [gy, 1, 0], [H, S_NEAR, lean]];
+        const Lx: number[] = [], Rx: number[] = [], Ys: number[] = [];
+        for (const [y, sc, off] of pts) {
+          Lx.push(xAt(wx + off - hw, sc));
+          Rx.push(xAt(wx + off + hw, sc));
+          Ys.push(y);
+        }
+        if (Math.max(...Lx, ...Rx) < -40 || Math.min(...Lx, ...Rx) > W + 40) continue;
+        const dust = lerpColor(lineSoil, 0xd8c8a0, 0.18);
+        g.fillStyle(dust, 0.3);
+        g.beginPath();
+        g.moveTo(Lx[0], Ys[0]); g.lineTo(Lx[1], Ys[1]); g.lineTo(Lx[2], Ys[2]);
+        g.lineTo(Rx[2], Ys[2]); g.lineTo(Rx[1], Ys[1]); g.lineTo(Rx[0], Ys[0]);
+        g.closePath(); g.fillPath();
+        // Two wheel ruts down it
+        g.lineStyle(1.2, lerpColor(this.pal.ground, 0x000000, 0.45), 0.38);
+        for (const f2 of [0.3, 0.7]) {
+          g.beginPath();
+          for (let i = 0; i < 3; i++) {
+            const x = Lx[i] + (Rx[i] - Lx[i]) * f2;
+            if (i === 0) g.moveTo(x, Ys[i]); else g.lineTo(x, Ys[i]);
+          }
+          g.strokePath();
+        }
       }
-      g.lineTo(this.width + 60, gy + 26);
-      g.lineTo(-60, gy + 26);
-      g.closePath();
-      g.fillPath();
     }
 
-    // Wheel ruts, spreading apart as they come toward the camera
-    for (const [off, a] of [[30, 0.45], [56, 0.35], [92, 0.25]] as const) {
-      if (gy + off > this.height) break;
-      g.lineStyle(2 + off / 46, lerpColor(this.pal.ground, 0x000000, 0.5), a);
-      g.lineBetween(0, gy + off, this.width, gy + off);
-    }
-
-    // Scrolling grit: finer and denser far away, coarser near the camera, so
-    // the speckle itself carries the perspective instead of fighting it.
-    {
-      const sp = 18;
-      const first = Math.floor((scrollX - 20) / sp);
-      for (let i = first; i < first + Math.ceil(this.width / sp) + 2; i++) {
-        for (let k = 0; k < 3; k++) {
-          const r = propRand(i * 3 + k * 17);
-          const sx = i * sp + r * 16 - scrollX;
-          if (sx < -6 || sx > this.width + 6) continue;
-          const dt = propRand(i + k * 7 + 3);
-          const dy = 6 + dt * Math.min(depth - 10, 120);
-          const sz = 1.4 + dt * 3.2;
-          g.fillStyle(propRand(i + k + 9) > 0.5 ? 0x000000 : 0xffffff, 0.05 + dt * 0.05);
-          g.fillRect(sx, gy + dy, sz, sz * 0.6);
-          // Its own little shadow, cast away from the sun
-          if (dt > 0.45) {
-            g.fillStyle(0x000000, 0.10);
-            g.fillRect(sx + sz * 0.7, gy + dy + sz * 0.5, sz * 0.9, sz * 0.35);
+    // ── Rows of ground cover, each at its own distance ───────────────────
+    const rowsBack = [0.1, 0.3, 0.52, 0.72, 0.9];
+    const rowsFront = [0.05, 0.15, 0.3, 0.48, 0.7];
+    const rows: Array<{ y: number; sc: number; gap: number; far: number }> = [];
+    rowsBack.forEach((t, i) => rows.push({
+      y: by + t * BACK_BAND, sc: sAt(by + t * BACK_BAND),
+      gap: BACK_BAND * ((rowsBack[i + 1] ?? 1) - t), far: 1 - t,
+    }));
+    rowsFront.forEach((t, i) => rows.push({
+      y: gy + 4 + t * (nearDepth - 4), sc: sAt(gy + 4 + t * (nearDepth - 4)),
+      gap: (nearDepth - 4) * ((rowsFront[i + 1] ?? 0.9) - t), far: 0,
+    }));
+    const scrubCol = this.pal.scrub;
+    const tuft = lerpColor(this.pal.hill, scrubCol, 0.45);
+    const pale = lerpColor(lineSoil, 0xe0d0a8, 0.22);
+    const dark = lerpColor(this.pal.ground, 0x000000, 0.3);
+    for (let r = 0; r < rows.length; r++) {
+      const { y, sc, gap, far } = rows[r];
+      const haze = (c: number): number => lerpColor(c, farSoil, far * 0.7);
+      // Patches of different ground — dry, dark, overgrown — flattened by distance
+      {
+        const SP = 300 / sc;
+        const k0 = Math.floor(wxAt(-300, sc) / SP), k1 = Math.ceil(wxAt(W + 300, sc) / SP);
+        for (let k = k0; k <= k1; k++) {
+          const h1 = propRand(k * 1.7 + r * 31);
+          const wx = k * SP + h1 * SP * 0.7;
+          const x = xAt(wx, sc);
+          const w = (150 + propRand(k + r * 7) * 240) * sc;
+          const which = propRand(k * 2.3 + r);
+          const col = which < 0.4 ? pale : which < 0.75 ? dark : tuft;
+          g.fillStyle(haze(col), 0.16 + propRand(k + r) * 0.12);
+          g.fillEllipse(x, y, w, Math.max(2, gap * 1.6));
+        }
+      }
+      // Tufts, stones and brush — small at the back, big in front
+      {
+        const SP = 54 / sc;
+        const k0 = Math.floor(wxAt(-40, sc) / SP), k1 = Math.ceil(wxAt(W + 40, sc) / SP);
+        for (let k = k0; k <= k1; k++) {
+          const h1 = propRand(k * 3.3 + r * 17);
+          if (h1 < this.coverSkip) continue;
+          const wx = k * SP + propRand(k + r * 5) * SP;
+          const x = xAt(wx, sc);
+          const yy = y + (propRand(k * 1.3 + r) - 0.5) * gap;
+          const z = sc * (0.7 + propRand(k + 11 * r) * 0.6);
+          const kind = Math.floor(propRand(k * 7.7 + r * 3) * 5);
+          if (z > 1.1) {
+            g.fillStyle(0x000000, 0.18);
+            g.fillEllipse(x + 3 * z, yy + 0.6 * z, 8 * z, 1.8 * z);
+          }
+          switch (kind) {
+            case 0:   // a tuft of dry grass
+            case 1:
+              g.lineStyle(Math.max(0.6, 0.9 * z), haze(tuft), 0.85);
+              g.lineBetween(x, yy, x - 2 * z, yy - 4.5 * z);
+              g.lineBetween(x, yy, x + 0.5 * z, yy - 5.5 * z);
+              g.lineBetween(x, yy, x + 2.5 * z, yy - 4 * z);
+              break;
+            case 2:   // a stone, lit on the sun side
+              g.fillStyle(haze(lerpColor(scrubCol, 0x8a8070, 0.35)), 1);
+              g.fillEllipse(x, yy - 1.2 * z, 5 * z, 3 * z);
+              g.fillStyle(haze(lerpColor(scrubCol, 0xd0c4a8, 0.4)), 0.7);
+              g.fillEllipse(x - 0.9 * z, yy - 1.8 * z, 2.4 * z, 1.4 * z);
+              break;
+            case 3:   // brush
+              g.fillStyle(haze(lerpColor(tuft, 0x000000, 0.2)), 0.95);
+              g.fillCircle(x - 1.6 * z, yy - 1.8 * z, 2 * z);
+              g.fillCircle(x + 1.4 * z, yy - 2.2 * z, 2.3 * z);
+              g.fillCircle(x, yy - 3.4 * z, 1.8 * z);
+              break;
+            default:  // a dead stick
+              g.lineStyle(Math.max(0.6, 0.8 * z), haze(scrubCol), 0.9);
+              g.lineBetween(x, yy, x + 1 * z, yy - 7 * z);
+              g.lineBetween(x + 0.6 * z, yy - 4 * z, x + 3 * z, yy - 5.5 * z);
           }
         }
       }
+    }
+
+    // A soft seam of haze where the plain meets the hills
+    if (this.webgl) {
+      const c = this.pal.skyBot;
+      g.fillGradientStyle(c, c, c, c, 0, 0, 0.35, 0.35);
+      g.fillRect(0, by - 10, W, 12);
+      g.fillGradientStyle(c, c, c, c, 0.35, 0.35, 0, 0);
+      g.fillRect(0, by + 2, W, 10);
     }
 
     // Touchdown tire marks left by this flight's landings
@@ -1561,19 +2092,6 @@ export class ParallaxWorld {
     this.drawAirfield(g, dstFrom + 60, scrollX, apronY, -1);
     this.drawSettlement(g, oriFrom - 60, scrollX, gy, -1);
     this.drawSettlement(g, dstTo + 60, scrollX, gy, 1);
-
-    // Cracks / ruts between runways so open terrain isn't sterile
-    const spacing = 170;
-    const first = Math.floor((scrollX - 60) / spacing);
-    for (let i = first; i < first + Math.ceil(this.width / spacing) + 1; i++) {
-      const wx = i * spacing + propRand(i + 13) * 80;
-      if (wx > oriFrom - 400 && wx < oriTo + 400) continue;
-      if (wx > dstFrom - 400 && wx < dstTo + 400) continue;
-      const sx = wx - scrollX;
-      if (sx < -40 || sx > this.width + 40) continue;
-      g.lineStyle(1.5, 0x000000, 0.18);
-      g.lineBetween(sx, gy + 6 + propRand(i + 7) * 10, sx + 26 + propRand(i) * 30, gy + 8 + propRand(i + 3) * 12);
-    }
   }
 
   /**
@@ -1973,161 +2491,198 @@ export class ParallaxWorld {
     };
     const S = SURFACES[surface] ?? SURFACES.open;
 
-    // ── The deck, as a SURFACE rather than a line ───────────────────────
-    // Banded from the far edge down to the near one so it reads as ground
-    // receding away from the camera instead of a stripe painted on the world.
-    /*
-     * Deeper than it was. At 22 px the deck read as a road: a thin dark band
-     * with a dashed line down it. A runway seen from the side is a wide slab,
-     * and the depth is what lets everything else on it — lights, markers,
-     * rubber — actually be seen.
-     */
+    // ── The strip as a surface in perspective ────────────────────────────
+    //
+    // It was a stack of horizontal bands with square ends, which is a road
+    // painted on the picture plane — "too 2D for the environment" was fair.
+    // The deck now lies on the same ground plane as everything else: its far
+    // edge drifts slower than its near edge, so the ends of the strip and
+    // every bar painted across it slant toward the horizon, the lights and
+    // markings shrink with distance, and the whole slab reads as something
+    // you could walk out onto.
     const DECK = RUNWAY_DECK;
-    const BANDS = 11;
-    /*
-     * ── The strip straddles the contact line ──────────────────────────────
-     *
-     * The deck used to be drawn entirely BELOW `gy`, and the aeroplane sits
-     * exactly ON `gy` — so the wheels rested on the strip's far edge and it
-     * read as an aircraft parked on the dirt shoulder with a runway lying
-     * behind it. In a side-on view with any depth at all the far edge of a
-     * runway is ABOVE the point you are standing on it, so the deck has to
-     * extend past the contact line for the wheels to be on the surface.
-     */
-    const FAR = RUNWAY_FAR;                  // how much of the slab is beyond you
+    const FAR = RUNWAY_FAR;
     const top = gy - FAR;
-    for (let i = 0; i < BANDS; i++) {
-      const t = i / (BANDS - 1);
-      const c = Phaser.Display.Color.Interpolate.ColorWithColor(
-        Phaser.Display.Color.IntegerToColor(S.far),
-        Phaser.Display.Color.IntegerToColor(S.near),
-        100, Math.round(t * 100),
-      );
-      g.fillStyle(Phaser.Display.Color.GetColor(c.r, c.g, c.b), 1);
-      g.fillRect(sx0, top + (DECK * i) / BANDS, sx1 - sx0, DECK / BANDS + 0.8);
-    }
-    // Shoulders: graded dirt either side of the hard surface
-    g.fillStyle(lerpColor(S.deck, this.pal.ground ?? 0x4a3d28, 0.6), 0.85);
-    /*
-     * The far apron: packed earth between the strip and the field's buildings.
-     * It is what the hangar and the wire stand ON — without it they either sit
-     * in the tarmac or hang in the hills.
-     */
-    g.fillStyle(lerpColor(this.pal.groundTop ?? 0x6b5c38, 0x000000, 0.25), 1);
-    g.fillRect(sx0, top - RUNWAY_APRON, sx1 - sx0, RUNWAY_APRON);
-    g.fillStyle(lerpColor(this.pal.glow, 0x000000, 0.35), 0.35);
-    g.fillRect(sx0, top - RUNWAY_APRON, sx1 - sx0, 1.5);   // lit far lip
-    g.fillStyle(0x000000, 0.28);
-    g.fillRect(sx0, top - 2, sx1 - sx0, 2);                  // shadow onto the deck
-    g.fillRect(sx0, top + DECK, sx1 - sx0, 5);
-    // Painted edge lines, top and bottom of the deck
-    g.lineStyle(1.2, S.mark, S.loose ? 0.10 : 0.34);
-    g.lineBetween(sx0, top + 1.2, sx1, top + 1.2);
-    g.lineBetween(sx0, top + DECK - 1, sx1, top + DECK - 1);
-    g.lineStyle(1, 0x000000, 0.5);
-    g.lineBetween(sx0, top + DECK, sx1, top + DECK);
+    const bottom = top + DECK;
+    const by = gy - BACK_BAND;
+    const cxs = this.width / 2;
+    const nearDepth = Math.max(1, this.height - gy);
+    const sAt = (y: number): number => (y <= gy
+      ? 0.3 + 0.7 * Math.max(0, (y - by) / BACK_BAND)
+      : 1 + 1.4 * Math.min(1, (y - gy) / nearDepth));
+    const X = (wx: number, y: number): number => cxs + (wx - scrollX - cxs) * sAt(y);
+    // A world-x span between two screen depths, split at the line where the
+    // perspective changes rate, so straight edges stay straight
+    const quad = (wa: number, wb: number, ya: number, yb: number, color: number, alpha: number): void => {
+      const ys = ya < gy && yb > gy ? [ya, gy, yb] : [ya, yb];
+      g.fillStyle(color, alpha);
+      for (let i = 0; i + 1 < ys.length; i++) {
+        const y0 = ys[i], y1 = ys[i + 1];
+        const pts = [
+          { x: X(wa, y0), y: y0 }, { x: X(wb, y0), y: y0 }, { x: X(wb, y1), y: y1 }, { x: X(wa, y1), y: y1 },
+        ];
+        if (Math.max(pts[0].x, pts[1].x, pts[2].x, pts[3].x) < -40 || Math.min(pts[0].x, pts[1].x, pts[2].x, pts[3].x) > this.width + 40) continue;
+        g.fillPoints(pts, true);
+      }
+    };
+    const gradQuad = (wa: number, wb: number, ya: number, yb: number, c0: number, c1: number): void => {
+      const ys = ya < gy && yb > gy ? [ya, gy, yb] : [ya, yb];
+      for (let i = 0; i + 1 < ys.length; i++) {
+        const y0 = ys[i], y1 = ys[i + 1];
+        const k0 = (y0 - ya) / (yb - ya), k1 = (y1 - ya) / (yb - ya);
+        const ca = lerpColor(c0, c1, k0), cb = lerpColor(c0, c1, k1);
+        const ax = X(wa, y0), bx = X(wb, y0), cx2 = X(wb, y1), dx = X(wa, y1);
+        if (this.webgl) {
+          g.fillGradientStyle(ca, ca, cb, cb, 1, 1, 1, 1);
+          g.fillTriangle(ax, y0, bx, y0, dx, y1);
+          g.fillGradientStyle(ca, cb, cb, cb, 1, 1, 1, 1);
+          g.fillTriangle(bx, y0, cx2, y1, dx, y1);
+        } else {
+          g.fillStyle(lerpColor(ca, cb, 0.5), 1);
+          g.fillPoints([{ x: ax, y: y0 }, { x: bx, y: y0 }, { x: cx2, y: y1 }, { x: dx, y: y1 }], true);
+        }
+      }
+    };
+    const span = (wx: number, y: number): boolean => {
+      const x = X(wx, y);
+      return x > -40 && x < this.width + 40;
+    };
 
-    // Asphalt patchwork speckle
+    // The far apron: packed earth between the strip and the field's buildings
+    quad(fromM - 40, toM + 40, top - RUNWAY_APRON, top, lerpColor(this.pal.groundTop ?? 0x6b5c38, 0x000000, 0.22), 1);
+    // Graded dirt shoulders either side of the hard surface
+    quad(fromM - 30, toM + 30, top - 3, top, lerpColor(S.deck, this.pal.ground ?? 0x4a3d28, 0.55), 0.9);
+    quad(fromM - 30, toM + 30, bottom, bottom + 5, lerpColor(S.deck, this.pal.ground ?? 0x4a3d28, 0.6), 0.9);
+    // The deck: lighter at the far edge where the sky is in it, dark near you
+    gradQuad(fromM, toM, top, bottom, S.far, S.near);
+    quad(fromM, toM, bottom, bottom + 3, 0x000000, 0.3);
+
+    /*
+     * Joints between the slabs, or ruts in the dirt. A slab joint runs across
+     * the strip from the far edge to the near one, so in perspective each one
+     * leans toward the middle of the picture — a fan of lines that slides as
+     * you roll, which is what makes the deck read as a surface you are on
+     * rather than a stripe you are in front of.
+     */
+    if (!S.loose) {
+      const SLAB = 22 * WORLD_PX_PER_M;
+      const k0 = Math.ceil(Math.max(fromM, scrollX - 900) / SLAB), k1 = Math.floor(Math.min(toM, scrollX + this.width + 900) / SLAB);
+      g.lineStyle(1, 0x000000, 0.22);
+      for (let k = k0; k <= k1; k++) {
+        const wx = k * SLAB;
+        const xa = X(wx, top + 1), xb = X(wx, gy), xc = X(wx, bottom - 1);
+        if (Math.max(xa, xc) < -20 || Math.min(xa, xc) > this.width + 20) continue;
+        g.lineBetween(xa, top + 1, xb, gy);
+        g.lineBetween(xb, gy, xc, bottom - 1);
+      }
+      // …and the seams down its length, closer together toward the far edge
+      g.lineStyle(1, 0x000000, 0.16);
+      for (const f2 of [0.18, 0.4, 0.66]) {
+        const y = top + DECK * f2;
+        g.lineBetween(X(fromM, y), y, X(toM, y), y);
+      }
+    } else {
+      // Wheel ruts worn down the length of a dirt strip
+      for (const [f2, w] of [[0.3, 2.2], [0.42, 2.2], [0.62, 3], [0.76, 3]] as Array<[number, number]>) {
+        const y = top + DECK * f2;
+        g.lineStyle(w * sAt(y), lerpColor(S.near, 0x000000, 0.3), 0.35);
+        g.lineBetween(X(fromM, y), y, X(toM, y), y);
+      }
+    }
+
+    // Painted edge lines, far and near
+    g.lineStyle(1.2, S.mark, S.loose ? 0.10 : 0.34);
+    g.lineBetween(X(fromM, top + 1.4), top + 1.4, X(toM, top + 1.4), top + 1.4);
+    g.lineBetween(X(fromM, bottom - 1.2), bottom - 1.2, X(toM, bottom - 1.2), bottom - 1.2);
+
+    // Patched and cracked surface, at its own depth so it slides with it
     {
-      const sp = 34;
-      const first = Math.floor((Math.max(fromM, scrollX - 40)) / sp);
-      const last = Math.floor(Math.min(toM, scrollX + this.width + 40) / sp);
+      const sp = 40;
+      const first = Math.floor((Math.max(fromM, scrollX - 200)) / sp);
+      const last = Math.floor(Math.min(toM, scrollX + this.width + 200) / sp);
       for (let i = first; i <= last; i++) {
         const wx = i * sp + propRand(i + 21) * 26;
-        if (wx < fromM + 6 || wx > toM - 6) continue;
-        const dx = wx - scrollX;
-        g.fillStyle(propRand(i + 55) > 0.5 ? 0x000000 : 0x4a4a44, 0.25);
-        g.fillRect(dx, top + 3 + propRand(i + 8) * (DECK - 7), 3 + propRand(i) * 6, 1.6);
+        if (wx < fromM + 6 || wx > toM - 12) continue;
+        const y = top + 3 + propRand(i + 8) * (DECK - 7);
+        if (!span(wx, y)) continue;
+        const repair = propRand(i + 55) > 0.62;
+        quad(wx, wx + (repair ? 14 + propRand(i) * 20 : 3 + propRand(i) * 6), y, y + (repair ? 3.5 : 1.4),
+          repair ? lerpColor(S.deck, 0x000000, 0.25) : (propRand(i + 9) > 0.5 ? 0x000000 : 0x5a5a52), repair ? 0.55 : 0.22);
       }
     }
 
-    // Threshold piano keys at both ends
-    for (const endX of [x0 + 14, x1 - 96]) {
+    // Threshold piano keys at both ends — slanting with the deck
+    for (const endX of [fromM + 14, toM - 96]) {
       for (let i = 0; i < 6; i++) {
-        const tx = endX + i * 15;
-        if (tx < -20 || tx > this.width + 20) continue;
-        g.fillStyle(0xc8c0a8, 0.75);
-        g.fillRect(tx, top + 4, 7, DECK - 8);
+        const wx = endX + i * 15;
+        if (!span(wx, gy)) continue;
+        quad(wx, wx + 7, top + 4, bottom - 4, 0xc8c0a8, S.loose ? 0.3 : 0.72);
       }
     }
-
-    // Aiming-point bars past each threshold
-    for (const ax of [x0 + 190, x1 - 265]) {
-      if (ax > -60 && ax < this.width + 60) {
-        g.fillStyle(0xd8d0b8, 0.6);
-        g.fillRect(ax, top + DECK * 0.32, 38, 7);
-      }
+    // Threshold bars across the full deck
+    for (const [wx, dir] of [[fromM + 6, 1], [toM - 6, -1]] as Array<[number, number]>) {
+      quad(dir > 0 ? wx : wx - 6, dir > 0 ? wx + 6 : wx, top + 2, bottom - 1, S.mark, S.loose ? 0.22 : 0.55);
     }
-
-    // Rubber smudges where traffic touches down
-    for (const [endX, dir] of [[x0 + 150, 1], [x1 - 210, -1]] as Array<[number, number]>) {
-      for (let i = 0; i < 5; i++) {
+    // Aiming-point blocks past each threshold, either side of the centreline
+    for (const ax of [fromM + 190, toM - 228]) {
+      quad(ax, ax + 38, top + DECK * 0.22, top + DECK * 0.36, 0xd8d0b8, 0.6);
+      quad(ax, ax + 38, top + DECK * 0.62, top + DECK * 0.78, 0xd8d0b8, 0.6);
+    }
+    // Rubber laid down where traffic touches
+    for (const [endX, dir] of [[fromM + 150, 1], [toM - 210, -1]] as Array<[number, number]>) {
+      for (let i = 0; i < 7; i++) {
         const rx = endX + dir * (i * 26 + propRand(i + 61) * 18);
-        if (rx < -40 || rx > this.width + 40) continue;
-        g.fillStyle(0x0c0a08, 0.4);
-        g.fillRect(rx, top + 6 + propRand(i + 31) * 10, 16 + propRand(i + 41) * 14, 2.4);
+        const y = top + 6 + propRand(i + 31) * (DECK - 14);
+        quad(rx, rx + 16 + propRand(i + 41) * 22, y, y + 2.6, 0x0c0a08, 0.42);
       }
+    }
+    // Centreline dashes
+    for (let wx = fromM + 120; wx < toM - 110; wx += 60) {
+      if (!span(wx, gy)) continue;
+      quad(wx, wx + 26, top + DECK * 0.47, top + DECK * 0.47 + 3, this.pal.dash, 0.62);
     }
 
     /*
-     * ── Edge lighting ─────────────────────────────────────────────────────
-     *
-     * The single cue that says "aerodrome" rather than "road", and the only
-     * part of a strip that is visible at all after dark. Paired down both
-     * shoulders, warm amber, and they come up as the light goes — at night
-     * they are the runway.
+     * Edge lighting, both shoulders, sized by distance: the far row is a
+     * string of small points, the near row big warm lamps. At night they are
+     * the runway, and the perspective of the two rows is what tells you how
+     * wide it is.
      */
     {
       const spacing = 62;
-      const glow = 0.18 + (1 - this.dl) * 0.82;      // barely on by day, blazing at night
-      const first = Math.floor(Math.max(fromM, scrollX - 60) / spacing);
-      const last = Math.floor(Math.min(toM, scrollX + this.width + 60) / spacing);
+      const glow = 0.18 + (1 - this.dl) * 0.82;
+      const first = Math.floor(Math.max(fromM, scrollX - 200) / spacing);
+      const last = Math.floor(Math.min(toM, scrollX + this.width + 200) / spacing);
       for (let i = first; i <= last; i++) {
         const wx = i * spacing;
         if (wx < fromM + 10 || wx > toM - 10) continue;
-        const dx = wx - scrollX;
-        for (const ly of [top - 2.5, top + DECK + 2.5]) {
-          // Halo first so the lamp sits inside it
+        for (const ly of [top - 2.5, bottom + 2.5]) {
+          const z = sAt(ly);
+          const lx = X(wx, ly);
+          if (lx < -20 || lx > this.width + 20) continue;
           g.fillStyle(0xffb34a, 0.10 + glow * 0.28);
-          g.fillCircle(dx, ly, 4.2);
+          g.fillCircle(lx, ly, 3.6 * z);
           g.fillStyle(0xffd9a0, 0.45 + glow * 0.55);
-          g.fillCircle(dx, ly, 1.7);
+          g.fillCircle(lx, ly, 1.4 * z);
         }
       }
     }
 
-    /*
-     * Distance-remaining boards down the near shoulder. A pilot reads the
-     * runway left by these, and they are what makes a 430 m shelf feel
-     * different from an 1800 m apron from the air.
-     */
+    // Distance-remaining boards down the near shoulder
     {
-      const every = 200 * WORLD_PX_PER_M / 9;        // roughly every 200 m of strip
+      const every = 200 * WORLD_PX_PER_M / 9;
+      const y = bottom + 7;
+      const z = sAt(y);
       for (let wx = fromM + every; wx < toM - every * 0.4; wx += every) {
-        const dx = wx - scrollX;
+        const dx = X(wx, y);
         if (dx < -30 || dx > this.width + 30) continue;
         g.fillStyle(0x12100c, 0.9);
-        g.fillRect(dx - 5, top + DECK + 5, 10, 8);
+        g.fillRect(dx - 4 * z, y - 2 * z, 8 * z, 6.5 * z);
         g.fillStyle(0xd8cfa8, 0.8);
-        g.fillRect(dx - 3.5, top + DECK + 6.5, 7, 1.6);
+        g.fillRect(dx - 2.8 * z, y - 0.8 * z, 5.6 * z, 1.3 * z);
+        g.lineStyle(1, 0x12100c, 0.9);
+        g.lineBetween(dx, y + 4.5 * z, dx, y + 7 * z);
       }
-    }
-
-    // Threshold bar: a solid painted band across the full deck at each end,
-    // which is where the usable surface actually begins.
-    for (const [tx, dir] of [[x0 + 6, 1], [x1 - 6, -1]] as Array<[number, number]>) {
-      if (tx < -40 || tx > this.width + 40) continue;
-      g.fillStyle(S.mark, S.loose ? 0.22 : 0.55);
-      g.fillRect(dir > 0 ? tx : tx - 6, top + 2, 6, DECK - 3);
-    }
-
-    // Centreline dashes
-    g.fillStyle(this.pal.dash, 0.65);
-    const dashW = 26, gap = 34;
-    for (let wx = fromM + 120; wx < toM - 110; wx += dashW + gap) {
-      const dx = wx - scrollX;
-      if (dx < -40 || dx > this.width + 40) continue;
-      g.fillRect(dx, top + DECK * 0.5, dashW, 3);
     }
 
     // Sequenced approach strobes leading in to the threshold ("the rabbit")

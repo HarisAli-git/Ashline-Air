@@ -55,7 +55,7 @@ export class MenuScene extends Phaser.Scene {
     this.menuPlaneState = {
       throttle: 0.65, enginePower: 0.65, loadFactor: 1, pitch: 1.5, pitchRate: 0, flightPathAngle: 0, speed: 30, groundSpeed: 30, altitude: 400, verticalSpeed: 0,
       heading: 0, fuel: 60, engineTemp: 0.35, integrity: 100,
-      gearDown: true, flapsDeployed: false, distanceTravelled: 0, elapsedSeconds: 0,
+      gearDown: true, flapsDeployed: false, flapStage: 0, flapAngle: 0, distanceTravelled: 0, elapsedSeconds: 0,
       modifiers: { fuelBurnMult: 1, dragMult: 1, liftMult: 1, stabilityMult: 1 },
     };
 

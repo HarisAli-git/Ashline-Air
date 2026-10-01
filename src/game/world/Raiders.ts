@@ -83,7 +83,10 @@ export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
   // Pintle-mounted heavy MG. Reaches a normal cruise height.
   technical: { ceilingM: 165, rangePx: 2500, rounds: 2, spread: 0.034, damage: 4.5, cadence: 1.10, flak: false, label: 'HEAVY MG' },
   // Wheeled twin autocannon with fused shells. This is the one you climb for.
-  aa:        { ceilingM: 420, rangePx: 3200, rounds: 2, spread: 0.026, damage: 9.0, cadence: 1.60, flak: true,  label: 'AA BATTERY' },
+  // 300 m, not 420: every aeroplane in the fleet can actually climb over it.
+  // At 420 the crop duster — whose real ceiling is nearer 320 — could never
+  // get out of reach, and a battery became a hit you simply had to take.
+  aa:        { ceilingM: 300, rangePx: 3000, rounds: 2, spread: 0.03, damage: 7.0, cadence: 1.75, flak: true,  label: 'AA BATTERY' },
   /*
    * A gun barge in the tidal channels. Between a technical and a battery: it
    * reaches higher than anything else that is not proper AA, and it is the
@@ -293,6 +296,13 @@ export class Raiders {
     only: ReadonlyArray<EmplacementKind> | null = null,
     /** Per-zone restriction, aligned with `zones` — a besieged town is rifles only. */
     zoneOnly: ReadonlyArray<ReadonlyArray<string> | null> = [],
+    /**
+     * How dangerous the country is for THIS pilot, 0–1. A new pilot meets
+     * rifles and the odd heavy MG; gun trucks thicken and AA batteries appear
+     * as the career goes on. Everyone used to get the full arsenal from the
+     * first contract, which made the opening hours a punishment.
+     */
+    threat = 1,
   ): void {
     this.list = [];
     this.tracers = [];
@@ -317,7 +327,7 @@ export class Raiders {
       // two batteries whose 4.4 km reach overlapped the entire stretch. That
       // is what made it feel like AA was everywhere.
       const limit = (only ?? zoneOnly[z] ?? null) as ReadonlyArray<EmplacementKind> | null;
-      const aaZone = !limit && rnd(seed * 53 + z * 17) < 0.45;
+      const aaZone = !limit && rnd(seed * 53 + z * 17) < 0.45 * Math.max(0, (threat - 0.25) / 0.75);
       const aaSlot = aaZone ? 1 + Math.floor(rnd(seed * 71 + z) * Math.max(1, n - 2)) : -1;
 
       for (let i = 0; i < n; i++) {
@@ -336,7 +346,7 @@ export class Raiders {
         } else if (i === 0 || i === n - 1) kind = 'camp';
         else if (limit) kind = limit[Math.floor(r * limit.length) % limit.length];
         else if (i === aaSlot) kind = 'aa';
-        else if (r < 0.45) kind = 'nest';
+        else if (r < 0.45 + (1 - threat) * 0.25) kind = 'nest';
         else if (r < 0.78) kind = 'technical';
         else kind = 'tower';
         // A barge that came out as camp furniture is just flotsam - drop it
@@ -515,7 +525,9 @@ export class Raiders {
       const exposure = 1 - target.altM / w.ceilingM;
       // …and a pilot who flies the same line every time gets ranged. Holding
       // one altitude tightens their group by nearly half; jinking undoes it.
-      const ranged = 1 - this.predictability * 0.45;
+      // (25%, not 45% — new pilots fly straight and level, and should not be
+      // punished for it as hard as a veteran who knows better.)
+      const ranged = 1 - this.predictability * 0.25;
       const scatter = w.spread * (1 + (1 - exposure) * 3.2) * ranged;
       shots++;
       this.fire(e, w, baseY, target, scatter);

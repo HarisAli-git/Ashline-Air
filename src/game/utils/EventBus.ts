@@ -68,7 +68,7 @@ export interface GameEvents {
   'flight:event-action': { action: FlightAction; value: number };
   'flight:fuel-critical': { fuelRemaining: number };
   'flight:gear-toggled': { down: boolean };
-  'flight:flaps-toggled': { deployed: boolean };
+  'flight:flaps-toggled': { deployed: boolean; stage?: number };
 
   // Weather
   'weather:changed': { state: WeatherState };
@@ -173,6 +173,16 @@ export interface GameEvents {
     overshot: boolean;
     /** Airborne, high enough and not already turning — the TURN control is live. */
     canTurn: boolean;
+    /**
+     * The flap lever's notches in degrees, the limit speed for where the
+     * flaps are now and for the next notch down, and whether they are out
+     * too fast right now.
+     */
+    flaps: { stops: number[]; limitKmh: number | null; nextLimitKmh: number | null; overspeed: boolean; blownBack?: boolean } | null;
+    /** 1g stall speed in the current configuration and air. */
+    stallKmh: number;
+    /** Climb left at this height as a fraction of sea level — 0 at the ceiling. */
+    climbReserve: number;
     /** Icing / sand / avionics caution from the weather, or null. */
     weatherCaution: string | null;
     /** 0–1 ice on the airframe, for the gauge. */

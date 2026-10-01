@@ -27,6 +27,9 @@ import { STRUCTURE_NAME, DROP_RUN_BEFORE_PX, DROP_BAND_RUN_PX } from '../world/T
 import { routeSeed, originStripPx, destStripPx } from '../world/RoutePreview';
 import { press } from '../utils/controls';
 import { destStripPx as destStripOf } from '../world/RoutePreview';
+
+/** The approach angle the landing guide draws and the call reads against. */
+const GLIDE_DEG = 4;
 import { PilotModel } from '../ai/PilotModel';
 import { TouchInput } from '../utils/touchInput';
 
@@ -227,6 +230,10 @@ export class FlightScene extends Phaser.Scene {
   private trafficAvoid: 1 | -1 | null = null;    // +1 climb, -1 descend
   private engineFailed   = false;
   private failureCheckAt = 0;
+  /** Seconds the engine has spent at its redline — what actually breaks one. */
+  private redlineSeconds = 0;
+  private ceilingWarnAt2 = -99;
+  private flapWarnAt = -99;
   private restartHoldFor = 0;     // seconds of cranking left
 
   // -- Pacing --------------------------------------------------------------
@@ -322,6 +329,9 @@ export class FlightScene extends Phaser.Scene {
     this.trafficAvoid        = null;
     this.engineFailed        = false;
     this.failureCheckAt      = 0;
+    this.redlineSeconds      = 0;
+    this.ceilingWarnAt2      = -99;
+    this.flapWarnAt          = -99;
     this.restartHoldFor      = 0;
   }
 
@@ -409,6 +419,8 @@ export class FlightScene extends Phaser.Scene {
      * decision that matters is when to bring them UP.
      */
     this.engineRunning = false;
+    this.state.flapStage = this.controller.takeoffFlap;
+    this.state.flapAngle = this.controller.flapStops[this.controller.takeoffFlap];
     this.state.flapsDeployed = true;
     this.state.gearDown = true;
 
@@ -478,7 +490,11 @@ export class FlightScene extends Phaser.Scene {
     if (this.training) {
       this.world.setTrainingRoute(this.routeKm, 'Millbrook');
     } else {
-      this.world.setRoute(this.routeKm, this.hashRoute(this.contractId), this.originRunwayM, this.destRunwayM);
+      // The country gets more dangerous as the career goes on: rifles and the
+      // odd heavy MG for the first contracts, the full arsenal by the tenth
+      const done = SaveService.get().player.completedContractIds?.length ?? 0;
+      const threat = clamp(0.15 + done * 0.09, 0.15, 1);
+      this.world.setRoute(this.routeKm, this.hashRoute(this.contractId), this.originRunwayM, this.destRunwayM, threat);
     }
     // Survivors along the route — something to do in the cruise. See SupplyDrops.
     // They live in the towns the route was just laid out with, so they go second.
@@ -639,8 +655,8 @@ export class FlightScene extends Phaser.Scene {
     // it can get.
     // G only appears for an aeroplane that actually has a retractable one.
     const keyLegend = this.aircraft.hasRetractableGear
-      ? 'W/S: Throttle   A/D: Pitch   F: Flaps   G: Gear   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort'
-      : 'W/S: Throttle   A/D: Pitch   F: Flaps   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort';
+      ? 'W/S: Throttle   A/D: Pitch   F/V: Flaps down/up   G: Gear   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort'
+      : 'W/S: Throttle   A/D: Pitch   F/V: Flaps down/up   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort';
     this.keyHintText = this.add.text(width / 2, height - 4, keyLegend,
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
@@ -660,6 +676,7 @@ export class FlightScene extends Phaser.Scene {
       E:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E),
       G:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
       F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
+      V:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.V),
       T:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.T),
       R:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.R),
       M:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.M),
@@ -865,13 +882,33 @@ export class FlightScene extends Phaser.Scene {
       const muted = SoundEngine.toggleMute();
       EventBus.emit('ui:show-notification', { message: muted ? 'Sound muted.' : 'Sound on.', type: 'info' });
     }
-    if ((Phaser.Input.Keyboard.JustDown(this.keys.F) || TouchInput.consume('flaps')) && this.flapsToggleCooldown === 0) {
-      this.state.flapsDeployed = !this.state.flapsDeployed;
-      this.flapsToggleCooldown = 500;
-      SoundEngine.flapMove();
-      EventBus.emit('flight:flaps-toggled', { deployed: this.state.flapsDeployed });
-      // No toast: the FLAP mark on the HUD and the sound say it, and a
-      // paragraph about lift every time you touched the lever was noise.
+    /*
+     * The flap lever has notches: F takes it down one, V brings it up one.
+     * The panels follow on their motor over a few seconds (the controller
+     * drives `flapAngle`), and the HUD shows both the lever and where the
+     * flaps actually are, so the setting is never a guess.
+     */
+    {
+      const down = Phaser.Input.Keyboard.JustDown(this.keys.F) || TouchInput.consume('flaps');
+      const up = Phaser.Input.Keyboard.JustDown(this.keys.V) || TouchInput.consume('flapsUp');
+      if ((down || up) && this.flapsToggleCooldown === 0) {
+        const was = this.state.flapStage;
+        const next = clamp(was + (down ? 1 : 0) - (up ? 1 : 0), 0, 3);
+        if (next !== was) {
+          this.state.flapStage = next;
+          this.flapsToggleCooldown = 220;
+          SoundEngine.flapMove();
+          EventBus.emit('flight:flaps-toggled', { deployed: next > 0, stage: next });
+          // Asking for more flap than the speed allows is worth one word
+          const limit = this.controller.flapLimitAt(next);
+          if (down && this.state.altitude > 1 && this.state.speed * Math.sqrt(this.controller.sigma) > limit * 1.04) {
+            EventBus.emit('ui:show-notification', {
+              message: `Flap ${next === 3 ? 'FULL' : next} selected — it will come out as you slow below ${Math.round(limit * 3.6)} km/h`,
+              type: 'info',
+            });
+          }
+        }
+      }
     }
     if (Phaser.Input.Keyboard.JustDown(this.keys.R) || TouchInput.consume('turn')) this.startTurn();
     if ((Phaser.Input.Keyboard.JustDown(this.keys.T) || TouchInput.consume('time'))) {
@@ -1032,12 +1069,21 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // Engine overheat warning
-    if (this.state.engineTemp <= 0.8) this.nagHeat.clear();
-    if (this.state.engineTemp > 0.85 && this.nagHeat.due(this.state.elapsedSeconds)) {
+    if (this.state.engineTemp <= 0.84) this.nagHeat.clear();
+    if (this.state.engineTemp > 0.9 && this.nagHeat.due(this.state.elapsedSeconds)) {
       SoundEngine.warn();
       EventBus.emit('ui:show-notification', {
-        message: 'ENGINE OVERHEATING — reduce throttle',
+        message: 'ENGINE HOT — ease the power, or lower the nose so the air cools it',
         type: 'warning',
+      });
+    }
+    // Flaps out above their limit speed: the panels are being torn off
+    if (this.controller.flapOverspeed && this.state.elapsedSeconds - this.flapWarnAt > 6) {
+      this.flapWarnAt = this.state.elapsedSeconds;
+      SoundEngine.warn();
+      EventBus.emit('ui:show-notification', {
+        message: `⚠ FLAP SPEED — slow below ${Math.round(this.controller.flapLimit * 3.6)} km/h or ${press('flapsUp')} to raise them`,
+        type: 'danger',
       });
     }
 
@@ -1212,6 +1258,7 @@ export class FlightScene extends Phaser.Scene {
     this.aircraft.setTurbulence(turbulence);
     this.aircraft.setElevator((input.pitchUp ? 1 : 0) - (input.pitchDown ? 1 : 0));
     this.aircraft.setIceLoad(this.iceLoad);
+    this.aircraft.setLighting(this.world.modelLight(this.weather.current.visibility));
     // The rig offsets the airframe INSIDE its zone in response to g-load,
     // pitch rate and flight path, so a manoeuvre is something you can see
     // rather than a number that changed. It never slides with airspeed.
@@ -1532,38 +1579,39 @@ export class FlightScene extends Phaser.Scene {
         });
         this.disengageWarp('service ceiling');
       }
-      if (alt > ceiling && this.engineRunning && !this.engineFailed) {
-        this.engineFailed = true;
-        this.engineRunning = false;
-        this.aircraft.stopEngine();
-        SoundEngine.engineSputter();
-        SoundEngine.radio('Ashline flight, you are above your ceiling and the engine has quit. Get the nose down.',
-          { kind: 'warning', station: 'ASHLINE CONTROL' });
-        EventBus.emit('ui:show-notification', {
-          message: `✖ FLAMED OUT ABOVE THE CEILING — descend, then ${press('engine')} to relight`,
-          type: 'danger',
-        });
-        this.disengageWarp('flamed out');
-      }
       /*
-       * A relight needs air. Without this you could hold E at the ceiling and
-       * the engine would catch in the same air that just starved it.
+       * There is no flame-out up here any more. A real engine does not stop
+       * at the ceiling; it simply runs out of air to make power with, so the
+       * climb fades to nothing and the controls go soft. The model does that
+       * on its own now — this only says so once, when the climb has gone.
        */
-      if (this.restartHoldFor > 0 && alt > ceiling * 0.98) {
-        this.restartHoldFor = Math.max(this.restartHoldFor, 0.4);
+      if (this.controller.climbReserve < 0.1 && this.state.verticalSpeed < 1
+          && this.state.elapsedSeconds - this.ceilingWarnAt2 > 25) {
+        this.ceilingWarnAt2 = this.state.elapsedSeconds;
+        SoundEngine.radio('Ashline flight, you are at your ceiling. She will not climb any higher in this air.',
+          { kind: 'control', station: 'ASHLINE CONTROL' });
       }
     }
 
-    // ── Engine reliability: tired engines quit, and you can restart them ──
+    /*
+     * ── Engine reliability ────────────────────────────────────────────────
+     *
+     * Engines quit far too often: a 5% roll every five seconds for a tired
+     * one, plus heat odds that climbed the moment a normal full-power climb
+     * warmed it up — several stoppages a flight. Now the random part is rare
+     * (a worn engine might do it once in a dozen flights), and heat only
+     * breaks an engine that has been held AT its redline: running hot costs
+     * power first (the controller), and the warning comes long before this.
+     */
+    if (this.engineRunning && !this.engineFailed && this.state.engineTemp > 0.97) this.redlineSeconds += sdt;
     if (!this.training && this.hasBeenAirborne && this.state.elapsedSeconds - this.failureCheckAt >= 5) {
       this.failureCheckAt = this.state.elapsedSeconds;
       if (this.engineRunning && !this.engineFailed) {
         const { def } = SaveService.getActiveAircraft();
-        // Heat, damage and a worn airframe all raise the odds
         const risk =
-          (1 - def.stats.engineReliability) * 0.05 +
-          Math.max(0, this.state.engineTemp - 0.8) * 0.5 +
-          Math.max(0, (40 - this.state.integrity) / 40) * 0.06;
+          (1 - def.stats.engineReliability) * 0.0025 +
+          Math.max(0, this.redlineSeconds - 12) * 0.004 +
+          Math.max(0, (35 - this.state.integrity) / 35) * 0.03;
         if (Math.random() < risk) {
           this.engineFailed = true;
           this.engineRunning = false;
@@ -1733,6 +1781,15 @@ export class FlightScene extends Phaser.Scene {
       dropZone: this.dropZone,
       overshot: this.overshotCalled && this.heading === 1,
       canTurn: this.hasBeenAirborne && !this.landed && this.state.altitude > 12 && this.turn === null,
+      flaps: {
+        stops: this.controller.flapStops,
+        limitKmh: Number.isFinite(this.controller.flapLimit) ? Math.round(this.controller.flapLimit * 3.6) : null,
+        nextLimitKmh: this.state.flapStage < 3 ? Math.round(this.controller.flapLimitAt(this.state.flapStage + 1) * 3.6) : null,
+        overspeed: this.controller.flapOverspeed,
+        blownBack: this.controller.flapBlownBack,
+      },
+      stallKmh: Math.round(this.controller.stallSpeedNow * 3.6),
+      climbReserve: this.controller.climbReserve,
     });
   }
 
@@ -2273,36 +2330,46 @@ export class FlightScene extends Phaser.Scene {
 
   // ── Approach indicator ─────────────────────────────────────────────────────
 
+  /**
+   * The approach call, read against the GLIDE PATH rather than the sink rate.
+   *
+   * It used to say GOOD APPROACH for any gentle descent — including one that
+   * would have put you down a kilometre short or floated you off the far end,
+   * which is how most failed deliveries actually ended. Now it knows where the
+   * touchdown point is: high, on the path, low, flare, or floating, each with
+   * the one thing to do about it. The world draws the same path (see
+   * ParallaxWorld.drawLandingGuide), so the call and the picture agree.
+   */
   private updateApproachIndicator(): void {
-    // Only on an actual approach. Any descent below 90 m used to light up
-    // "GOOD APPROACH" — including a routine level-off three kilometres out,
-    // which is guidance about a runway that is nowhere near you.
-    const remainingKm = Math.abs(this.routeKm - this.state.distanceTravelled);
-    if (!this.hasBeenAirborne || this.state.altitude > 90 || remainingKm > 1.2) {
-      this.approachText.setAlpha(0);
-      return;
-    }
+    const [da] = destStripPx(this.routeKm, this.destRunwayM);
+    const [, db] = destStripPx(this.routeKm, this.destRunwayM);
+    // Touch down a little past the threshold you are coming in over
+    const aimX = this.heading === 1 ? da + 80 * WORLD_PX_PER_M : db - 80 * WORLD_PX_PER_M;
+    const distM = this.heading * (aimX - this.planeX) / WORLD_PX_PER_M;
+    const alt = this.state.altitude;
+    const on = this.hasBeenAirborne && !this.landed && !this.rollout && distM > -500 && distM < 3200 && alt < 260;
+    this.world.landingGuide = on ? { aimX, angleDeg: GLIDE_DEG, dir: this.heading, fade: clamp((3200 - distM) / 600, 0.3, 1) } : null;
+    if (!on || distM > 2400) { this.approachText.setAlpha(0); return; }
 
     const vSpeed = this.state.verticalSpeed;
-    if (vSpeed >= -0.3) { this.approachText.setAlpha(0); return; }
-
+    const pathAlt = Math.max(0, distM) * Math.tan((GLIDE_DEG * Math.PI) / 180);
     let label: string;
     let color: string;
-
     if (!this.state.gearDown) {
-      label = '⚠  GEAR NOT DOWN  ⚠';
-      color = '#ff4444';
-    } else if (vSpeed < -6) {
-      label = '▼  SINKING FAST — PULL UP';
-      color = '#ff4444';
-    } else if (vSpeed < -3.5) {
-      label = '▼  APPROACH STEEP';
-      color = '#ffd080';
+      label = `⚠  GEAR NOT DOWN — ${press('gear').toUpperCase()}  ⚠`; color = '#ff4444';
+    } else if (distM < 0 && alt > 1) {
+      label = '↓  FLOATING — power off, let her settle'; color = '#ffd080';
+    } else if (alt < 6) {
+      label = vSpeed < -2.5 ? '▲  FLARE — ease the nose up' : '✓  HOLD IT OFF…'; color = vSpeed < -2.5 ? '#ffd080' : '#9fe8b0';
+    } else if (vSpeed < -7) {
+      label = '▼  SINKING FAST — power, nose up'; color = '#ff4444';
+    } else if (alt > pathAlt + 12 + distM * 0.01) {
+      label = '▲  HIGH — less power, steepen'; color = '#ffd080';
+    } else if (alt < pathAlt - 10 - distM * 0.006) {
+      label = '▼  LOW — more power'; color = alt < pathAlt * 0.5 ? '#ff6644' : '#ffd080';
     } else {
-      label = '✓  GOOD APPROACH';
-      color = '#00ff88';
+      label = '✓  ON THE GLIDE PATH'; color = '#00ff88';
     }
-
     this.approachText.setText(label).setStyle({ color }).setAlpha(1);
   }
 
@@ -2480,7 +2547,7 @@ export class FlightScene extends Phaser.Scene {
       landed: this.landed,
       timeWarp: this.timeScale,
       remainingKm: Math.abs(this.routeKm - this.state.distanceTravelled),
-      vrKmh: Math.round(this.controller.vStall * 1.3 * 3.6),
+      vrKmh: Math.round(this.controller.stallSpeedNow * 1.1 * 3.6),
       obstacle: this.coachObstacle,
       threat: this.coachThreat,
       drop: this.dropZone,
@@ -2628,6 +2695,7 @@ export class FlightScene extends Phaser.Scene {
       overspeed: false, obstacleAheadM: null, obstacleLabel: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true,
       dropReady: false, cratesLeft: 0, dropZone: null, overshot: false, canTurn: false,
+      flaps: null, stallKmh: 0, climbReserve: 1,
     });
     this.state.speed = 0;
     this.state.verticalSpeed = 0;

@@ -105,10 +105,9 @@ const BASICS: Lesson[] = [
   },
   {
     id: 'clean', title: 'Clean up',
-    text: c => c.retractableGear
-      ? 'Gear and flaps up. They got you off the ground; now they are only drag.'
-      : 'Flaps up. They got you off the ground; now they are only drag.',
-    keys: ['F'], touchKeys: ['FLAP'],
+    text: c => (c.retractableGear ? 'Gear up, then flaps up a notch at a time. ' : 'Flaps up, a notch at a time. ')
+      + 'They got you off the ground; now they are only drag. Watch the gauge swing them in.',
+    keys: ['V'], touchKeys: ['FLAP ▲'],
     done: (s, c, t) => (!s.flapsDeployed && (!c.retractableGear || !s.gearDown)) || t > 25,
   },
   {
@@ -200,11 +199,11 @@ const MOMENTS: Lesson[] = [
   {
     id: 'approach', title: 'Approach', priority: 60,
     text: c => c.touch
-      ? 'Home stretch. Pull the lever back to about a third, FLAP down, and bring her down gently toward the strip.'
-      : 'Home stretch. Throttle back to about a third with S, flaps down with F, and bring her down gently toward the strip.',
-    keys: ['S', 'F'], touchKeys: ['LEVER ▼', 'FLAP'],
+      ? 'Home stretch. Lever back to about a third and FLAP ▼ a notch at a time as you slow. Sit on the dotted green path down to the strip — the four lights by the runway show two white, two red when you are on it.'
+      : 'Home stretch. Throttle back to about a third with S and F for flap a notch at a time as you slow. Sit on the dotted green path down to the strip — the four lights by the runway show two white, two red when you are on it.',
+    keys: ['S', 'F'], touchKeys: ['LEVER ▼', 'FLAP ▼'],
     when: (_s, c) => c.remainingKm < 2.8 && !c.landed,
-    done: (s, c) => (s.flapsDeployed && s.altitude < 45 && s.throttle < 0.6) || c.landed,
+    done: (s, c) => ((s.flapStage ?? 0) >= 2 && s.altitude < 45 && s.throttle < 0.6) || c.landed,
   },
   {
     id: 'land', title: 'Touch down', priority: 55,

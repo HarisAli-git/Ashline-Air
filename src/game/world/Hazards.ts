@@ -8,6 +8,26 @@ import {
   type BuildingKind, type Span, type Town,
 } from './Towns';
 
+/** Clear air after the departure strip, world px (3 km). */
+const CLIMB_OUT_PX = 3000 * 9;
+/** Clear air before the destination's approach starts, world px (2.5 km). */
+const APPROACH_PX = 2500 * 9;
+
+/*
+ * The surfaces nothing solid may stand above, rising from each runway.
+ *
+ * Lone masts went anywhere in the route span, which starts 350 m past the
+ * departure strip and stops 900 m short of the destination (RoutePreview's
+ * routeSpanPx) — so a 78 m mast could stand a kilometre out on final, right
+ * where the 4-degree glide-path guide puts you at about 70 m. Following the
+ * guide flew you into it. Now the climb-out has a 4-degree surface and the
+ * approach a 2.6-degree one, both well under what you actually fly.
+ */
+const SPAN_AFTER_ORIGIN_M = 350;
+const SPAN_BEFORE_DEST_M = 900;
+const CLIMB_SURFACE = Math.tan((4 * Math.PI) / 180);
+const APPROACH_SURFACE = Math.tan((2.6 * Math.PI) / 180);
+
 /**
  * Everything along the route that can actually hurt you.
  *
@@ -178,7 +198,11 @@ export class Hazards {
       // down to a drop has to be clear of more than just guns
       const corridors = built.towns.map(t => [t.x0 - DROP_RUN_BEFORE_PX, t.x1 + DROP_RUN_AFTER_PX] as [number, number]);
       const clear = ![...built.reserved, ...corridors].some(([ra, rb]) => x + half + 200 > ra && x - half - 200 < rb);
-      if (clear) this.list.push({ x, kind, heightM, halfWidth: half, seed: i, warn: true });
+      // …and nothing poking up through the climb-out or the final approach
+      const pastRunwayM = (x - startPx) / 9 + SPAN_AFTER_ORIGIN_M;
+      const shortOfRunwayM = (endPx - x) / 9 + SPAN_BEFORE_DEST_M;
+      const ceilingM = Math.min((pastRunwayM + 150) * CLIMB_SURFACE, shortOfRunwayM * APPROACH_SURFACE - 6);
+      if (clear && heightM <= ceilingM) this.list.push({ x, kind, heightM, halfWidth: half, seed: i, warn: true });
       x += minGap + hash(i++) * 3000;
     }
     this.list.sort((p, q) => p.x - q.x);
@@ -245,6 +269,18 @@ export class Hazards {
     for (const c of this.camps) {
       keepOut.push([c - DROP_RUN_BEFORE_PX - GUN_REACH_PX, c + DROP_RUN_AFTER_PX + GUN_REACH_PX]);
     }
+    /*
+     * The climb-out and the final approach are nobody's ground.
+     *
+     * Furniture could start 350 m past the end of the strip, and a raider
+     * zone with it — so a new pilot, still at forty metres with the flaps out
+     * and no speed, was inside the reach of every gun on the route. That is
+     * not a decision, it is a tax on taking off. Three kilometres to climb in
+     * and two and a half to set up the approach are kept clear of anything
+     * that shoots, guns' reach included.
+     */
+    keepOut.push([startPx - GUN_REACH_PX, startPx + CLIMB_OUT_PX + GUN_REACH_PX]);
+    keepOut.push([endPx - APPROACH_PX - GUN_REACH_PX, endPx + GUN_REACH_PX]);
     const clashes = (a: number, b: number): boolean => keepOut.some(([p, q]) => a < q && b > p);
 
     const slice = span / zoneCount;

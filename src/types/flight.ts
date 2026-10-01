@@ -33,7 +33,16 @@ export interface FlightState {
   engineTemp: number;     // 0–1
   integrity: number;      // 0–100
   gearDown: boolean;
+  /** True whenever the flaps are not fully up. Derived from `flapAngle`. */
   flapsDeployed: boolean;
+  /**
+   * The notch the flap lever is in: 0 = UP, 1, 2, 3 = FULL. The flaps
+   * themselves are driven by a motor and take seconds to get there — see
+   * `flapAngle`, which is what the wing actually has.
+   */
+  flapStage: number;
+  /** Where the flaps actually are, degrees of deflection. */
+  flapAngle: number;
   distanceTravelled: number; // km
   elapsedSeconds: number;
   modifiers: FlightModifiers;

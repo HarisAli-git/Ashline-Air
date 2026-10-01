@@ -9,13 +9,14 @@ import { isTouchDevice } from './device';
  * a keyboard: the starter is a single press.) Every line that names a control
  * goes through here, so a finger gets told about the button it can see.
  */
-export type ControlAction = 'engine' | 'drop' | 'time' | 'flaps' | 'gear' | 'turn' | 'throttleUp' | 'throttleDown' | 'noseUp' | 'noseDown';
+export type ControlAction = 'engine' | 'drop' | 'time' | 'flaps' | 'flapsUp' | 'gear' | 'turn' | 'throttleUp' | 'throttleDown' | 'noseUp' | 'noseDown';
 
 const NAMES: Record<ControlAction, [key: string, touch: string]> = {
   engine: ['E', 'START'],
   drop: ['SPACE', 'DROP'],
   time: ['T', 'TIME'],
-  flaps: ['F', 'FLAP'],
+  flaps: ['F', 'FLAP ▼'],
+  flapsUp: ['V', 'FLAP ▲'],
   gear: ['G', 'GEAR'],
   turn: ['R', 'TURN'],
   throttleUp: ['W', 'the lever up'],

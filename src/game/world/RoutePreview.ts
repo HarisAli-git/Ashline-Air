@@ -35,7 +35,25 @@ export function routeSeed(contractId: string): number {
  * that takes a minute to taxi down.
  */
 export function stripM(runwayM: number): number {
-  return Math.round(130 + runwayM * 0.22);
+  return Math.round(150 + runwayM * 0.28);
+}
+
+/**
+ * The destination strip is drawn longer than the one you leave from. A
+ * take-off starts from a standstill at the threshold and you choose when to
+ * go; a landing has to absorb the float of the flare and the roll-out, from
+ * wherever the wheels happened to touch. With the same length both ways the
+ * landing was the one that never fitted.
+ */
+export function destStripM(runwayM: number): number {
+  /*
+   * Plus room for the day you meet a tailwind or a thermal over the fence.
+   * A well-flown approach stops ninety metres past the aim point in the
+   * duster and 170 in the bush plane, which fitted — but a gust or a warm
+   * patch over the field adds a float of a hundred metres or more, and on
+   * a 366 m mountain strip that put a perfectly good landing off the end.
+   */
+  return Math.round(260 + runwayM * 0.34);
 }
 
 /** Destination centre, world px — the end of the route. */
@@ -51,7 +69,7 @@ export function originStripPx(runwayM: number): [number, number] {
 
 /** The destination strip, world px, centred on the end of the route. */
 export function destStripPx(routeKm: number, runwayM: number): [number, number] {
-  const c = destCentrePx(routeKm), half = (stripM(runwayM) * M) / 2;
+  const c = destCentrePx(routeKm), half = (destStripM(runwayM) * M) / 2;
   return [c - half, c + half];
 }
 

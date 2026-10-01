@@ -367,6 +367,120 @@ const RAW_SPECS: Record<string, RawSpec> = {
     beacon: { x: -98, y: -78 },
     exhaust: { x: 34, y: -4 },
   },
+  /*
+   * ── Other people's aeroplanes ─────────────────────────────────────────
+   *
+   * Traffic was drawn as flat outlined polygons that looked like modern
+   * airliners sketched in a margin. These are the aeroplanes that would
+   * actually still be flying at the end of the world: things old enough to
+   * be fixed with hand tools. Never for sale — they only fly past you.
+   */
+
+  // A DC-3: the freighter that outlived everything. Bare metal gone dull,
+  // a red cheat line, two radials and a tail wheel.
+  traffic_hauler: {
+    scale: 1,
+    length: 200,
+    height: 26,
+    palette: {
+      hull: 0x9a9a90, hullShade: 0x66665e, hullLight: 0xc2c2b8,
+      accent: 0x8a2a1c, rust: 0x6a4a30,
+      canopy: 0x1e2a33, canopyGlint: 0xbfe0ec,
+      prop: 0x201d1a, metal: 0x9a958a,
+    },
+    wing:  { layout: 'low', rootX: 16, y: 9, chord: 46, span: 70, sweep: 14, drop: 6 },
+    fuselage: { taperStart: 0.22, tailDepth: 0.2, upsweep: 0.12, noseFull: 0.56, bellyFlat: 0 },
+    tail:  { finHeight: 34, finSweep: 24, stabLen: 30 },
+    canopy: { style: 'windows', x: -40, w: 40 },
+    engineStyle: 'radial',
+    engines: [
+      { frac: 0.3, dy: 2, cowlLen: 30, cowlH: 22 },
+      { frac: 0.3, dy: 1, cowlLen: 30, cowlH: 22, far: true },
+    ],
+    prop:  { r: 20, bladePairs: 1 },
+    gear:  { fixed: false, mainX: 22, noseX: null, tailWheelX: -86, strutLen: 14, wheelR: 9, hingeY: 10 },
+    flap:  { maxDeflectDeg: 30 },
+    beacon: { x: -96, y: -48 },
+    exhaust: { x: 20, y: 8 },
+  },
+
+  // A Norseman: a big high-wing single on fixed legs, the bush workhorse.
+  traffic_courier: {
+    scale: 1,
+    length: 150,
+    height: 28,
+    palette: {
+      hull: 0xa8862e, hullShade: 0x6e5820, hullLight: 0xc8a852,
+      accent: 0x2a4a7a, rust: 0x6a4a28,
+      canopy: 0x27333b, canopyGlint: 0x9fc4d0,
+      prop: 0x2a2622, metal: 0x8f8a80,
+    },
+    wing:  { layout: 'high', rootX: 8, y: -17, chord: 44, span: 62, sweep: 8, drop: -6 },
+    fuselage: { taperStart: 0.22, tailDepth: 0.26, upsweep: 0.18, noseFull: 0.62, bellyFlat: 0.25 },
+    tail:  { finHeight: 26, finSweep: 12, stabLen: 30 },
+    canopy: { style: 'windows', x: 20, w: 32 },
+    engineStyle: 'radial',
+    engines: [{ frac: 0, nose: true, dy: 1, cowlLen: 22, cowlH: 25 }],
+    prop:  { r: 21, bladePairs: 1 },
+    gear:  { fixed: true, style: 'bungee', rake: 4, mainX: 22, noseX: null, tailWheelX: -64, strutLen: 18, wheelR: 8.5, hingeY: 11 },
+    flap:  { maxDeflectDeg: 30 },
+    beacon: { x: -66, y: -40 },
+    exhaust: { x: 46, y: 11 },
+  },
+
+  // A Cub: the smallest thing in the sky, fabric over tube, yellow once.
+  traffic_ultralight: {
+    scale: 1,
+    length: 104,
+    height: 20,
+    palette: {
+      hull: 0xc09a34, hullShade: 0x7a6224, hullLight: 0xdab854,
+      accent: 0x1a1816, rust: 0x6a4a28,
+      canopy: 0x27333b, canopyGlint: 0x9fc4d0,
+      prop: 0x2a2622, metal: 0x8f8a80,
+    },
+    wing:  { layout: 'high', rootX: 6, y: -12, chord: 34, span: 50, sweep: 4, drop: -4 },
+    fuselage: { taperStart: 0.2, tailDepth: 0.24, upsweep: 0.16, noseFull: 0.6, bellyFlat: 0 },
+    tail:  { finHeight: 18, finSweep: 10, stabLen: 24 },
+    canopy: { style: 'windows', x: 14, w: 24 },
+    engineStyle: 'radial',
+    engines: [{ frac: 0, nose: true, cowlLen: 16, cowlH: 17 }],
+    prop:  { r: 15, bladePairs: 1 },
+    gear:  { fixed: true, style: 'bungee', rake: 3, mainX: 16, noseX: null, tailWheelX: -46, strutLen: 13, wheelR: 6.5, hingeY: 8 },
+    flap:  { maxDeflectDeg: 20 },
+    beacon: { x: -48, y: -30 },
+    exhaust: { x: 32, y: 8 },
+  },
+
+  // A Ju 52: three radials, spatted wheels, a gunner in the door. Whoever
+  // flies this one is not hauling freight.
+  traffic_gunship: {
+    scale: 1,
+    length: 190,
+    height: 32,
+    palette: {
+      hull: 0x4c5242, hullShade: 0x30362a, hullLight: 0x666e56,
+      accent: 0x7a5420, rust: 0x5c3a22,
+      canopy: 0x252f28, canopyGlint: 0x9fc4b0,
+      prop: 0x23201d, metal: 0x716d64,
+    },
+    wing:  { layout: 'low', rootX: 14, y: 10, chord: 54, span: 72, sweep: 10, drop: 6 },
+    fuselage: { taperStart: 0.24, tailDepth: 0.22, upsweep: 0.14, noseFull: 0.7, bellyFlat: 0.2 },
+    tail:  { finHeight: 34, finSweep: 20, stabLen: 34 },
+    canopy: { style: 'windows', x: -30, w: 44 },
+    engineStyle: 'radial',
+    engines: [
+      { frac: 0, nose: true, cowlLen: 22, cowlH: 26 },
+      { frac: 0.3, dy: 2, cowlLen: 26, cowlH: 20 },
+      { frac: 0.3, dy: 1, cowlLen: 26, cowlH: 20, far: true },
+    ],
+    prop:  { r: 19, bladePairs: 1 },
+    gear:  { fixed: true, style: 'spatted', rake: 2, mainX: 20, noseX: null, tailWheelX: -84, strutLen: 16, wheelR: 9.5, hingeY: 12 },
+    flap:  { maxDeflectDeg: 30 },
+    beacon: { x: -90, y: -56 },
+    exhaust: { x: 40, y: 8 },
+  },
+
 };
 
 /**

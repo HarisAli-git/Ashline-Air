@@ -119,7 +119,7 @@ export function TouchControls(): React.ReactElement | null {
             {retractable && (
               <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
             )}
-            <PulseButton label={flapsDeployed ? 'FLAP ▼' : 'FLAP ▲'} scale={s} control="flaps" wide />
+            <FlapRocker scale={s} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)} />
           </>
         )}
 
@@ -145,7 +145,7 @@ export function TouchControls(): React.ReactElement | null {
             {retractable && (
               <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
             )}
-            <PulseButton label={flapsDeployed ? 'FLAP ▼' : 'FLAP ▲'} scale={s} control="flaps" wide />
+            <FlapRocker scale={s} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)} />
             <PulseButton label="ENGINE" scale={s} control="engine" wide />
             <PulseButton label="TIME ⏩" scale={s} control="time" wide />
             <PulseButton label="MUTE" scale={s} control="mute" wide />
@@ -303,6 +303,41 @@ function HoldButton({
         {hint}
       </span>
     </button>
+  );
+}
+
+/**
+ * The flap lever as a rocker: raise a notch on the left, lower a notch on the
+ * right, and the notch you are in between them. One toggle could only ever
+ * say "flaps" — never which of the four settings you had.
+ */
+function FlapRocker({ scale, stage }: { scale: number; stage: number }): React.ReactElement {
+  const n = (v: number): number => Math.round(v * scale);
+  const label = ['UP', '1', '2', 'FULL'][Math.max(0, Math.min(3, stage))];
+  const half = (control: PulseControl, text: string, enabled: boolean): React.ReactElement => (
+    <button
+      onPointerDown={e => { e.preventDefault(); if (enabled) TouchInput.pulse(control); }}
+      onContextMenu={e => e.preventDefault()}
+      style={{
+        width: n(34), height: n(38), background: 'transparent', border: 'none',
+        color: enabled ? '#e8d5b7' : '#5a5040', fontSize: n(13), fontFamily: 'monospace', touchAction: 'none',
+      }}
+    >{text}</button>
+  );
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', background: HOLD_BG,
+      border: `1px solid ${EDGE}`, borderRadius: n(8), overflow: 'hidden',
+    }}>
+      {half('flapsUp', '▲', stage > 0)}
+      <span style={{
+        minWidth: n(46), textAlign: 'center', fontFamily: 'monospace', fontSize: n(11),
+        color: stage > 0 ? '#ffd080' : '#e8d5b7', lineHeight: 1.1,
+      }}>
+        <span style={{ display: 'block', fontSize: n(8), color: '#8a7a5a' }}>FLAP</span>{label}
+      </span>
+      {half('flaps', '▼', stage < 3)}
+    </div>
   );
 }
 
