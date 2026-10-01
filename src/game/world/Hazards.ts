@@ -1,10 +1,10 @@
 import Phaser from 'phaser';
-import { drawObstacle, type ObstacleKind, type ObstacleStyle } from './Obstacles';
+import { drawObstacle, drawObstacleDepth, type ObstacleKind, type ObstacleStyle } from './Obstacles';
 import { layoutCountryside, drawProp, type Prop } from './Countryside';
 import type { BiomeId } from './Biomes';
 import {
   layoutSettlements, layoutTrainingSettlements, isBuilding, spanBand, townStyleFor,
-  DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, drawBuilding, drawTownGround, drawPole, drawSpan,
+  DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, drawBuilding, drawBuildingDepth, drawTownGround, drawPole, drawSpan,
   type BuildingKind, type Span, type Town,
 } from './Towns';
 
@@ -511,15 +511,29 @@ export class Hazards {
       }
     }
 
+    const centreX = width / 2;
     // The leftovers in the open country, first — everything else stands in front
     for (const p of this.props) {
       const sx = p.x - scrollX;
-      if (sx > -120 && sx < width + 120) drawProp(g, p, sx, baseY, pxPerM, t, style);
+      if (sx > -120 && sx < width + 120) drawProp(g, p, sx, baseY, pxPerM, t, style, centreX);
     }
     // Towns: the road and barricades, then the buildings standing on them
     for (const town of this.townList) {
       if (town.x1 - scrollX < -200 || town.x0 - scrollX > width + 200) continue;
       drawTownGround(g, town, scrollX, baseY, width, style);
+    }
+    /*
+     * Depth before any fronts: every roof and side wall in view, from the
+     * edges of the screen inward, so a building nearer the middle covers the
+     * wall of the one beside it — and every front then covers the depth of
+     * whatever stands behind it.
+     */
+    const inView = this.list.filter(h => h.x - scrollX > -140 && h.x - scrollX < width + 140);
+    inView.sort((a, b) => Math.abs(b.x - scrollX - centreX) - Math.abs(a.x - scrollX - centreX));
+    for (const h of inView) {
+      const sx = h.x - scrollX;
+      if (isBuilding(h.kind)) drawBuildingDepth(g, h, sx, baseY, pxPerM, style, centreX);
+      else drawObstacleDepth(g, h.kind, sx, baseY, baseY - h.heightM * pxPerM, h.halfWidth, h.seed, style, centreX);
     }
     for (const h of this.list) {
       const sx = h.x - scrollX;

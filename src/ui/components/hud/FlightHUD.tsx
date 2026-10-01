@@ -254,6 +254,7 @@ function DropCard({ s, zone, compact, touch }: {
     release: { text: touch ? 'PIN ON THEM · DROP NOW' : 'PIN ON THEM · SPACE', tone: '#b8ffc8', pulse: true },
     low: { text: `▲ TOO LOW · climb to ${zone.lo} m`, tone: '#ff8844', pulse: true },
     late: { text: 'PAST THEM · release earlier next time', tone: '#8a7a5a' },
+    behind: { text: `BEHIND YOU · ${press('turn').toUpperCase()} to go back`, tone: '#ffd080', pulse: true },
   };
   const c = cue[zone.cue];
   return (
@@ -263,7 +264,10 @@ function DropCard({ s, zone, compact, touch }: {
         {zone.besieged && <span style={s.dropBadge}>UNDER FIRE</span>}
       </div>
       <div style={s.dropRow}>
-        <span style={s.dropKm}>{zone.km < 1 ? `${Math.round(zone.km * 1000)} m` : `${zone.km.toFixed(1)} km`}</span>
+        <span style={s.dropKm}>
+          {zone.km < 1 ? `${Math.round(zone.km * 1000)} m` : `${zone.km.toFixed(1)} km`}
+          {zone.cue === 'behind' ? ' ↺' : ''}
+        </span>
         <span style={s.dropPips} aria-label={`${zone.got} of ${zone.need} crates`}>
           {Array.from({ length: zone.need }, (_, i) => (
             <span key={i} style={{

@@ -194,6 +194,8 @@ export class FlightScene extends Phaser.Scene {
   private dropZone: DropZoneStatus | null = null;
   /** Sites we have already told to start down, so it is said once. */
   private readonly descentCalled = new Set<DropSite>();
+  /** Sites we have told you that you flew past, so it is said once per pass. */
+  private readonly missedCalled = new Set<DropSite>();
   /** Slow-motion over the release, 1 = normal time. See updateDrops. */
   private dropSlow = 1;
   /** Last whole second of the run-in countdown that ticked. */
@@ -500,6 +502,7 @@ export class FlightScene extends Phaser.Scene {
     this.dropGuideFade = 0;
     this.dropZone = null;
     this.descentCalled.clear();
+    this.missedCalled.clear();
     this.dropSlow = 1;
     this.dropTickAt = 99;
     this.dropWindowToned = false;
@@ -1291,6 +1294,21 @@ export class FlightScene extends Phaser.Scene {
     return (worldX > oa && worldX < ob) || (worldX > da && worldX < db);
   }
 
+  /**
+   * The nearest site behind the aircraft that still wants crates and is
+   * close enough to be worth going back for.
+   */
+  private siteBehind(worldX: number, dir: 1 | -1): { site: DropSite } | null {
+    let best: DropSite | null = null;
+    let bestBack = Infinity;
+    for (const s of this.world.drops.sites) {
+      if (s.state === 'served' || s.state === 'waiting' || s.got >= s.need) continue;
+      const back = -dir * (s.x - worldX);
+      if (back > 1400 && back < 5000 * WORLD_PX_PER_M && back < bestBack) { best = s; bestBack = back; }
+    }
+    return best ? { site: best } : null;
+  }
+
   /** Stable numeric seed from a contract id — shared with the board's preview. */
   private hashRoute(id: string): number {
     return routeSeed(id);
@@ -1970,6 +1988,37 @@ export class FlightScene extends Phaser.Scene {
       this.dropZone = null;
       this.world.dropGuide = this.dropGuideFade > 0 && this.world.dropGuide
         ? { ...this.world.dropGuide, fade: this.dropGuideFade } : null;
+
+      /*
+       * Flew past them. They still need crates and there are crates aboard,
+       * so this is not over — it is a second pass. Say so, once, from the
+       * people on the ground and on the card, and point at the control that
+       * does it. Turn round and they are ahead again and the card takes over.
+       */
+      const behind = airborne && drops.cratesLeft > 0 ? this.siteBehind(worldX, dir) : null;
+      if (behind) {
+        const back = -dir * (behind.site.x - worldX);
+        if (!this.missedCalled.has(behind.site)) {
+          this.missedCalled.add(behind.site);
+          const want = behind.site.need - behind.site.got;
+          SoundEngine.radio(`${behind.site.place} here — you went straight over us! Come round again.`,
+            { kind: 'traffic', station: behind.site.place.toUpperCase() });
+          EventBus.emit('ui:show-notification', {
+            message: `↺ Missed ${titleOf(behind.site)} — ${press('turn')} to go back · they still need ${want}`,
+            type: 'warning',
+          });
+        }
+        this.dropZone = {
+          place: behind.site.place, kind: behind.site.kind, km: back / (WORLD_PX_PER_M * 1000),
+          need: behind.site.need, got: behind.site.got, lo: behind.site.bandLo, hi: behind.site.bandHi,
+          besieged: behind.site.besieged, cue: 'behind', descendInKm: 0, descentRate: 0,
+          aboard: drops.cratesLeft, gapM: null, windowM: 30, releaseIn: null,
+        };
+      }
+    }
+    // A fresh pass gets its own call if it is missed again
+    for (const s of this.missedCalled) {
+      if (dir * (s.x - worldX) > 0) this.missedCalled.delete(s);
     }
 
     // Release
@@ -2513,6 +2562,12 @@ export class FlightScene extends Phaser.Scene {
   private finishFlight(result: LandingResult): void {
     if (this.landed) return;
     this.landed = true;
+    // A flight can end halfway round a turn. Finish the turn where it stands,
+    // so the wreck or the rollout is the side-on aeroplane and not the model.
+    if (this.turn) {
+      this.turn = null;
+      this.aircraft.setFacing(this.heading);
+    }
 
     if (this.training) {
       this.finishTraining(result);

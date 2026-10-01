@@ -6,7 +6,7 @@ import {
 import { ensureAircraftTextures, SS, type AircraftTexKeys } from './render/AircraftPainter';
 import { AircraftParticles } from './render/AircraftParticles';
 import { drawMainLeg, drawNoseLeg, drawTailSpring, drawSpat, type GearStyle } from './render/GearArt';
-import { drawTailView } from './render/TailView';
+import { buildAircraftMesh, renderAircraftMesh, type AircraftMesh } from './render/AircraftMesh';
 
 /**
  * Fully procedural aircraft renderer.
@@ -100,10 +100,9 @@ export class AircraftSprite {
   /** 0→1 through a 180, or null when not turning. */
   private turnP: number | null = null;
   private turnFrom: 1 | -1 = 1;
-  /** The aeroplane from behind, for the middle of the turn. See TailView. */
-  private readonly tailView: Phaser.GameObjects.Container;
-  private readonly tailGfx: Phaser.GameObjects.Graphics;
-  private tailGearDrawn = true;
+  /** The aeroplane as a solid, for the turn itself. See AircraftMesh. */
+  private readonly mesh: AircraftMesh;
+  private readonly meshGfx: Phaser.GameObjects.Graphics;
 
   constructor(
     scene: Phaser.Scene,
@@ -133,6 +132,11 @@ export class AircraftSprite {
     // Shadow (scene-level, stays at ground)
     this.shadowImg = scene.add.image(x, groundY + 4, 'px_shadow')
       .setScale(((spec.length * spec.scale) / 96) * 1.15, 1);
+
+    // The 3D model sits just under the side view, which dissolves into it as
+    // a turn begins and back out of it as the turn ends
+    this.mesh = buildAircraftMesh(spec, this.contactY);
+    this.meshGfx = scene.add.graphics().setVisible(false);
 
     this.container = scene.add.container(x, groundY);
     this.container.setScale(spec.scale);
@@ -192,11 +196,6 @@ export class AircraftSprite {
       img(this.tex.nacelle, e.x, e.y);
       this.props.push(this.buildProp(e.x + e.cowlLen / 2 + 6, e.y, 1));
     }
-
-    // The tail-on view, hidden until a turn needs it
-    this.tailGfx = scene.add.graphics();
-    drawTailView(this.tailGfx, spec, true, this.contactY);
-    this.tailView = scene.add.container(0, 0, [this.tailGfx]).setScale(spec.scale).setVisible(false);
 
     // Beacon strobe on the fin tip
     this.beaconGlow = img('px_soft', spec.beacon.x, spec.beacon.y)
@@ -512,7 +511,7 @@ export class AircraftSprite {
   destroy(): void {
     this.particles?.destroy();
     this.shadowImg.destroy();
-    this.tailView.destroy();
+    this.meshGfx.destroy();
     this.container.destroy();
   }
 
@@ -520,6 +519,7 @@ export class AircraftSprite {
   setFacing(f: 1 | -1): void {
     this.facing = f;
     this.turnP = null;
+    this.applyTurn();
   }
 
   /**
@@ -537,24 +537,24 @@ export class AircraftSprite {
   }
 
   /**
-   * Apply the turn to the picture: the side view narrows to nothing as the
-   * nose swings away, the tail view comes up in its place — banked into the
-   * turn and a little smaller, because it is going away from you — and then
-   * the mirrored side view widens back out. Returns the signed horizontal
-   * scale of the side view, which the particles use to trail the right way.
+   * Apply the turn to the picture. The detailed side view dissolves into the
+   * 3D model over the first few degrees; the model flies the turn — nose
+   * swinging away from you, banked into it, the far wing dropping — and the
+   * mirrored side view resolves back out of it over the last few. Returns the
+   * signed horizontal scale of the side view, which the particles use to
+   * trail the right way.
    */
   private applyTurn(): number {
     const s = this.spec.scale;
-    let xs: number;
-    let bank = 0, away = 0;
     if (this.turnP === null) {
-      xs = this.facing;
-    } else {
-      const psi = Math.PI * this.turnP;
-      xs = this.turnFrom * Math.cos(psi);
-      away = Math.sin(psi);
-      bank = -this.turnFrom * 0.62 * away;
+      this.container.scaleX = s * this.facing;
+      this.container.scaleY = s;
+      this.container.alpha = 1;
+      this.meshGfx.setVisible(false);
+      return this.facing;
     }
+    const psi = Math.PI * this.turnP;
+    const xs = this.turnFrom * Math.cos(psi);
     const k = Math.abs(xs);
     const smooth = (a: number, b: number, v: number): number => {
       const u = Phaser.Math.Clamp((v - a) / (b - a), 0, 1);
@@ -562,20 +562,21 @@ export class AircraftSprite {
     };
     this.container.scaleX = s * (xs >= 0 ? 1 : -1) * Math.max(0.02, k);
     this.container.scaleY = s;
-    this.container.alpha = this.turnP === null ? 1 : smooth(0.14, 0.5, k);
+    // Fully handed over by ~16° off the side view
+    const spriteA = smooth(0.96, 0.993, k);
+    this.container.alpha = spriteA;
 
-    const tailA = this.turnP === null ? 0 : 1 - smooth(0.22, 0.62, k);
-    this.tailView.setVisible(tailA > 0.01);
-    if (tailA > 0.01) {
-      const gearNow = this.gearProgress > 0.5;
-      if (gearNow !== this.tailGearDrawn) {
-        this.tailGearDrawn = gearNow;
-        drawTailView(this.tailGfx, this.spec, gearNow, this.contactY);
-      }
-      this.tailView.setAlpha(tailA);
-      this.tailView.setRotation(bank);
-      this.tailView.setScale(s * (1 - 0.14 * away));
-      this.tailView.setPosition(this.container.x, this.container.y + this.body.y * s);
+    const meshOn = spriteA < 0.999;
+    this.meshGfx.setVisible(meshOn);
+    if (meshOn) {
+      renderAircraftMesh(this.meshGfx, this.mesh, {
+        yaw: this.turnFrom === 1 ? psi : Math.PI - psi,
+        roll: this.turnFrom * 0.55 * Math.sin(psi),
+        pitch: -this.body.rotation,
+        gearDown: this.gearProgress > 0.5,
+      });
+      this.meshGfx.setScale(s);
+      this.meshGfx.setPosition(this.container.x, this.container.y + this.body.y * s);
     }
     return xs;
   }

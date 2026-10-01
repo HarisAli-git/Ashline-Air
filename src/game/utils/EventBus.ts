@@ -23,8 +23,9 @@ export interface DropZoneStatus {
    * release  in the band and the pin is on them
    * low      below the band — the roofs and wires are up here with you
    * late     the aim point is already past them
+   * behind   flown past with crates still wanted — turn round for another pass
    */
-  cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late';
+  cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late' | 'behind';
   /** How far until you should start down, km — the edge of the gun-free corridor. */
   descendInKm: number;
   /** While descending: the sink rate that reaches the band in time, m/s. */

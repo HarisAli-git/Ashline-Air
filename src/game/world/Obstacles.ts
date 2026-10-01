@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { depthOffset, extrude } from './Depth';
 
 /**
  * The things sticking up out of the ground that will end your flight.
@@ -145,6 +146,80 @@ function shadeMass(
   g.fillRect(sx - w, topY, w * 0.62, baseY - topY);
   g.fillStyle(0x000000, 0.24);
   g.fillRect(sx + w * 0.18, topY, w * 0.82, baseY - topY);
+}
+
+/**
+ * The back of a structure, drawn before its front: the far face of a lattice
+ * seen through the near one, the side of a concrete shell. What makes a mast
+ * a square tower of steel rather than a ladder drawn on the sky.
+ */
+export function drawObstacleDepth(
+  g: Phaser.GameObjects.Graphics,
+  kind: ObstacleKind, sx: number, baseY: number, topY: number, halfWidth: number,
+  seed: number, style: ObstacleStyle, centreX: number,
+): void {
+  const h = baseY - topY;
+  if (h <= 2) return;
+  const back = mix(STEEL_DARK, style.rim, 0.12);
+  switch (kind) {
+    case 'mast': {
+      const o = depthOffset(sx, centreX, 12);
+      lattice(g, sx + o.ox, baseY + o.oy, topY + o.oy, 5.5, 2.2, back, 1.5, 13);
+      break;
+    }
+    case 'pylon': {
+      const w = halfWidth;
+      const o = depthOffset(sx, centreX, w * 1.5);
+      lattice(g, sx + o.ox, baseY + o.oy, topY + o.oy, w * 0.75, w * 0.22, back, 1.4, 12);
+      g.lineStyle(1.4, back, 1);
+      for (let i = 0; i < 3; i++) {
+        const ay = topY + h * (0.10 + i * 0.2) + o.oy;
+        const aw = w * (1.5 - i * 0.18);
+        g.lineBetween(sx + o.ox - aw, ay, sx + o.ox + aw, ay);
+        // Each cross-arm is a beam running back to its twin
+        g.lineStyle(0.9, back, 0.8);
+        for (const d of [-aw, aw]) g.lineBetween(sx + d, ay - o.oy, sx + d + o.ox, ay);
+        g.lineStyle(1.4, back, 1);
+      }
+      break;
+    }
+    case 'crane': {
+      const spread = halfWidth;
+      const o = depthOffset(sx, centreX, spread * 1.1);
+      lattice(g, sx - spread * 0.55 + o.ox, baseY + o.oy, topY + 4 + o.oy, 4, 2.5, back, 1.5, 15);
+      g.lineStyle(1.8, back, 1);
+      g.lineBetween(sx + spread + o.ox, baseY + o.oy, sx + 2 + o.ox, topY + 4 + o.oy);
+      // Ties across between the two frames at the foot and under the jib
+      g.lineStyle(1, back, 0.8);
+      for (const [x, y] of [[sx - spread * 0.55, baseY], [sx + spread, baseY], [sx, topY + 8]] as Array<[number, number]>) {
+        g.lineBetween(x, y, x + o.ox, y + o.oy);
+      }
+      break;
+    }
+    case 'tower': {
+      const w = halfWidth;
+      const lean = (hash(seed) - 0.5) * 0.12;
+      const tx = (y: number): number => sx + (baseY - y) * lean;
+      const o = depthOffset(sx, centreX, w * 1.5);
+      extrude(g, [
+        { x: sx - w, y: baseY }, { x: tx(topY + 10) - w, y: topY + 10, roof: true },
+        { x: tx(topY) - w * 0.25, y: topY, roof: true }, { x: tx(topY + 6) + w * 0.5, y: topY + 6, roof: true },
+        { x: tx(topY + 14) + w, y: topY + 14 }, { x: sx + w, y: baseY },
+      ], o, CONCRETE, mix(CONCRETE, 0x6a6258, 0.35), style.rim);
+      // Floor slabs round the corner
+      const side = o.ox > 0.6 ? 1 : o.ox < -0.6 ? -1 : 0;
+      if (side !== 0) {
+        g.lineStyle(1.2, mix(CONCRETE, 0x000000, 0.5), 0.8);
+        for (let fy = topY + 20; fy < baseY - 6; fy += 16) {
+          const x = tx(fy) + side * w;
+          g.lineBetween(x, fy, x + o.ox, fy + o.oy);
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 export function drawObstacle(

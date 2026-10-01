@@ -3,6 +3,7 @@ import { drawFighter, type FighterPalette } from './Figures';
 import { drawUndead, undeadKindFor, type CrowdStyle } from './Crowds';
 import { DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, DROP_BAND_RUN_PX, GUN_REACH_PX, type Town } from './Towns';
 import type { Hazard } from './Hazards';
+import { depthOffset, extrude, extrudeBox } from './Depth';
 
 /**
  * Something to DO in the cruise.
@@ -151,6 +152,9 @@ export interface DropWorld {
 }
 
 const WORLD_PX_PER_M = 9;
+/** Crate wood, and the sky it picks up on its top face. */
+const CRATE = 0x6a5430;
+const CRATE_SKY = 0xc8b890;
 const GRAVITY = 9.81;
 /**
  * Horizontal drag on a falling crate, per second — a drogue chute.
@@ -530,6 +534,7 @@ export class SupplyDrops {
     g: Phaser.GameObjects.Graphics, scrollX: number, groundY: number, pxPerM: number,
     width: number, t: number, dl: number, crowd: CrowdStyle | null = null,
   ): void {
+    const centreX = width / 2;
     for (const s of this.sites) {
       const sx = s.x - scrollX;
       if (sx < -200 || sx > width + 200) continue;
@@ -560,6 +565,7 @@ export class SupplyDrops {
       const baseY = groundY - s.surfaceM * pxPerM;
       for (let i = 0; i < shown; i++) {
         const cx = sx + 8 + i * 12;
+        extrudeBox(g, cx - 5, cx + 6, baseY, 9, depthOffset(cx, centreX, 9), CRATE, CRATE_SKY);
         g.fillStyle(0x6a5430, 1);
         g.fillRect(cx - 5, baseY - 9, 11, 9);
         g.lineStyle(1, 0x2a2010, 0.9);
@@ -894,6 +900,7 @@ export class SupplyDrops {
           g.fillStyle(0xcab89a, 0.4 * (1 - k));
           g.fillEllipse(sx, cy - 3, 14 + k * 34, 6 + k * 12);
         }
+        extrudeBox(g, sx - 5, sx + 6, cy, 9, depthOffset(sx, width / 2, 9), CRATE, CRATE_SKY);
         g.fillStyle(0x6a5430, 1);
         g.fillRect(sx - 5, cy - 9, 11, 9);
         continue;
@@ -911,6 +918,8 @@ export class SupplyDrops {
       const pts = [[-5, -4.5], [5, -4.5], [5, 4.5], [-5, 4.5]].map(([x, y]) => ({
         x: sx + x * co - y * si, y: cy + x * si + y * co,
       }));
+      // Tumbling, so the faces it shows change as it turns over
+      extrude(g, pts, depthOffset(sx, width / 2, 9), CRATE, CRATE_SKY, CRATE_SKY);
       g.fillStyle(0x6a5430, 1);
       g.fillPoints(pts, true);
       g.lineStyle(1, 0x2a2010, 0.9);

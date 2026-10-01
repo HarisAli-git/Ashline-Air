@@ -380,10 +380,14 @@ export class AirTraffic {
       if (p.doom !== null) continue;
       const dx = Math.abs(p.wx - planeWorldX);
       const dAlt = Math.abs(p.alt - planeAlt);
-      // Audible out to about 1.8 km horizontally and 120 m vertically
-      const h = Math.max(0, 1 - dx / 1600);
-      const v = Math.max(0, 1 - dAlt / 120);
-      const prox = h * h * v;
+      /*
+       * Audible from about 780 m out and 200 m above or below. The old 1600 px
+       * — 180 m — meant an aeroplane passing close enough to see was only
+       * heard for the second it was on top of you, so traffic was silent.
+       */
+      const h = Math.max(0, 1 - dx / 7000);
+      const v = Math.max(0, 1 - dAlt / 200);
+      const prox = Math.pow(h, 1.6) * v;
       if (prox <= proximity) continue;
       proximity = prox;
       // Positive while it is still coming toward us

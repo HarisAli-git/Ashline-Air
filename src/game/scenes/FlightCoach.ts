@@ -129,6 +129,16 @@ const BASICS: Lesson[] = [
 
 const MOMENTS: Lesson[] = [
   {
+    id: 'drop-again', title: 'Go round again', priority: 92,
+    text: c => (c.touch
+      ? 'You flew past them with crates still aboard. Tap TURN, come back round, and make another pass.'
+      : 'You flew past them with crates still aboard. Press R, come back round, and make another pass.')
+      + ' Each pass is another chance at the green.',
+    keys: ['R'], touchKeys: ['↺ TURN'],
+    when: (_s, c) => !!c.drop && c.drop.cue === 'behind',
+    done: (_s, c, t) => !c.drop || c.drop.cue !== 'behind' || t > 14,
+  },
+  {
     id: 'turn', title: 'Missed it? Turn round', priority: 95,
     text: c => (c.touch
       ? 'You flew past the strip. Tap TURN — the aeroplane comes round in a few seconds'
