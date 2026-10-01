@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { mix, type ObstacleStyle } from './Obstacles';
 import type { BiomeId } from './Biomes';
+import { depthOffset, extrude, extrudeBox, type DepthOffset } from './Depth';
 
 /**
  * The land between the towns.
@@ -92,19 +93,24 @@ const PROP_SCALE = 1.45;
 /** One prop standing on `baseY`. */
 export function drawProp(
   g: Phaser.GameObjects.Graphics, p: Prop, sx: number, baseY: number, pxPerM: number,
-  t: number, style: ObstacleStyle,
+  t: number, style: ObstacleStyle, centreX = sx,
 ): void {
   g.save();
   g.translateCanvas(sx, baseY);
   g.scaleCanvas(PROP_SCALE, PROP_SCALE);
-  drawPropAt(g, p, 0, 0, pxPerM, t, style);
+  // Depth is worked out on screen, then brought into the prop's own frame
+  const view = (depthPx: number): DepthOffset => {
+    const o = depthOffset(sx, centreX, depthPx * PROP_SCALE);
+    return { ox: o.ox / PROP_SCALE, oy: o.oy / PROP_SCALE };
+  };
+  drawPropAt(g, p, 0, 0, pxPerM, t, style, view);
   g.restore();
 }
 
 /** The prop in its own frame: standing on (sx, baseY), heights in metres. */
 function drawPropAt(
   g: Phaser.GameObjects.Graphics, p: Prop, sx: number, baseY: number, pxPerM: number,
-  t: number, style: ObstacleStyle,
+  t: number, style: ObstacleStyle, view: (depthPx: number) => DepthOffset,
 ): void {
   const m = (v: number): number => v * pxPerM;
   const h = (i: number): number => hash(p.seed + i);
@@ -120,6 +126,12 @@ function drawPropAt(
     case 'farm': {
       // A barn with a gambrel roof, a fence line, and a ploughed field long dead
       const bw = 58, bh = m(6.5);
+      extrude(g, [
+        { x: sx - bw / 2, y: baseY }, { x: sx - bw / 2, y: baseY - bh * 0.6 },
+        { x: sx - bw / 2 - 3, y: baseY - bh * 0.6, roof: true }, { x: sx - bw * 0.32, y: baseY - bh * 0.9, roof: true },
+        { x: sx, y: baseY - bh, roof: true }, { x: sx + bw * 0.32, y: baseY - bh * 0.9, roof: true },
+        { x: sx + bw / 2 + 3, y: baseY - bh * 0.6 }, { x: sx + bw / 2, y: baseY - bh * 0.6 }, { x: sx + bw / 2, y: baseY },
+      ], view(46), lit(0x5a2e22), snowy ? 0xe8eef0 : lit(0x3a2a22), style.rim);
       g.fillStyle(lit(0x5a2e22), 1);
       g.fillRect(sx - bw / 2, baseY - bh * 0.62, bw, bh * 0.62);
       g.fillStyle(lit(0x3a2a22), 1);
@@ -161,6 +173,7 @@ function drawPropAt(
       g.fillStyle(lit(0x3a352c), 1);
       g.fillTriangle(sx - 2, hy, sx - 18, hy - 5, sx - 18, hy + 4);
       // Stock tank at the foot
+      extrudeBox(g, sx + 8, sx + 24, baseY, 5, view(10), lit(0x4a4a44), style.rim);
       g.fillStyle(lit(0x4a4a44), 1);
       g.fillRect(sx + 8, baseY - 5, 16, 5);
       break;
@@ -187,13 +200,17 @@ function drawPropAt(
       break;
     }
     case 'car': {
-      drawCar(g, sx, baseY, h(1), style);
-      if (h(2) > 0.5) drawCar(g, sx + 30, baseY, h(3), style, true);
+      drawCar(g, sx, baseY, h(1), style, false, view(10));
+      if (h(2) > 0.5) drawCar(g, sx + 30, baseY, h(3), style, true, view(10));
       break;
     }
     case 'bus': {
       const bw = 50, bh = m(3);
       const tilt = (h(1) - 0.5) * 0.08;
+      extrude(g, [
+        { x: sx - bw / 2, y: baseY - 2 }, { x: sx - bw / 2, y: baseY - bh + tilt * 30, roof: true },
+        { x: sx + bw / 2 - 3, y: baseY - bh - tilt * 30 }, { x: sx + bw / 2, y: baseY - 2 },
+      ], view(11), lit(0x6a5a2a), lit(0x7a6a3a), style.rim);
       g.fillStyle(lit(0x6a5a2a), 1);
       g.fillPoints([
         new Phaser.Geom.Point(sx - bw / 2, baseY - 2), new Phaser.Geom.Point(sx - bw / 2, baseY - bh + tilt * 30),
@@ -210,14 +227,16 @@ function drawPropAt(
     }
     case 'convoy': {
       // The ones that did not get out: a truck, cars nose to tail, one burnt
+      extrudeBox(g, sx - 30, sx, baseY - 2, m(2.6) - 2, view(10), lit(0x3e4232), style.rim);
+      extrudeBox(g, sx, sx + 11, baseY - 2, m(1.9) - 2, view(9), lit(0x3e4232), style.rim);
       g.fillStyle(lit(0x3e4232), 1);
       g.fillRect(sx - 30, baseY - m(2.6), 30, m(2.6) - 2);
       g.fillRect(sx, baseY - m(1.9), 11, m(1.9) - 2);
       g.fillStyle(0x0c0a08, 1);
       g.fillCircle(sx - 24, baseY - 1, 3); g.fillCircle(sx - 10, baseY - 1, 3); g.fillCircle(sx + 5, baseY - 1, 3);
-      drawCar(g, sx + 30, baseY, h(1), style);
-      drawCar(g, sx + 58, baseY, h(2), style, true);
-      drawCar(g, sx - 56, baseY, h(3), style);
+      drawCar(g, sx + 30, baseY, h(1), style, false, view(10));
+      drawCar(g, sx + 58, baseY, h(2), style, true, view(10));
+      drawCar(g, sx - 56, baseY, h(3), style, false, view(10));
       break;
     }
     case 'tanks': {
@@ -241,6 +260,17 @@ function drawPropAt(
     case 'containers': {
       const cols = [0x6a2a1c, 0x2a4a5a, 0x5a5a2a, 0x3a3a3a, 0x7a4a1c];
       const ch = m(2.6), cw = 34;
+      // Every box's depth before any box's front, outermost first, the
+      // stacked row last — they stand close enough to hide each other's sides
+      const o = view(14);
+      const order = [0, 1, 2, 3, 4].sort((a, b) =>
+        ((a < 3 ? 0 : 1e6) + (a % 3) * Math.sign(o.ox || 1)) - ((b < 3 ? 0 : 1e6) + (b % 3) * Math.sign(o.ox || 1)));
+      for (const k of order) {
+        const row = k < 3 ? 0 : 1;
+        const cx = sx - 50 + (k % 3) * (cw + 2) + row * 18;
+        const top = baseY - ch * (row + 1);
+        extrudeBox(g, cx, cx + cw, top + ch - 0.5, ch - 0.5, o, lit(cols[Math.floor(h(k) * cols.length)]), style.rim);
+      }
       for (let k = 0; k < 5; k++) {
         const row = k < 3 ? 0 : 1;
         const cx = sx - 50 + (k % 3) * (cw + 2) + row * 18;
@@ -279,6 +309,11 @@ function drawPropAt(
         g.lineStyle(1.8, lit(0x3a3028), 1);
         for (const dx of [-16, -4, 8, 17]) g.lineBetween(sx + dx, baseY, sx + dx, base);
       }
+      extrude(g, [
+        { x: sx - cw / 2, y: base }, { x: sx - cw / 2, y: base - ch }, { x: sx - cw / 2 - 4, y: base - ch, roof: true },
+        { x: sx, y: base - ch - roof, roof: true }, { x: sx + cw / 2 + 4, y: base - ch }, { x: sx + cw / 2, y: base - ch },
+        { x: sx + cw / 2, y: base },
+      ], view(30), lit(snowy ? 0x4a3424 : 0x4a4038), snowy ? 0xe8eef0 : lit(0x2c2420), style.rim);
       g.fillStyle(lit(snowy ? 0x4a3424 : 0x4a4038), 1);
       g.fillRect(sx - cw / 2, base - ch, cw, ch);
       g.lineStyle(0.8, DARK, 0.45);
@@ -330,6 +365,7 @@ function drawPropAt(
       g.lineBetween(sx - 16, baseY, sx - 16, baseY - bh);
       g.lineBetween(sx + 16, baseY, sx + 16, baseY - bh);
       const board = [0x8a6a3a, 0x3a5a6a, 0x7a3a2a][Math.floor(h(1) * 3)];
+      extrudeBox(g, sx - bw / 2, sx + bw / 2, baseY - bh, m(2.8), view(3), lit(0x3a3028), style.rim);
       g.fillStyle(lit(board), 1);
       g.fillRect(sx - bw / 2, baseY - bh - m(2.8), bw, m(2.8));
       // Peeled panels and a slogan nobody can read now
@@ -358,9 +394,18 @@ function drawPropAt(
 
 function drawCar(
   g: Phaser.GameObjects.Graphics, x: number, baseY: number, r: number, style: ObstacleStyle, burnt = false,
+  o: DepthOffset = { ox: 0, oy: 0 },
 ): void {
   const body = burnt ? 0x1c1712 : mix([0x5a3a2a, 0x3a4a5a, 0x5a5a4a, 0x6a2a22][Math.floor(r * 4)], style.rim, 0.12);
   const tip = r > 0.8;   // one in five on its side
+  if (tip) extrudeBox(g, x - 6, x + 3, baseY, 12, o, body, style.rim);
+  else {
+    extrude(g, [
+      { x: x - 11, y: baseY - 1.5 }, { x: x - 11, y: baseY - 6, roof: true }, { x: x - 6, y: baseY - 6 },
+      { x: x - 6, y: baseY - 9.5, roof: true }, { x: x + 6, y: baseY - 9.5 }, { x: x + 6, y: baseY - 6, roof: true },
+      { x: x + 11, y: baseY - 6 }, { x: x + 11, y: baseY - 1.5 },
+    ], o, body, mix(body, 0xffffff, 0.08), style.rim);
+  }
   g.fillStyle(body, 1);
   if (tip) {
     g.fillRect(x - 6, baseY - 12, 9, 12);

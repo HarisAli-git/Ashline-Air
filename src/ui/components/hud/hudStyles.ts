@@ -217,6 +217,11 @@ export function hudStyles(
       fontSize: n(compact ? 15 : 19), fontWeight: 'bold', color: '#e8d5b7', letterSpacing: -0.5,
     },
     dropPips: { display: 'flex', gap: n(2), alignItems: 'center' },
+    dropNeed: {
+      fontSize: n(compact ? 9 : 10.5), fontWeight: 'bold', letterSpacing: 1, color: '#ffd080',
+      whiteSpace: 'nowrap',
+    },
+    dropAboard: { fontWeight: 'normal', color: '#8a7a5a' },
     dropPip: { width: n(compact ? 6 : 7), height: n(compact ? 6 : 7), borderRadius: 1 },
     meterWrap: { display: 'flex', alignItems: 'center', gap: n(6), marginTop: n(compact ? 3 : 5) },
     meterTrack: {

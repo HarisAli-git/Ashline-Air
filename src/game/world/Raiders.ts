@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { drawUndead, drawCorpse, undeadKindFor, type CrowdStyle } from './Crowds';
 import { drawFighter, drawMuzzleFlash, RAIDER_PALETTE, type FighterPose } from './Figures';
+import { depthOffset, extrude, extrudeBox, type DepthOffset } from './Depth';
 
 /**
  * Rebel-held ground.
@@ -82,7 +83,10 @@ export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
   // Pintle-mounted heavy MG. Reaches a normal cruise height.
   technical: { ceilingM: 165, rangePx: 2500, rounds: 2, spread: 0.034, damage: 4.5, cadence: 1.10, flak: false, label: 'HEAVY MG' },
   // Wheeled twin autocannon with fused shells. This is the one you climb for.
-  aa:        { ceilingM: 420, rangePx: 3200, rounds: 2, spread: 0.026, damage: 9.0, cadence: 1.60, flak: true,  label: 'AA BATTERY' },
+  // 300 m, not 420: every aeroplane in the fleet can actually climb over it.
+  // At 420 the crop duster — whose real ceiling is nearer 320 — could never
+  // get out of reach, and a battery became a hit you simply had to take.
+  aa:        { ceilingM: 300, rangePx: 3000, rounds: 2, spread: 0.03, damage: 7.0, cadence: 1.75, flak: true,  label: 'AA BATTERY' },
   /*
    * A gun barge in the tidal channels. Between a technical and a battery: it
    * reaches higher than anything else that is not proper AA, and it is the
@@ -192,6 +196,8 @@ function pivotOf(kind: EmplacementKind): { x: number; y: number; len: number } {
 
 export class Raiders {
   private list: Emplacement[] = [];
+  /** Middle of the view, where depth converges. Set each frame by draw(). */
+  private centreX = 700;
   private tracers: Tracer[] = [];
   private sparks: Spark[] = [];
   private impacts: Impact[] = [];
@@ -290,6 +296,13 @@ export class Raiders {
     only: ReadonlyArray<EmplacementKind> | null = null,
     /** Per-zone restriction, aligned with `zones` — a besieged town is rifles only. */
     zoneOnly: ReadonlyArray<ReadonlyArray<string> | null> = [],
+    /**
+     * How dangerous the country is for THIS pilot, 0–1. A new pilot meets
+     * rifles and the odd heavy MG; gun trucks thicken and AA batteries appear
+     * as the career goes on. Everyone used to get the full arsenal from the
+     * first contract, which made the opening hours a punishment.
+     */
+    threat = 1,
   ): void {
     this.list = [];
     this.tracers = [];
@@ -314,7 +327,7 @@ export class Raiders {
       // two batteries whose 4.4 km reach overlapped the entire stretch. That
       // is what made it feel like AA was everywhere.
       const limit = (only ?? zoneOnly[z] ?? null) as ReadonlyArray<EmplacementKind> | null;
-      const aaZone = !limit && rnd(seed * 53 + z * 17) < 0.45;
+      const aaZone = !limit && rnd(seed * 53 + z * 17) < 0.45 * Math.max(0, (threat - 0.25) / 0.75);
       const aaSlot = aaZone ? 1 + Math.floor(rnd(seed * 71 + z) * Math.max(1, n - 2)) : -1;
 
       for (let i = 0; i < n; i++) {
@@ -333,7 +346,7 @@ export class Raiders {
         } else if (i === 0 || i === n - 1) kind = 'camp';
         else if (limit) kind = limit[Math.floor(r * limit.length) % limit.length];
         else if (i === aaSlot) kind = 'aa';
-        else if (r < 0.45) kind = 'nest';
+        else if (r < 0.45 + (1 - threat) * 0.25) kind = 'nest';
         else if (r < 0.78) kind = 'technical';
         else kind = 'tower';
         // A barge that came out as camp furniture is just flotsam - drop it
@@ -512,7 +525,9 @@ export class Raiders {
       const exposure = 1 - target.altM / w.ceilingM;
       // …and a pilot who flies the same line every time gets ranged. Holding
       // one altitude tightens their group by nearly half; jinking undoes it.
-      const ranged = 1 - this.predictability * 0.45;
+      // (25%, not 45% — new pilots fly straight and level, and should not be
+      // punished for it as hard as a veteran who knows better.)
+      const ranged = 1 - this.predictability * 0.25;
       const scatter = w.spread * (1 + (1 - exposure) * 3.2) * ranged;
       shots++;
       this.fire(e, w, baseY, target, scatter);
@@ -585,18 +600,39 @@ export class Raiders {
    * The worst weapon in the next hostile stretch, so the aircraft can be told
    * to start climbing while there is still room to do it.
    */
-  threatAhead(worldX: number, rangePx: number): { label: string; ceilingM: number; distancePx: number } | null {
+  threatAhead(
+    worldX: number, rangePx: number, dir: 1 | -1 = 1,
+  ): { label: string; ceilingM: number; distancePx: number } | null {
     let best: { label: string; ceilingM: number; distancePx: number } | null = null;
     for (const e of this.list) {
       const w = WEAPONS[e.kind];
       if (!w) continue;
-      const d = e.x - worldX;
+      const d = (e.x - worldX) * dir;
       if (d <= 0 || d > rangePx) continue;
       if (!best || w.ceilingM > best.ceilingM) {
         best = { label: w.label, ceilingM: w.ceilingM, distancePx: d };
       }
     }
     return best;
+  }
+
+  /**
+   * The highest ceiling of any gun that can reach some part of [x0, x1], or
+   * 0 if none can. The layout keeps every drop site's run-in out of reach
+   * from the side you normally come from; turn round and come back at it
+   * from the other side and this is how the card knows whether that side is
+   * covered too.
+   */
+  gunsReach(x0: number, x1: number): number {
+    const a = Math.min(x0, x1), b = Math.max(x0, x1);
+    let top = 0;
+    for (const e of this.list) {
+      const w = WEAPONS[e.kind];
+      if (!w) continue;
+      const d = e.x < a ? a - e.x : e.x > b ? e.x - b : 0;
+      if (d <= w.rangePx) top = Math.max(top, w.ceilingM);
+    }
+    return top;
   }
 
   private pendingFlak: Array<{ wx: number; y: number; in: number; big: boolean }> = [];
@@ -671,6 +707,7 @@ export class Raiders {
     dt: number,
   ): void {
     this.tickImpact(dt);
+    this.centreX = width / 2;
 
     for (const e of this.list) {
       const sx = e.x - scrollX;
@@ -737,6 +774,11 @@ export class Raiders {
     drawFighter(g, x, groundY, t, seed, scale, face, pose, aim, dl, RAIDER_PALETTE);
   }
 
+  /** Where the back of something `px` deep appears, from where it stands on screen. */
+  private depth(sx: number, px: number): DepthOffset {
+    return depthOffset(sx, this.centreX, px);
+  }
+
   /** Muzzle flash — shared with the garrison so every gun flashes alike. */
   private flash(g: Phaser.GameObjects.Graphics, x: number, y: number, a: number, k: number, size: number): void {
     drawMuzzleFlash(g, x, y, a, k, size);
@@ -755,6 +797,21 @@ export class Raiders {
     // Crew behind the parapet
     this.rebel(g, sx - 16, baseY, t, e.seed + 1, 0.75, 1, 'crouch', e.aim, dl);
     this.rebel(g, sx - 26, baseY, t, e.seed + 2, 0.72, 1, 'work', 0, dl);
+
+    // The far side of the ring of bags, before anything else
+    const ob = this.depth(sx, 22);
+    for (let row = 0; row < 2; row++) {
+      const w = 40 - row * 9;
+      const yy = baseY - 5 - row * 5 + ob.oy;
+      const n = 4 - row;
+      for (let i = 0; i < n; i++) {
+        const bx = sx - w / 2 + i * (w / n) + (row % 2) * 3 + 6 + ob.ox;
+        g.fillStyle((i + row) % 2 ? 0x2a2418 : 0x221d13, 1);
+        g.fillEllipse(bx, yy, 12, 6);
+        g.fillStyle(0x3e3626, 0.6);
+        g.fillEllipse(bx, yy - 1.6, 8.5, 2.4);
+      }
+    }
 
     // Sandbags first, so the gun sits on the parapet rather than behind it.
     // Alternating tones with a lit top edge — a stack of one flat colour just
@@ -818,6 +875,13 @@ export class Raiders {
     g.fillStyle(0x101c22, 0.4);
     g.fillEllipse(sx, baseY + 7, 46, 7);
 
+    // Deck and wheelhouse have depth; the hull below the waterline does not show
+    const od = this.depth(sx, 20);
+    extrude(g, [
+      { x: sx - 24 * face, y: y + 9 }, { x: sx - 30, y, roof: true }, { x: sx + 30, y }, { x: sx + 24 * face, y: y + 9 },
+    ], od, hull, 0x3a403c, 0x8aa0a8);
+    extrudeBox(g, sx - 16 * face, sx - 16 * face + 15, y, 11, this.depth(sx, 12), 0x3a423e, 0x8aa0a8);
+
     // Hull: a low flat-bottomed barge, waterline right at the ground line
     g.fillStyle(hull, 1);
     g.beginPath();
@@ -855,6 +919,16 @@ export class Raiders {
     const shadow = 0x14180f;
     const bounce = Math.sin(t * 2.3 + e.seed) * 0.4 + e.recoil * 1.2;
     const y = baseY - bounce;
+
+    // Far-side wheels, then the body carried back over them
+    const ot = this.depth(sx, 17);
+    for (const wx of [sx - 20, sx + 18]) {
+      g.fillStyle(0x0a0906, 1);
+      g.fillCircle(wx + ot.ox, y - 5 + ot.oy, 5.2);
+    }
+    extrudeBox(g, sx - 30, sx + 28, y - 7, 8, ot, body, 0x9aa08a);
+    const cabX = sx - 30 + (face > 0 ? 34 : 0);
+    extrudeBox(g, cabX, cabX + 24, y - 14, 11, ot, body, 0x9aa08a);
 
     // Wheels first so the body sits on them
     for (const wx of [sx - 20, sx + 18]) {
@@ -936,6 +1010,7 @@ export class Raiders {
     g.lineBetween(sx - 16, baseY - 1, sx + 16, baseY - 1);
     g.lineBetween(sx, baseY - 6, sx - 22, baseY);
     g.lineBetween(sx, baseY - 6, sx + 22, baseY);
+    extrudeBox(g, sx - 7, sx + 7, baseY - 5, 10, this.depth(sx, 12), metal, 0x8a8a78);
     g.fillStyle(metal, 1);
     g.fillRect(sx - 7, baseY - 15, 14, 10);          // turntable + gun shield
     g.fillStyle(0x3c3a30, 1);
@@ -970,6 +1045,12 @@ export class Raiders {
   ): void {
     const h = 40;
     const wood = 0x241b11;
+    // The back pair of legs, then the platform deck running back to them
+    const ow = this.depth(sx, 16);
+    g.lineStyle(2, 0x1a140c, 1);
+    g.lineBetween(sx - 12 + ow.ox, baseY + ow.oy, sx - 5 + ow.ox, baseY - h + ow.oy);
+    g.lineBetween(sx + 12 + ow.ox, baseY + ow.oy, sx + 5 + ow.ox, baseY - h + ow.oy);
+    extrudeBox(g, sx - 13, sx + 13, baseY - h, 4, ow, wood, 0x8a7a60);
     // Splayed legs with cross-bracing
     g.lineStyle(2.4, wood, 1);
     g.lineBetween(sx - 12, baseY, sx - 5, baseY - h);
@@ -1023,6 +1104,16 @@ export class Raiders {
     const face: 1 | -1 = rnd(seed + 2) > 0.5 ? 1 : -1;
 
     // ── Scrap wall: mismatched panels, leaning, spikes along the top ──────
+    const oc = this.depth(sx, 5);
+    const byOut = [0, 1, 2, 3, 4, 5, 6, 7, 8].sort((a, b) => (a - b) * Math.sign(oc.ox || 1));
+    for (const i of byOut) {
+      const px = sx + (i - 4) * 13;
+      const ph = 20 + rnd(seed + i * 7) * 13;
+      const tilt = (rnd(seed + i) - 0.5) * 3;
+      extrude(g, [
+        { x: px - 6, y: baseY }, { x: px - 6 + tilt, y: baseY - ph, roof: true }, { x: px + 6 + tilt, y: baseY - ph }, { x: px + 6, y: baseY },
+      ], oc, i % 2 ? 0x241d14 : 0x1d1811, 0x3a3020, 0x8a7a60);
+    }
     for (let i = 0; i < 9; i++) {
       const px = sx + (i - 4) * 13;
       const ph = 20 + rnd(seed + i * 7) * 13;
@@ -1064,10 +1155,17 @@ export class Raiders {
     // ── Tents and stores ─────────────────────────────────────────────────
     for (let i = 0; i < 2; i++) {
       const tx = sx - face * (30 + i * 26);
+      extrude(g, [
+        { x: tx - 11, y: baseY, roof: true }, { x: tx, y: baseY - 15, roof: true }, { x: tx + 11, y: baseY },
+      ], this.depth(tx, 18), 0x2a2418, 0x3a3222, 0x8a7a60);
       g.fillStyle(0x2a2418, 1);
       g.fillTriangle(tx - 11, baseY, tx, baseY - 15, tx + 11, baseY);
       g.fillStyle(0x181309, 1);
       g.fillTriangle(tx + 1, baseY, tx + 4, baseY - 9, tx + 8, baseY);
+    }
+    for (let i = 0; i < 3; i++) {
+      const cx = sx + face * (60 + i * 8);
+      extrudeBox(g, cx, cx + 7, baseY, 7, this.depth(cx, 7), 0x33291a, 0x8a7a60);
     }
     g.fillStyle(0x33291a, 1);
     for (let i = 0; i < 3; i++) g.fillRect(sx + face * (60 + i * 8), baseY - 7, 7, 7);

@@ -46,6 +46,8 @@ export interface PlayerStats {
   supplyDrops?: number;
   /** Flight school finished (or skipped) — no more first-flight hand-holding. */
   trainingDone?: boolean;
+  /** Moments the coach has already taught on this save. See FlightCoach. */
+  lessons?: string[];
 }
 
 export interface WorldState {

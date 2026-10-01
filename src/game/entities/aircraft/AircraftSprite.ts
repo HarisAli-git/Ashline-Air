@@ -6,6 +6,8 @@ import {
 import { ensureAircraftTextures, SS, type AircraftTexKeys } from './render/AircraftPainter';
 import { AircraftParticles } from './render/AircraftParticles';
 import { drawMainLeg, drawNoseLeg, drawTailSpring, drawSpat, type GearStyle } from './render/GearArt';
+import { AircraftModel, type ModelLight } from './render/AircraftModel';
+import { isTouchDevice } from '../../utils/device';
 
 /**
  * Fully procedural aircraft renderer.
@@ -21,7 +23,6 @@ import { drawMainLeg, drawNoseLeg, drawTailSpring, drawSpat, type GearStyle } fr
  */
 
 const GEAR_TRANSIT_SECONDS = 1.4;
-const FLAP_TRANSIT_SECONDS = 0.6;
 const MAIN_STOWED_RAD = Phaser.Math.DegToRad(100);   // main gear tucks rearward
 const NOSE_STOWED_RAD = Phaser.Math.DegToRad(-100);  // nose gear tucks forward
 
@@ -92,6 +93,29 @@ export class AircraftSprite {
   private t = 0;              // local clock
   private coneOn = false;
   private turb = 0;           // weather turbulence 0–1, rocks the airframe
+
+  // ── Turning round ──────────────────────────────────────────────────────────
+  /** Which way the nose points on screen: +1 right, -1 left. */
+  private facing: 1 | -1 = 1;
+  /** 0→1 through a 180, or null when not turning. */
+  private turnP: number | null = null;
+  private turnFrom: 1 | -1 = 1;
+  /**
+   * The aeroplane you actually see: a lit 3D model (see AircraftModel). The
+   * painted parts above still exist — they carry the transforms the particles
+   * and the crash sequence work with, and lend their textures to the debris —
+   * but they are never drawn.
+   */
+  private readonly model: AircraftModel;
+  private light: ModelLight = {
+    sky: 0xa8b4c0, ground: 0x6a5840, sun: 0xffe2b8, daylight: 0.85, haze: 0, hazeColor: 0xa8b4c0,
+  };
+  private lastState: FlightState | null = null;
+  /** Bank, radians, and its rate: the wings rock in rough air and settle in calm. */
+  private roll = 0;
+  private rollRate = 0;
+  private shed = false;
+  private iceLoad = 0;
 
   constructor(
     scene: Phaser.Scene,
@@ -186,6 +210,19 @@ export class AircraftSprite {
       .setScale(0.6).setTint(0xff3820).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0);
     this.beaconCore = img('px_soft', spec.beacon.x, spec.beacon.y)
       .setScale(0.18).setTint(0xffd0c0).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0);
+
+    // The painted airframe becomes an invisible armature; the model is drawn
+    // in its place, after everything has moved for the frame.
+    this.body.setAlpha(0);
+    this.body.remove(this.lightCone);
+    this.model = new AircraftModel(scene, spec, this.contactY, isTouchDevice() ? 'low' : 'high');
+    this.model.setDepth(this.container.depth);
+    scene.events.on(Phaser.Scenes.Events.POST_UPDATE, this.renderModel, this);
+  }
+
+  /** The world's light, so the aeroplane is lit by the same sky it flies in. */
+  setLighting(light: ModelLight): void {
+    this.light = light;
   }
 
   /** Texture keys, so the crash sequence can spawn matching debris. */
@@ -197,6 +234,7 @@ export class AircraftSprite {
    * independently of the container.
    */
   shedParts(): void {
+    this.shed = true;
     this.wingNearImg.setVisible(false);
     for (const p of this.props) p.root.setVisible(false);
     this.flapImg.setVisible(false);
@@ -372,7 +410,7 @@ export class AircraftSprite {
   /** Called by FlightScene at the moment of touchdown. */
   notifyTouchdown(vSpeedAtImpact: number): void {
     this.oleoKick = Phaser.Math.Clamp(Math.abs(vSpeedAtImpact) / 6, 0.15, 1);
-    this.particles?.touchdownBurst(this.container.x, this.groundY, vSpeedAtImpact);
+    this.particles?.touchdownBurst(this.container.x, this.groundY, vSpeedAtImpact, this.facing);
   }
 
   /** Persistent fuel-mist trail from the wing (fuel-leak event). */
@@ -382,6 +420,7 @@ export class AircraftSprite {
    * on a panel is not a thing a pilot notices in a blizzard.
    */
   setIceLoad(load: number): void {
+    this.iceLoad = load;
     const g = this.iceGfx;
     g.clear();
     if (load <= 0.02) return;
@@ -473,7 +512,7 @@ export class AircraftSprite {
 
     this.updatePropeller(dt, state.throttle);
     this.updateGear(dt, state);
-    this.updateFlaps(dt, state.flapsDeployed);
+    this.updateFlaps(state.flapAngle ?? (state.flapsDeployed ? this.spec.flap.maxDeflectDeg : 0));
     for (const w of this.extraWheels) w.rotation = this.wheelSpin;
     this.updateDamage(dt, state.integrity);
 
@@ -486,15 +525,128 @@ export class AircraftSprite {
     this.updateAttitude(state);
     this.updateShadow(state);
 
+    this.lastState = state;
+    this.updateRoll(dt, state);
+    const xs = this.applyTurn();
     this.particles?.update(
-      state, this.container.x, this.container.y, this.body.rotation, this.engineOn, this.groundY,
+      state, this.container.x, this.container.y, this.body.rotation, this.engineOn, this.groundY, xs,
     );
+  }
+
+  /**
+   * The wings are never perfectly still. In calm air a pilot's hand keeps
+   * them within a degree or two; in rough air a gust picks one up and the
+   * airframe's own roll damping and the pilot bring it back. On the ground
+   * the gear holds them level.
+   */
+  private updateRoll(dt: number, state: FlightState): void {
+    if (state.altitude <= 0.3) {
+      this.roll *= Math.exp(-dt * 8);
+      this.rollRate = 0;
+      return;
+    }
+    const gust = (Math.random() - 0.5) * (1.2 + this.turb * 26);
+    this.rollRate += (gust - this.roll * 3.4 - this.rollRate * 2.4) * dt;
+    this.roll = Phaser.Math.Clamp(this.roll + this.rollRate * dt, -0.55, 0.55);
+  }
+
+  /** Draw the model where the armature ended up this frame. */
+  private renderModel(): void {
+    const c = this.container;
+    if (!c.active) return;
+    this.model.setVisible(c.visible);
+    if (!c.visible) return;
+    const m = this.body.getWorldTransformMatrix();
+    const s = Math.abs(c.scaleY);
+    const sign = c.scaleX >= 0 ? 1 : -1;
+    // A touch of three-quarter view: the nose turned a few degrees toward the
+    // camera, so the model shows its form instead of a pure profile.
+    const D = 0.14;
+    let yaw: number;
+    let bank = 0;
+    if (this.turnP === null) {
+      yaw = this.facing > 0 ? -D : Math.PI + D;
+    } else {
+      const e = this.turnP;
+      yaw = this.turnFrom > 0 ? -D + (Math.PI + 2 * D) * e : Math.PI + D - (Math.PI + 2 * D) * e;
+      bank = this.turnFrom * 0.55 * Math.sin(Math.PI * e);
+    }
+    const st = this.lastState;
+    const wander = Math.sin(this.t * 0.37) * 0.02 + Math.sin(this.t * 0.91 + 1) * 0.01;
+    const airborne = !!st && st.altitude > 0.5;
+    // Haze for distance and weather; a faded container (the menu fly-by) reads
+    // as an aeroplane far off rather than a ghost
+    const fade = 1 - c.alpha;
+    const light = fade > 0.01
+      ? { ...this.light, haze: Math.min(0.9, this.light.haze + fade * 0.75) }
+      : this.light;
+    this.model.render(m.tx, m.ty, c.rotation, s, 1, {
+      yaw,
+      roll: this.roll + bank + (airborne ? wander : 0),
+      pitch: -this.body.rotation,
+      flapDeg: st?.flapAngle ?? 0,
+      aileron: Phaser.Math.Clamp(-this.rollRate * 0.35, -0.35, 0.35),
+      elevator: this.elevatorCmd,
+      rudder: Phaser.Math.Clamp(this.rollRate * 0.12, -0.2, 0.2),
+      gear: this.hasRetractableGear ? this.gearProgress : 1,
+      propAngle: this.bladeAngle,
+      propSpeed: this.propSpeed,
+      damage: this.damageTier,
+      ice: this.iceLoad,
+      beacon: this.beaconCore.alpha,
+      landingLight: this.coneOn,
+      shed: this.shed,
+    }, light);
+    // The landing light's beam rides the nose
+    this.lightCone.setPosition(m.tx, m.ty);
+    this.lightCone.setRotation(c.rotation + this.body.rotation * sign);
+    this.lightCone.setScale(s * sign, s);
   }
 
   destroy(): void {
     this.particles?.destroy();
     this.shadowImg.destroy();
+    this.scene.events.off(Phaser.Scenes.Events.POST_UPDATE, this.renderModel, this);
+    this.model.destroy();
+    this.lightCone.destroy();
     this.container.destroy();
+  }
+
+  /** Point the nose one way or the other, instantly (e.g. a new flight). */
+  setFacing(f: 1 | -1): void {
+    this.facing = f;
+    this.turnP = null;
+    this.applyTurn();
+  }
+
+  /**
+   * Progress through a 180-degree turn, 0→1, starting from `from`; null ends
+   * it, leaving the aeroplane facing the other way.
+   */
+  setTurn(progress: number | null, from: 1 | -1): void {
+    if (progress === null) {
+      if (this.turnP !== null) this.facing = (-this.turnFrom) as 1 | -1;
+      this.turnP = null;
+      return;
+    }
+    this.turnP = Phaser.Math.Clamp(progress, 0, 1);
+    this.turnFrom = from;
+  }
+
+  /**
+   * The turn itself is flown by the model (see renderModel). The armature is
+   * only squashed through it so the exhaust and smoke trail the right way.
+   * Returns that signed squash for the particles.
+   */
+  private applyTurn(): number {
+    const s = Math.abs(this.container.scaleY) || this.spec.scale;
+    if (this.turnP === null) {
+      this.container.scaleX = s * this.facing;
+      return this.facing;
+    }
+    const xs = this.turnFrom * Math.cos(Math.PI * this.turnP);
+    this.container.scaleX = s * (xs >= 0 ? 1 : -1) * Math.max(0.02, Math.abs(xs));
+    return xs;
   }
 
   // ── Private updaters ───────────────────────────────────────────────────────
@@ -574,13 +726,13 @@ export class AircraftSprite {
     }
   }
 
-  private updateFlaps(dt: number, deployed: boolean): void {
-    const dir = deployed ? 1 : -1;
-    this.flapProgress = Phaser.Math.Clamp(this.flapProgress + (dir * dt) / FLAP_TRANSIT_SECONDS, 0, 1);
-    const eased = Phaser.Math.Easing.Sine.InOut(this.flapProgress);
+  /** The flap panel at its real deflection — the controller runs the motor. */
+  private updateFlaps(angleDeg: number): void {
+    const k = Phaser.Math.Clamp(angleDeg / this.spec.flap.maxDeflectDeg, 0, 1);
+    this.flapProgress = k;
     // Negative rotation = trailing edge down for a right-facing aircraft
-    this.flapImg.rotation = Phaser.Math.DegToRad(-this.spec.flap.maxDeflectDeg) * eased;
-    this.flapImg.x = flapHinge(this.spec).x - eased * 2; // slight rearward slide
+    this.flapImg.rotation = Phaser.Math.DegToRad(-angleDeg);
+    this.flapImg.x = flapHinge(this.spec).x - k * 3; // Fowler flaps slide aft as they drop
   }
 
   private updateDamage(dt: number, integrity: number): void {

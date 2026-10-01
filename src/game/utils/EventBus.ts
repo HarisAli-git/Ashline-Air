@@ -23,10 +23,17 @@ export interface DropZoneStatus {
    * release  in the band and the pin is on them
    * low      below the band — the roofs and wires are up here with you
    * late     the aim point is already past them
+   * behind   flown past with crates still wanted — turn round for another pass
    */
-  cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late';
-  /** How far until you should start down, km. */
+  cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late' | 'behind';
+  /** How far until you should start down, km — the edge of the gun-free corridor. */
   descendInKm: number;
+  /** While descending: the sink rate that reaches the band in time, m/s. */
+  descentRate: number;
+  /** Crates still aboard. */
+  aboard: number;
+  /** Coming at it from the far side, where guns cover the run-in. */
+  covered?: boolean;
   /**
    * The drop meter, once the flare is up: metres from where a crate would
    * land now to the people (positive = still ahead of it), the half-width of
@@ -61,7 +68,7 @@ export interface GameEvents {
   'flight:event-action': { action: FlightAction; value: number };
   'flight:fuel-critical': { fuelRemaining: number };
   'flight:gear-toggled': { down: boolean };
-  'flight:flaps-toggled': { deployed: boolean };
+  'flight:flaps-toggled': { deployed: boolean; stage?: number };
 
   // Weather
   'weather:changed': { state: WeatherState };
@@ -85,6 +92,8 @@ export interface GameEvents {
     total?: number;
     keys?: string[];
     training?: boolean;
+    /** From the coach — shown as a lesson panel rather than a one-line hint. */
+    coach?: boolean;
   };
   /** Flight school's debrief: how it went, and what it paid. */
   'flight:training-complete': {
@@ -97,6 +106,8 @@ export interface GameEvents {
   /** The debrief's two buttons. */
   'flight:training-exit': { again: boolean };
   'flight:skip-training': void;
+  /** Stop the coach on a real flight — the player knows what they are doing. */
+  'flight:hide-tips': void;
   'flight:status': {
     engineFailed: boolean;
     underFire: boolean;
@@ -158,6 +169,20 @@ export interface GameEvents {
      * calling or the hold is empty.
      */
     dropZone: DropZoneStatus | null;
+    /** Flew past the destination strip, still heading away from it. */
+    overshot: boolean;
+    /** Airborne, high enough and not already turning — the TURN control is live. */
+    canTurn: boolean;
+    /**
+     * The flap lever's notches in degrees, the limit speed for where the
+     * flaps are now and for the next notch down, and whether they are out
+     * too fast right now.
+     */
+    flaps: { stops: number[]; limitKmh: number | null; nextLimitKmh: number | null; overspeed: boolean; blownBack?: boolean } | null;
+    /** 1g stall speed in the current configuration and air. */
+    stallKmh: number;
+    /** Climb left at this height as a fraction of sea level — 0 at the ceiling. */
+    climbReserve: number;
     /** Icing / sand / avionics caution from the weather, or null. */
     weatherCaution: string | null;
     /** 0–1 ice on the airframe, for the gauge. */

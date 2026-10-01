@@ -32,9 +32,18 @@ export interface FlightAudioState {
  * which is a duplication that silently undoes itself: ducking restored the
  * engine to a hardcoded 0.50 regardless of what the bus was actually set to.
  */
-const BUS_ENGINE = 0.85;
+/*
+ * Rebalanced, measured through the real master chain (see the headless mix
+ * probe): the engine at cruise was -16.6 dBFS RMS and every weather bed sat
+ * BELOW it on its own (-19 to -27) — so a sandstorm, which should be the
+ * loudest thing in the sky, was a hiss under the drone, and the drone kept
+ * the shared compressor working so hard that everything else was pushed
+ * down with it. The engine now sits well under the world: present, not
+ * dominant.
+ */
+const BUS_ENGINE = 0.55;
 const BUS_WORLD  = 1.00;
-const BUS_ALERT  = 1.35;
+const BUS_ALERT  = 1.00;
 
 /**
  * Makeup gain after the compressor.
@@ -96,6 +105,13 @@ class SoundEngineClass {
   private ambientGain: GainNode | null = null;
 
   // ── Weather bed: rain, dust, the roar of a cell ───────────────────────────
+  /** Wind whistle/howl for gales and blizzards: a narrow band that wanders. */
+  private wxHowlSrc: AudioBufferSourceNode | null = null;
+  private wxHowlGain: GainNode | null = null;
+  private wxHowlFilter: BiquadFilterNode | null = null;
+  /** How much the weather should drown the engine, 0-1 — see setWeather. */
+  private wxMask = 0;
+  private wxGritTimer = 0;
   private wxHissSrc: AudioBufferSourceNode | null = null;
   private wxHissGain: GainNode | null = null;
   private wxHissFilter: BiquadFilterNode | null = null;
@@ -354,7 +370,9 @@ class SoundEngineClass {
     this.engineFilter = ctx.createBiquadFilter();
     this.engineFilter.type = 'lowpass';
     this.engineFilter.frequency.value = 300;
-    this.engineFilter.Q.value = 3;
+    // A resonant peak on a sawtooth is what made it buzz like a synth pad;
+    // a real engine heard from the cockpit is a thick, rounded rumble
+    this.engineFilter.Q.value = 0.9;
 
     // The chop gain is driven by an LFO at blade-pass rate. This tremolo is
     // what makes a synth tone read as a PROPELLER rather than a flat drone.
@@ -387,9 +405,21 @@ class SoundEngineClass {
     this.engineOsc2.connect(o2g).connect(this.engineFilter);
     this.engineOsc2.start();
 
-    // ── Exhaust hiss ──────────────────────────────────────────────────────
-    const ex = this.loopNoise('bandpass', 900, 0.8, this.busEngine);
-    if (ex) { this.exhaustSrc = ex.src; this.exhaustFilter = ex.filter; this.exhaustGain = ex.gain; }
+    // ── Exhaust: noise that PULSES with the firing, not a steady hiss ──────
+    // Fed through the same chop tremolo as the tone, so each blade-pass is a
+    // puff of combustion — the "putt" that makes a radial a radial.
+    if (this.noiseBuffer) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      src.loop = true;
+      const f = ctx.createBiquadFilter();
+      f.type = 'bandpass'; f.frequency.value = 700; f.Q.value = 0.9;
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      src.connect(f).connect(g).connect(this.chopGain);
+      src.start();
+      this.exhaustSrc = src; this.exhaustFilter = f; this.exhaustGain = g;
+    }
 
     // ── Wind rush ─────────────────────────────────────────────────────────
     const wind = this.loopNoise('bandpass', 500, 0.6, this.busWorld);
@@ -433,8 +463,10 @@ class SoundEngineClass {
       this.engineOsc.frequency.setTargetAtTime(f, t, 0.07);
       const h = P.kind === 'radial' ? 1.5 : 2.02;
       this.engineOsc2.frequency.setTargetAtTime(f * (h + s.roughness * 0.22), t, 0.07);
-      this.engineGain.gain.setTargetAtTime(s.rpm > 0.01 ? 0.075 + s.throttle * 0.10 : 0, t, 0.12);
-      this.engineFilter.frequency.setTargetAtTime(240 + s.throttle * 620 + s.rpm * 320, t, 0.1);
+      // Quieter, and quieter still inside a storm that ought to drown it
+      const mask = 1 - this.wxMask * 0.45;
+      this.engineGain.gain.setTargetAtTime(s.rpm > 0.01 ? (0.05 + s.throttle * 0.06) * mask : 0, t, 0.12);
+      this.engineFilter.frequency.setTargetAtTime(200 + s.throttle * 480 + s.rpm * 260, t, 0.1);
     }
     if (this.chopLfo && this.chopDepth) {
       // Blade-pass rate = rpm × blades × engines. A four-engine three-blade
@@ -452,20 +484,25 @@ class SoundEngineClass {
       this.turbineFilter.frequency.setTargetAtTime(1800 + s.rpm * 2200, t, 0.12);
     }
     if (this.exhaustGain && this.exhaustFilter) {
-      this.exhaustGain.gain.setTargetAtTime(s.rpm * (0.020 + s.throttle * 0.030), t, 0.12);
-      this.exhaustFilter.frequency.setTargetAtTime(700 + s.throttle * 900, t, 0.12);
+      // Relative to the tone (it shares the engine's gain stage now)
+      this.exhaustGain.gain.setTargetAtTime(s.rpm * (0.25 + s.throttle * 0.35), t, 0.12);
+      this.exhaustFilter.frequency.setTargetAtTime(420 + s.throttle * 600, t, 0.12);
     }
     if (this.windGain && this.windFilter) {
-      // Gear and flaps hanging out add real buffet
+      // The air going past is the sound of SPEED — with the engine pulled back
+      // it is what tells you how fast you are going. Gear and flaps hanging
+      // out add buffet.
       const drag = 1 + (s.gearDown ? 0.35 : 0) + (s.flapsDeployed ? 0.4 : 0);
-      const gust = 1 + s.turbulence * 0.5 * (0.6 + 0.4 * Math.sin(t * 3.1));
-      this.windGain.gain.setTargetAtTime(s.speedFrac * s.speedFrac * 0.15 * drag * gust, t, 0.14);
-      this.windFilter.frequency.setTargetAtTime(340 + s.speedFrac * 1000, t, 0.14);
+      const gust = 1 + s.turbulence * 0.6 * (0.6 + 0.4 * Math.sin(t * 3.1));
+      this.windGain.gain.setTargetAtTime(s.speedFrac * s.speedFrac * 0.17 * drag * gust, t, 0.14);
+      this.windFilter.frequency.setTargetAtTime(420 + s.speedFrac * 1400, t, 0.14);
     }
     if (this.rumbleGain && this.rumbleFilter) {
+      // Tyres on a patched strip: loud, and lumpy rather than a smooth hum
       const rolling = s.onGround ? Math.min(1, s.speedFrac * 3) : 0;
-      this.rumbleGain.gain.setTargetAtTime(rolling * 0.11, t, 0.08);
-      this.rumbleFilter.frequency.setTargetAtTime(150 + rolling * 260, t, 0.1);
+      const bumps = 0.8 + 0.2 * Math.sin(t * 19) * Math.sin(t * 7.3);
+      this.rumbleGain.gain.setTargetAtTime(rolling * 0.30 * bumps, t, 0.05);
+      this.rumbleFilter.frequency.setTargetAtTime(140 + rolling * 320, t, 0.1);
     }
   }
 
@@ -581,12 +618,27 @@ class SoundEngineClass {
     }
   }
 
-  /** Wheels meeting the runway: tyre chirp + suspension thump. */
+  /**
+   * Wheels meeting the runway.
+   *
+   * It was one short chirp and a soft thump — a landing, the moment every
+   * flight builds to, went by almost unheard. A real one is layered: the two
+   * mains screech a beat apart as the tyres spin up, the oleos slam, the
+   * airframe rattles, and a firm one squeals.
+   */
   touchdown(vSpeed: number): void {
     const k = Math.min(1, Math.abs(vSpeed) / 6);
-    this.noiseBurst(0.1 + k * 0.06, 2600, 0.16 + k * 0.2, 'bandpass', 4, 900); // chirp
-    this.noiseBurst(0.28 + k * 0.22, 170 + k * 120, 0.22 + k * 0.45);          // thump
-    this.blip(64, 0.2, 0.16 + k * 0.22, 'triangle', 44);
+    this.duck(0.5, 0.35);
+    // Tyre screech, left main then right main
+    this.noiseBurst(0.2 + k * 0.12, 3100, 0.30 + k * 0.30, 'bandpass', 6, 1500);
+    setTimeout(() => this.noiseBurst(0.16 + k * 0.1, 2800, 0.24 + k * 0.28, 'bandpass', 6, 1400), 70);
+    // A firm arrival squeals
+    if (k > 0.25) this.blip(1320, 0.16, 0.05 * k, 'triangle', 980);
+    // Oleo slam and the airframe taking the load
+    this.noiseBurst(0.34 + k * 0.28, 180 + k * 140, 0.42 + k * 0.5);
+    this.blip(72, 0.3, 0.28 + k * 0.32, 'triangle', 40);
+    // Gear and fittings rattle
+    setTimeout(() => this.noiseBurst(0.1, 1100, 0.10 + k * 0.14, 'bandpass', 3), 40);
   }
 
   crash(): void {
@@ -621,16 +673,23 @@ class SoundEngineClass {
     this.noiseBurst(0.16, 110, 0.17);
   }
 
-  /** Master caution — two-tone. */
+  /**
+   * Master caution — a soft falling pair.
+   *
+   * These were square waves at 760/560 Hz and 980 Hz: the harshest timbre in
+   * the synth at the pitch the ear is most sensitive to, fired every few
+   * seconds for as long as a condition held. Rounded tones in a lower, calmer
+   * register still read as "look" without grating on the twentieth repeat.
+   */
   warn(): void {
-    this.blip(760, 0.12, 0.10, 'square');
-    this.blip(560, 0.14, 0.10, 'square', undefined, 0.16);
+    this.blip(620, 0.16, 0.09, 'triangle');
+    this.blip(470, 0.2, 0.085, 'triangle', undefined, 0.17);
   }
 
-  /** Sharp repeating alarm for imminent danger (obstacle ahead). */
+  /** Imminent danger (obstacle, traffic, overspeed): two quick rising notes. */
   alarm(): void {
-    this.blip(980, 0.08, 0.11, 'square');
-    this.blip(980, 0.08, 0.11, 'square', undefined, 0.13);
+    this.blip(520, 0.09, 0.1, 'triangle', 700);
+    this.blip(520, 0.09, 0.1, 'triangle', 700, 0.14);
   }
 
   /** Rounds coming up from the ground. */
@@ -669,17 +728,17 @@ class SoundEngineClass {
    */
   dropTick(final = false): void {
     if (final) {
-      this.blip(1180, 0.09, 0.075, 'triangle');
-      this.blip(1480, 0.14, 0.07, 'triangle', undefined, 0.09);
+      this.blip(740, 0.1, 0.05, 'sine');
+      this.blip(988, 0.16, 0.05, 'sine', undefined, 0.1);
     } else {
-      this.blip(880, 0.05, 0.06, 'triangle');
+      this.blip(660, 0.04, 0.035, 'sine');
     }
   }
 
+  /** A reward: soft, low, and only for things that earned one. */
   chime(): void {
-    this.blip(660, 0.12, 0.07);
-    this.blip(880, 0.16, 0.07, 'sine', undefined, 0.11);
-    this.blip(1320, 0.22, 0.04, 'sine', undefined, 0.22);
+    this.blip(523, 0.14, 0.045);
+    this.blip(784, 0.2, 0.04, 'sine', undefined, 0.12);
   }
 
   /** Contract paid / success flourish. */
@@ -754,7 +813,9 @@ class SoundEngineClass {
     const kind: RadioKind = opts.kind ?? 'control';
 
     const bus = ctx.createGain();
-    bus.gain.value = 0.85;
+    // Measured -7.6 dBFS RMS — louder than anything else in the mix, and it
+    // fires often. Still clear over the engine at this level.
+    bus.gain.value = 0.28;
     /*
      * Radio band-limiting: this pair is most of why it sounds like a speaker
      * rather than like a synthesiser patched into the mix. The band itself is
@@ -1038,7 +1099,9 @@ class SoundEngineClass {
     if (!this.ctx || !this.master || this.wxHissSrc || !this.noiseBuffer) return;
     const hiss = this.loopNoise('highpass', 1400, 0.7, this.busWorld);
     const roar = this.loopNoise('lowpass', 300, 0.9, this.busWorld);
+    const howl = this.loopNoise('bandpass', 600, 7, this.busWorld);
     if (!hiss || !roar) return;
+    if (howl) { this.wxHowlSrc = howl.src; this.wxHowlGain = howl.gain; this.wxHowlFilter = howl.filter; }
     this.wxHissSrc = hiss.src; this.wxHissGain = hiss.gain; this.wxHissFilter = hiss.filter;
     this.wxRoarSrc = roar.src; this.wxRoarGain = roar.gain; this.wxRoarFilter = roar.filter;
   }
@@ -1057,22 +1120,50 @@ class SoundEngineClass {
     const t = this.ctx.currentTime;
     const i = Math.min(1, Math.max(0, intensity));
 
-    // hiss gain, hiss cutoff, roar gain, roar cutoff — one row per condition
-    const V: Record<string, [number, number, number, number]> = {
-      clear:        [0.000, 1400, 0.000, 300],
-      cloudy:       [0.004, 1100, 0.010, 220],
-      strong_winds: [0.030,  900, 0.045, 260],
-      dust_storm:   [0.055, 1150, 0.060, 210],
-      thunderstorm: [0.070, 2000, 0.075, 180],
-      blizzard:     [0.060, 1700, 0.040, 200],
-      fog:          [0.006,  700, 0.014, 160],
+    /*
+     * hiss gain, hiss cutoff, roar gain, roar cutoff, howl gain — one row per
+     * condition. Roughly four times what it was: measured alone, every storm
+     * came out quieter than the engine, so a sandstorm was a faint hiss under
+     * a drone. Inside a real cell the weather is the loudest thing there is.
+     */
+    const V: Record<string, [number, number, number, number, number]> = {
+      clear:        [0.000, 1400, 0.000, 300, 0.000],
+      cloudy:       [0.012, 1100, 0.030, 220, 0.000],
+      strong_winds: [0.080,  900, 0.160, 260, 0.090],
+      dust_storm:   [0.120, 1300, 0.130, 230, 0.030],
+      thunderstorm: [0.140, 2400, 0.110, 180, 0.000],
+      blizzard:     [0.120, 1700, 0.110, 200, 0.100],
+      fog:          [0.012,  700, 0.030, 160, 0.000],
     };
     const row = V[condition] ?? V.clear;
 
-    this.wxHissGain.gain.setTargetAtTime(row[0] * i, t, 0.35);
-    this.wxHissFilter.frequency.setTargetAtTime(row[1], t, 0.5);
-    this.wxRoarGain.gain.setTargetAtTime(row[2] * i, t, 0.4);
+    // Wind does not blow steadily — it comes in gusts, and the gusts are
+    // what make it sound like weather rather than a noise generator
+    const gusty = condition === 'dust_storm' || condition === 'strong_winds' || condition === 'blizzard';
+    const gust = gusty
+      ? 0.72 + 0.2 * Math.sin(t * 0.9) + 0.12 * Math.sin(t * 2.3 + 1.1) + 0.06 * Math.sin(t * 5.7)
+      : 1;
+    this.wxHissGain.gain.setTargetAtTime(row[0] * i * gust, t, 0.25);
+    this.wxHissFilter.frequency.setTargetAtTime(row[1] * (0.9 + gust * 0.15), t, 0.5);
+    this.wxRoarGain.gain.setTargetAtTime(row[2] * i * gust, t, 0.3);
     this.wxRoarFilter.frequency.setTargetAtTime(row[3], t, 0.5);
+    if (this.wxHowlGain && this.wxHowlFilter) {
+      // A narrow band that wanders up and down: the wind moaning in the rigging
+      this.wxHowlGain.gain.setTargetAtTime(row[4] * i * gust, t, 0.3);
+      this.wxHowlFilter.frequency.setTargetAtTime(420 + 380 * (0.5 + 0.5 * Math.sin(t * 0.6)) * gust, t, 0.4);
+    }
+    // The storm drowns the engine, the way it does in a real cockpit
+    const drowns = condition === 'dust_storm' || condition === 'thunderstorm' || condition === 'blizzard' ? 1 : 0.4;
+    this.wxMask += (i * drowns - this.wxMask) * Math.min(1, dt * 1.5);
+
+    // Grit rattling on the windscreen in a sandstorm
+    if (condition === 'dust_storm' && i > 0.3) {
+      this.wxGritTimer -= dt;
+      if (this.wxGritTimer <= 0) {
+        this.wxGritTimer = 0.05 + Math.random() * 0.18 / i;
+        this.noiseBurst(0.03 + Math.random() * 0.04, 3200 + Math.random() * 2600, 0.03 + i * 0.05, 'bandpass', 4);
+      }
+    }
 
     // Thunder rolls on its own inside a live cell, more often the deeper in
     if (condition === 'thunderstorm' && i > 0.25) {
@@ -1113,13 +1204,15 @@ class SoundEngineClass {
     const t = this.ctx.currentTime;
     this.wxHissGain?.gain.setTargetAtTime(0, t, 0.2);
     this.wxRoarGain?.gain.setTargetAtTime(0, t, 0.2);
-    const nodes = [this.wxHissSrc, this.wxRoarSrc];
+    this.wxHowlGain?.gain.setTargetAtTime(0, t, 0.2);
+    this.wxMask = 0;
+    const nodes = [this.wxHissSrc, this.wxRoarSrc, this.wxHowlSrc];
     setTimeout(() => {
       for (const n of nodes) { try { n?.stop(); n?.disconnect(); } catch { /* gone */ } }
     }, 600);
-    this.wxHissSrc = this.wxRoarSrc = null;
-    this.wxHissGain = this.wxRoarGain = null;
-    this.wxHissFilter = this.wxRoarFilter = null;
+    this.wxHissSrc = this.wxRoarSrc = this.wxHowlSrc = null;
+    this.wxHissGain = this.wxRoarGain = this.wxHowlGain = null;
+    this.wxHissFilter = this.wxRoarFilter = this.wxHowlFilter = null;
   }
 
   // ══ GUNFIRE ═════════════════════════════════════════════════════════════
@@ -1145,7 +1238,9 @@ class SoundEngineClass {
     const near = 1 - d;
     // Air absorption: the top of the spectrum goes first
     const bright = 0.25 + near * 0.75;
-    const vol = 0.05 + near * 0.20;
+    // Up ~4 dB: with the engine brought down the guns could stand out, and
+    // being shot at should never be something you have to strain to hear
+    const vol = (0.05 + near * 0.20) * 1.6;
 
     switch (kind) {
       case 'small':
@@ -1240,7 +1335,7 @@ class SoundEngineClass {
     const p = Math.min(1, Math.max(0, proximity));
     // Doppler: approaching pitches up, receding drops. The drop as it goes by
     // is the moment the whole effect exists for.
-    const shift = 1 + Math.max(-0.35, Math.min(0.35, doppler)) * 0.18;
+    const shift = 1 + Math.max(-0.35, Math.min(0.35, doppler)) * 0.3;
 
     /*
      * Audible. At 0.085 peak — and squared, so it collapsed the moment they
@@ -1249,12 +1344,12 @@ class SoundEngineClass {
      * traffic mechanic is about noticing them. Raised, and eased to p^1.5 so
      * it carries further out before fading.
      */
-    this.trafGain.gain.setTargetAtTime(Math.pow(p, 1.5) * 0.34, t, 0.18);
+    this.trafGain.gain.setTargetAtTime(Math.pow(p, 1.3) * 0.25, t, 0.18);
     this.trafOsc.frequency.setTargetAtTime(62 * shift, t, 0.12);
     this.trafOsc2.frequency.setTargetAtTime(93 * shift, t, 0.12);
     this.trafChop.frequency.setTargetAtTime(44 * shift, t, 0.12);
     // Distance eats the top end here too
-    this.trafFilter.frequency.setTargetAtTime(240 + p * 520, t, 0.2);
+    this.trafFilter.frequency.setTargetAtTime(300 + p * 900, t, 0.2);
   }
 
   stopTraffic(): void {
@@ -1363,9 +1458,11 @@ class SoundEngineClass {
     const P = this.engProfile;
     // A radial is all low-order harmonics and lumps; a turboprop is cleaner
     // and sits higher, so the two oscillator shapes swap over.
-    this.engineOsc.type = P.kind === 'radial' ? 'sawtooth' : 'triangle';
-    this.engineOsc2.type = P.kind === 'radial' ? 'square' : 'sawtooth';
-    this.engineFilter.Q.value = P.kind === 'radial' ? 4.2 : 1.5;
+    // Rounder than before (it was sawtooth + square with a resonant peak):
+    // enough edge to be an engine, not so much it buzzes over everything
+    this.engineOsc.type = 'triangle';
+    this.engineOsc2.type = P.kind === 'radial' ? 'sawtooth' : 'triangle';
+    this.engineFilter.Q.value = P.kind === 'radial' ? 1.1 : 0.8;
     // A radial is all thump; a turboprop's drone sits back and lets the
     // whine carry it, which is the difference you actually hear.
     if (this.chopGain) {
@@ -1378,7 +1475,7 @@ class SoundEngineClass {
       // The whine IS the turboprop. At 0.02 it was inaudible under the
       // propeller and every aeroplane still sounded like the same radial.
       this.turbineGain.gain.setTargetAtTime(
-        P.kind === 'turboprop' ? 0.075 + P.count * 0.018 : 0, this.ctx.currentTime, 0.3,
+        P.kind === 'turboprop' ? 0.035 + P.count * 0.008 : 0, this.ctx.currentTime, 0.3,
       );
     }
     if (this.beatGain && this.ctx) {

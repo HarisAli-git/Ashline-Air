@@ -1,8 +1,9 @@
 import Phaser from 'phaser';
 import { drawFighter, type FighterPalette } from './Figures';
 import { drawUndead, undeadKindFor, type CrowdStyle } from './Crowds';
-import { DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, type Town } from './Towns';
+import { DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, DROP_BAND_RUN_PX, GUN_REACH_PX, type Town } from './Towns';
 import type { Hazard } from './Hazards';
+import { depthOffset, extrude, extrudeBox } from './Depth';
 
 /**
  * Something to DO in the cruise.
@@ -127,15 +128,33 @@ export interface DropEvents {
   completed: Array<{ site: DropSite; bonus: number }>;
 }
 
+/**
+ * The drop window to fly into, and — while descending or climbing to it —
+ * the path from the aircraft to where the band begins, in world coordinates.
+ */
+export interface DropGuide {
+  lo: number;
+  hi: number;
+  fade: number;
+  path?: { x0: number; alt0: number; x1: number; alt1: number } | null;
+  /** Which way the aircraft is flying, so the band runs ahead of it. */
+  dir?: 1 | -1;
+}
+
 /** What the drops need to know about the route they are laid along. */
 export interface DropWorld {
   towns: ReadonlyArray<Town>;
   zones: ReadonlyArray<[number, number]>;
   tallestBetween(x0: number, x1: number): number;
   surfaceAt(worldX: number): { altM: number; on: Hazard | null };
+  /** Camp positions the layout reserved — when given, camps go exactly here. */
+  camps?: ReadonlyArray<number>;
 }
 
 const WORLD_PX_PER_M = 9;
+/** Crate wood, and the sky it picks up on its top face. */
+const CRATE = 0x6a5430;
+const CRATE_SKY = 0xc8b890;
 const GRAVITY = 9.81;
 /**
  * Horizontal drag on a falling crate, per second — a drogue chute.
@@ -217,8 +236,9 @@ export class SupplyDrops {
     towns.forEach((t, i) => {
       const s = seed * 17 + i * 29;
       // Not every town is calling for help — some are doing fine. A town
-      // under siege always is.
-      if (towns.length > 1 && !t.besieged && rnd(s) < 0.22) return;
+      // under siege always is, and on a route with only a couple of towns
+      // they all are: every route must have at least two places to drop to.
+      if (towns.length > 2 && !t.besieged && rnd(s) < 0.22) return;
       if (t.refuge && !opts.squaresOnly && rnd(s + 1) < 0.45) {
         const r = t.refuge;
         this.sites.push(this.site(r.x, s, 'rooftop', t.name, r.roofM ?? r.heightM,
@@ -236,11 +256,23 @@ export class SupplyDrops {
     const n = Math.max(1, Math.round(routeEndPx / PER));
     const start = routeEndPx * 0.14, span = routeEndPx * 0.72;
     const nearTown = (x: number): boolean =>
-      towns.some(t => x > t.x0 - 700 * M && x < t.x1 + 700 * M)
+      // Never on top of an airfield, whatever the route length
+      x < 1200 * M || x > routeEndPx - 1500 * M
+      || towns.some(t => x > t.x0 - 700 * M && x < t.x1 + 700 * M)
       // A camp is never put where a gun can reach its drop run
       || (world?.zones ?? []).some(([a, b]) =>
-        x > a - GUN_REACH_PX - DROP_RUN_AFTER_PX && x < b + GUN_REACH_PX + DROP_RUN_BEFORE_PX);
-    for (let i = 0; i < (opts.camps === false ? 0 : n); i++) {
+        x > a - GUN_REACH_PX - DROP_RUN_AFTER_PX && x < b + GUN_REACH_PX + DROP_RUN_BEFORE_PX)
+      // ...and nothing tall standing in the way of the descent to it
+      || (!!world && world.tallestBetween(x - DROP_RUN_BEFORE_PX, x + 90 * M) > 40);
+    // Reserved camps: placed by the route layout, already clear of guns
+    if (world?.camps && opts.camps !== false) {
+      world.camps.forEach((x, i) => {
+        const s = seed * 31 + i * 7;
+        this.sites.push(this.site(x, s, 'camp', CAMP_NAMES[Math.floor(rnd(s + 4) * CAMP_NAMES.length)],
+          0, null, 2 + Math.floor(rnd(seed + i * 5) * 3), 1));
+      });
+    }
+    for (let i = 0; i < (opts.camps === false || world?.camps ? 0 : n); i++) {
       const slice = span / n;
       let x = start + slice * (i + 0.2 + rnd(seed * 13 + i) * 0.6);
       if (nearTown(x)) x = start + slice * (i + 0.5);
@@ -276,7 +308,7 @@ export class SupplyDrops {
        */
       // The run-in and the site, not the far side: once the crates are out
       // the obstacle calls take over again
-      const top = world ? world.tallestBetween(s.x - 340 * M, s.x + 90 * M) : 0;
+      const top = world ? world.tallestBetween(s.x - DROP_BAND_RUN_PX, s.x + 90 * M) : 0;
       s.bandLo = Math.round(Math.max(s.surfaceM + 14, top + 7, 18));
       s.bandHi = s.bandLo + 24;
     }
@@ -294,24 +326,28 @@ export class SupplyDrops {
   }
 
   /** The site the reticle aims at: signalling, ahead or just behind you. */
-  activeSite(planeWorldX: number): DropSite | null {
+  activeSite(planeWorldX: number, dir: 1 | -1 = 1): DropSite | null {
     let best: DropSite | null = null;
     for (const s of this.sites) {
       if (s.state !== 'signalled') continue;
-      if (s.x < planeWorldX - 1400) continue;
+      if ((s.x - planeWorldX) * dir < -1400) continue;
       if (!best || Math.abs(s.x - planeWorldX) < Math.abs(best.x - planeWorldX)) best = s;
     }
     return best;
   }
 
   /** The next site that has called in and is still waiting, for the HUD card. */
-  nextCalling(planeWorldX: number): DropSite | null {
+  nextCalling(planeWorldX: number, dir: 1 | -1 = 1): DropSite | null {
+    let best: DropSite | null = null;
+    let bestAhead = Infinity;
     for (const s of this.sites) {
       if (s.state !== 'inbound' && s.state !== 'signalled') continue;
-      if (s.x < planeWorldX - 1400) continue;
-      return s;
+      const ahead = (s.x - planeWorldX) * dir;
+      if (ahead < -1400 || ahead >= bestAhead) continue;
+      best = s;
+      bestAhead = ahead;
     }
-    return null;
+    return best;
   }
 
   /**
@@ -320,7 +356,7 @@ export class SupplyDrops {
    * It leaves with the aircraft's ground speed and no vertical speed — which is
    * the whole trick of a supply drop, and why the reticle leads the aircraft.
    */
-  release(planeWorldX: number, planeAlt: number, groundSpeedMs: number): boolean {
+  release(planeWorldX: number, planeAlt: number, groundSpeedMs: number, dir: 1 | -1 = 1): boolean {
     if (this.cratesLeft <= 0 || planeAlt < 4) return false;
     this.cratesLeft--;
     // Box-Muller: a gust you cannot predict, larger the higher you let go
@@ -329,7 +365,7 @@ export class SupplyDrops {
     const sigma = DRIFT_BASE + planeAlt * DRIFT_PER_M;
     this.crates.push({
       wx: planeWorldX, alt: planeAlt,
-      vx: groundSpeedMs * WORLD_PX_PER_M, vAlt: 0,
+      vx: dir * groundSpeedMs * WORLD_PX_PER_M, vAlt: 0,
       drift: gauss * sigma * WORLD_PX_PER_M,
       spin: (Math.random() - 0.5) * 6, age: 0, landed: false, landedT: 0, onRoofX: null,
     });
@@ -360,8 +396,10 @@ export class SupplyDrops {
    * the reticle and the real crate can never disagree — a reticle that lies
    * would be worse than none.
    */
-  predictImpact(planeWorldX: number, planeAlt: number, groundSpeedMs: number): { x: number; altM: number } {
-    let x = planeWorldX, alt = planeAlt, vx = groundSpeedMs * WORLD_PX_PER_M, vAlt = 0;
+  predictImpact(
+    planeWorldX: number, planeAlt: number, groundSpeedMs: number, dir: 1 | -1 = 1,
+  ): { x: number; altM: number } {
+    let x = planeWorldX, alt = planeAlt, vx = dir * groundSpeedMs * WORLD_PX_PER_M, vAlt = 0;
     const dt = 1 / 30;
     let floor = 0;
     for (let i = 0; i < 900; i++) {
@@ -379,7 +417,9 @@ export class SupplyDrops {
    * @param inboundPx  how far out a site makes its first call
    * @param signalPx   how far out it puts the flare up
    */
-  update(dt: number, planeWorldX: number, airborne: boolean, inboundPx = 30000, signalPx = 9000): DropEvents {
+  update(
+    dt: number, planeWorldX: number, airborne: boolean, inboundPx = 30000, signalPx = 9000, dir: 1 | -1 = 1,
+  ): DropEvents {
     const ev: DropEvents = { inbound: null, signalled: null, landed: [], completed: [] };
 
     for (const s of this.sites) {
@@ -391,7 +431,7 @@ export class SupplyDrops {
       if (s.inboundT >= 0) s.inboundT += dt;
       if (s.flareT >= 0) s.flareT += dt;
       s.resultT += dt;
-      const ahead = s.x - planeWorldX;
+      const ahead = (s.x - planeWorldX) * dir;
       if (airborne && s.state === 'waiting' && ahead > 0 && ahead < inboundPx) {
         s.state = 'inbound';
         s.inboundT = 0;
@@ -402,10 +442,9 @@ export class SupplyDrops {
         s.flareT = 0;
         if (!ev.signalled) ev.signalled = s;
       }
-      // Flew past: they wait for the next aeroplane
-      if ((s.state === 'signalled' || s.state === 'inbound') && s.x < planeWorldX - 4200) {
-        s.state = 'served';
-      }
+      // Flying past no longer writes them off: the aeroplane can turn round
+      // and come back. A site simply drops out of the card while it is
+      // behind you (see nextCalling), and is there again if you turn.
     }
 
     for (const c of this.crates) {
@@ -495,6 +534,7 @@ export class SupplyDrops {
     g: Phaser.GameObjects.Graphics, scrollX: number, groundY: number, pxPerM: number,
     width: number, t: number, dl: number, crowd: CrowdStyle | null = null,
   ): void {
+    const centreX = width / 2;
     for (const s of this.sites) {
       const sx = s.x - scrollX;
       if (sx < -200 || sx > width + 200) continue;
@@ -525,6 +565,7 @@ export class SupplyDrops {
       const baseY = groundY - s.surfaceM * pxPerM;
       for (let i = 0; i < shown; i++) {
         const cx = sx + 8 + i * 12;
+        extrudeBox(g, cx - 5, cx + 6, baseY, 9, depthOffset(cx, centreX, 9), CRATE, CRATE_SKY);
         g.fillStyle(0x6a5430, 1);
         g.fillRect(cx - 5, baseY - 9, 11, 9);
         g.lineStyle(1, 0x2a2010, 0.9);
@@ -684,7 +725,7 @@ export class SupplyDrops {
     g: Phaser.GameObjects.Graphics, scrollX: number, groundY: number, pxPerM: number,
     width: number, t: number,
     reticle: { x: number; altM: number; onTarget: boolean; spreadM: number } | null,
-    guide: { lo: number; hi: number; fade: number } | null,
+    guide: DropGuide | null,
     planeScreenX = 300,
   ): void {
     /*
@@ -698,19 +739,56 @@ export class SupplyDrops {
     if (guide && guide.fade > 0.01) {
       const yHi = groundY - guide.hi * pxPerM;
       const yLo = groundY - guide.lo * pxPerM;
-      const x0 = Math.max(0, planeScreenX - 60);
+      // From just behind the aircraft to the edge of the screen it faces
+      const back = guide.dir === -1;
+      const x0 = back ? 0 : Math.max(0, planeScreenX - 60);
+      const x1 = back ? Math.min(width, planeScreenX + 60) : width;
       const pulse = 0.75 + Math.sin(t * 3) * 0.25;
       g.fillStyle(0x9fe8b0, 0.07 * guide.fade);
-      g.fillRect(x0, yHi, width - x0, yLo - yHi);
+      g.fillRect(x0, yHi, x1 - x0, yLo - yHi);
       g.lineStyle(1.5, 0x9fe8b0, 0.5 * guide.fade * pulse);
-      for (let x = x0; x < width; x += 22) {
-        g.lineBetween(x, yHi, Math.min(width, x + 12), yHi);
-        g.lineBetween(x, yLo, Math.min(width, x + 12), yLo);
+      for (let x = x0; x < x1; x += 22) {
+        g.lineBetween(x, yHi, Math.min(x1, x + 12), yHi);
+        g.lineBetween(x, yLo, Math.min(x1, x + 12), yLo);
       }
-      // Chevrons on the right edge pointing into it
+      // Chevrons on the leading edge pointing into it
       g.fillStyle(0x9fe8b0, 0.8 * guide.fade * pulse);
       const my = (yHi + yLo) / 2;
-      g.fillTriangle(width - 6, my, width - 16, my - 7, width - 16, my + 7);
+      if (back) g.fillTriangle(6, my, 16, my - 7, 16, my + 7);
+      else g.fillTriangle(width - 6, my, width - 16, my - 7, width - 16, my + 7);
+
+      /*
+       * The way down: a dashed line from the aircraft to where the band
+       * starts, with chevrons marching along it. Descending into a band you
+       * cannot see the end of was guesswork; this is the slope to fly.
+       */
+      if (guide.path) {
+        const p = guide.path;
+        const ax = p.x0 - scrollX, ay = groundY - p.alt0 * pxPerM;
+        const bx = p.x1 - scrollX, by = groundY - p.alt1 * pxPerM;
+        const len = Math.hypot(bx - ax, by - ay);
+        if (len > 10) {
+          const ux = (bx - ax) / len, uy = (by - ay) / len;
+          // How far along it stays on screen, whichever way it points
+          const reach = Math.min(len, Math.max(0, ux >= 0 ? (width - ax) / Math.max(0.2, ux) : ax / Math.max(0.2, -ux)));
+          g.lineStyle(2, 0xffd080, 0.55 * guide.fade);
+          for (let d = 60; d < reach; d += 24) {
+            g.lineBetween(ax + ux * d, ay + uy * d, ax + ux * Math.min(reach, d + 12), ay + uy * Math.min(reach, d + 12));
+          }
+          // Chevrons along the line, moving toward the band
+          const march = (t * 90) % 110;
+          g.fillStyle(0xffd080, 0.85 * guide.fade);
+          for (let d = 90 + march; d < reach; d += 110) {
+            const cx = ax + ux * d, cy = ay + uy * d;
+            const nx = -uy, ny = ux;   // perpendicular
+            g.fillTriangle(
+              cx + ux * 9, cy + uy * 9,
+              cx - ux * 5 + nx * 7, cy - uy * 5 + ny * 7,
+              cx - ux * 5 - nx * 7, cy - uy * 5 - ny * 7,
+            );
+          }
+        }
+      }
     }
 
     // ── Green smoke once they have called, so the site is findable ────────
@@ -725,6 +803,34 @@ export class SupplyDrops {
         g.fillStyle(0x6ad08a, 0.16 * (1 - k * 0.7));
         g.fillEllipse(sx + 14 + drift, base - 6 - k * 120, 8 + k * 22, 6 + k * 14);
       }
+    }
+
+    // ── How many they need, hung over the site ──────────────────────────
+    // The card says it too, but this is what you see when you look at them:
+    // a crate for each one wanted, filled in as they arrive.
+    for (const s of this.sites) {
+      if (s.inboundT < 0 || s.state === 'served' && s.resultT > 3) continue;
+      const sx = s.x - scrollX;
+      if (sx < -80 || sx > width + 80) continue;
+      const base = groundY - s.surfaceM * pxPerM;
+      const y = base - 64;
+      const w = s.need * 13 + 8;
+      g.fillStyle(0x0c0a06, 0.72);
+      g.fillRoundedRect(sx - w / 2, y - 8, w, 16, 3);
+      g.lineStyle(1, 0x9fe8b0, 0.7);
+      g.strokeRoundedRect(sx - w / 2, y - 8, w, 16, 3);
+      for (let i = 0; i < s.need; i++) {
+        const cx = sx - w / 2 + 6 + i * 13;
+        if (i < s.got) {
+          g.fillStyle(0x9fe8b0, 1);
+          g.fillRect(cx, y - 4, 9, 8);
+        } else {
+          g.lineStyle(1.4, 0xffd080, 0.95);
+          g.strokeRect(cx, y - 4, 9, 8);
+        }
+      }
+      g.lineStyle(1, 0x9fe8b0, 0.5);
+      g.lineBetween(sx, y + 8, sx, base - 20);
     }
 
     // ── Flares: up fast, then hang and drift down under a smoke trail ──────
@@ -794,6 +900,7 @@ export class SupplyDrops {
           g.fillStyle(0xcab89a, 0.4 * (1 - k));
           g.fillEllipse(sx, cy - 3, 14 + k * 34, 6 + k * 12);
         }
+        extrudeBox(g, sx - 5, sx + 6, cy, 9, depthOffset(sx, width / 2, 9), CRATE, CRATE_SKY);
         g.fillStyle(0x6a5430, 1);
         g.fillRect(sx - 5, cy - 9, 11, 9);
         continue;
@@ -811,6 +918,8 @@ export class SupplyDrops {
       const pts = [[-5, -4.5], [5, -4.5], [5, 4.5], [-5, 4.5]].map(([x, y]) => ({
         x: sx + x * co - y * si, y: cy + x * si + y * co,
       }));
+      // Tumbling, so the faces it shows change as it turns over
+      extrude(g, pts, depthOffset(sx, width / 2, 9), CRATE, CRATE_SKY, CRATE_SKY);
       g.fillStyle(0x6a5430, 1);
       g.fillPoints(pts, true);
       g.lineStyle(1, 0x2a2010, 0.9);

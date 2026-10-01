@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import type { Hazard } from './Hazards';
 import { mix, type ObstacleStyle } from './Obstacles';
 import { drawWireFence } from './Figures';
+import { depthOffset, extrude, sideWallX, type OutlinePt } from './Depth';
 
 /**
  * Where people actually live, and the wires that feed them.
@@ -104,7 +105,13 @@ export interface Town {
  * No gun may reach any of it unless the site is besieged on purpose.
  * Before = the last ~10 s in the band; after = the climb back out.
  */
-export const DROP_RUN_BEFORE_PX = 1100 * M;
+export const DROP_RUN_BEFORE_PX = 1600 * M;
+/**
+ * Where the green band starts, before the site. From the corridor entry to
+ * here is the descent; from here to the site you are in the band. The band's
+ * floor clears everything in this last stretch.
+ */
+export const DROP_BAND_RUN_PX = 600 * M;
 export const DROP_RUN_AFTER_PX = 450 * M;
 /** The longest reach of any raider weapon (AA, 3200 px) plus a margin. */
 export const GUN_REACH_PX = 3300;
@@ -529,6 +536,135 @@ function windows(
       } else {
         g.fillStyle(TRIM, 0.75);
         g.fillRect(x, y, ww, wh);
+      }
+    }
+  }
+}
+
+/**
+ * The front outline of a building, exactly as drawBuilding draws it, for the
+ * depth pass to carry back into the scene. Round things (silos, the tank on
+ * a water tower) and open yards have none — they are shaded as what they are.
+ */
+function buildingOutline(b: Hazard, sx: number, baseY: number, pxPerM: number): OutlinePt[] | null {
+  const look: TownStyle = b.look ?? 'plain';
+  const top = baseY - b.heightM * pxPerM;
+  if (look === 'marsh' && (b.kind === 'house' || b.kind === 'shack' || b.kind === 'warehouse')) {
+    baseY -= Math.min(2.4, b.heightM * 0.3) * pxPerM;
+  }
+  const h = baseY - top;
+  const hw = b.halfWidth;
+  const L = sx - hw, R = sx + hw;
+  if (look === 'adobe' && (b.kind === 'house' || b.kind === 'shack')) {
+    return [{ x: L, y: baseY }, { x: L, y: top, roof: true }, { x: R, y: top }, { x: R, y: baseY }];
+  }
+  switch (b.kind) {
+    case 'shack': {
+      const eave = top + h * 0.28;
+      return [
+        { x: L, y: baseY }, { x: L, y: eave + 2 }, { x: L - 3, y: eave + 2, roof: true },
+        { x: L - 3, y: top + h * 0.12, roof: true }, { x: R + 3, y: top, roof: true },
+        { x: R + 3, y: eave + 2 }, { x: R, y: eave + 2 }, { x: R, y: baseY },
+      ];
+    }
+    case 'house': {
+      const eave = top + h * 0.38;
+      const apex = sx - hw * 0.08;
+      return [
+        { x: L, y: baseY }, { x: L, y: eave + 1 }, { x: L - 4, y: eave + 1, roof: true },
+        { x: apex, y: top, roof: true }, { x: R + 4, y: eave + 1 }, { x: R, y: eave + 1 }, { x: R, y: baseY },
+      ];
+    }
+    case 'block':
+    case 'highrise': {
+      if (b.kind === 'highrise' && hash(b.seed + 3) < 0.7) {
+        const nL = h * (0.04 + hash(b.seed + 4) * 0.08);
+        const nR = h * (0.02 + hash(b.seed + 5) * 0.1);
+        return [
+          { x: L, y: baseY }, { x: L, y: top + nL, roof: true }, { x: L + hw * 0.6, y: top, roof: true },
+          { x: R - hw * 0.5, y: top + 2, roof: true }, { x: R, y: top + nR }, { x: R, y: baseY },
+        ];
+      }
+      return [{ x: L, y: baseY }, { x: L, y: top - 2, roof: true }, { x: R, y: top - 2 }, { x: R, y: baseY }];
+    }
+    case 'warehouse': {
+      const eave = top + h * 0.3;
+      const teeth = Math.max(2, Math.round(hw / 14));
+      const tw = (hw * 2) / teeth;
+      const pts: OutlinePt[] = [{ x: L, y: baseY }, { x: L, y: eave + 1, roof: true }];
+      for (let i = 0; i < teeth; i++) {
+        pts.push({ x: L + i * tw + tw * 0.8, y: top, roof: true });
+        pts.push({ x: L + (i + 1) * tw, y: eave + 1, roof: i < teeth - 1 });
+      }
+      pts.push({ x: R, y: baseY });
+      return pts;
+    }
+    case 'church': {
+      const naveTop = baseY - h * 0.36;
+      const ridgeX = sx + hw * 0.2, ridgeY = naveTop - h * 0.12;
+      const tw = hw * 0.36;
+      const tx = L + tw + 2;
+      const towerTop = baseY - h * 0.72;
+      // Where the tower's far side meets the nave roof
+      const k = (tx + tw - (L - 3)) / (ridgeX - (L - 3));
+      const meetY = naveTop + 1 + (ridgeY - naveTop - 1) * k;
+      return [
+        { x: L, y: baseY }, { x: L, y: towerTop }, { x: tx - tw - 1.5, y: towerTop, roof: true },
+        { x: tx, y: top, roof: true }, { x: tx + tw + 1.5, y: towerTop }, { x: tx + tw, y: towerTop },
+        { x: tx + tw, y: meetY, roof: true }, { x: ridgeX, y: ridgeY, roof: true },
+        { x: R + 3, y: naveTop + 1 }, { x: R, y: naveTop + 1 }, { x: R, y: baseY },
+      ];
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * The part of a building behind its front: roof and the side wall facing the
+ * middle of the screen. Drawn for every building in view BEFORE any fronts,
+ * so the next building along covers this one's side wall the way it would.
+ */
+export function drawBuildingDepth(
+  g: Phaser.GameObjects.Graphics,
+  b: Hazard, sx: number, baseY: number, pxPerM: number, style: ObstacleStyle, centreX: number,
+): void {
+  const pts = buildingOutline(b, sx, baseY, pxPerM);
+  if (!pts) return;
+  const look: TownStyle = b.look ?? 'plain';
+  const hw = b.halfWidth;
+  const o = depthOffset(sx, centreX, Math.max(20, Math.min(64, hw * 1.25)));
+  const wall = wallFor(b.seed, style, look);
+  const flat = b.kind === 'block' || b.kind === 'highrise' || (look === 'adobe' && (b.kind === 'house' || b.kind === 'shack'));
+  const roof = look === 'alpine' ? SNOW
+    : flat ? mix(wall, 0x8a8478, 0.35)
+      : b.kind === 'warehouse' ? mix(0x33302a, style.rim, 0.1)
+        : b.kind === 'shack' ? mix(0x5a3a22, style.rim, 0.12)
+          : mix(0x2c2420, style.rim, 0.08);
+  extrude(g, pts, o, wall, roof, style.rim);
+
+  // Tower blocks: the floors and windows carry round the corner
+  if (b.kind === 'block' || b.kind === 'highrise') {
+    const L = sx - hw, R = sx + hw;
+    const side = sideWallX(L, R, o);
+    if (side === null) return;
+    const top = baseY - b.heightM * pxPerM;
+    const start = (side === L ? pts[1].y : pts[pts.length - 2].y) + 8;
+    const night = 1 - style.daylight;
+    for (let y = top + 11; y < baseY - 4; y += 11) {
+      if (y < start) continue;
+      g.lineStyle(1.1, TRIM, 0.35);
+      g.lineBetween(side, y, side + o.ox, y + o.oy);
+      for (const f of [0.22, 0.58]) {
+        const r = hash(b.seed + y * 1.3 + f * 17);
+        if (r < 0.15) continue;
+        const lit = night > 0.35 && r > 0.88;
+        g.fillStyle(lit ? LAMP : TRIM, lit ? 0.5 + night * 0.4 : 0.7);
+        const x0 = side + o.ox * f, y0 = y + 3 + o.oy * f;
+        const dx = o.ox * 0.2, dy = o.oy * 0.2;
+        g.beginPath();
+        g.moveTo(x0, y0); g.lineTo(x0 + dx, y0 + dy); g.lineTo(x0 + dx, y0 + dy + 5.5); g.lineTo(x0, y0 + 5.5);
+        g.closePath(); g.fillPath();
       }
     }
   }

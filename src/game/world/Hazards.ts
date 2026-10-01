@@ -1,12 +1,32 @@
 import Phaser from 'phaser';
-import { drawObstacle, type ObstacleKind, type ObstacleStyle } from './Obstacles';
+import { drawObstacle, drawObstacleDepth, type ObstacleKind, type ObstacleStyle } from './Obstacles';
 import { layoutCountryside, drawProp, type Prop } from './Countryside';
 import type { BiomeId } from './Biomes';
 import {
   layoutSettlements, layoutTrainingSettlements, isBuilding, spanBand, townStyleFor,
-  DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, drawBuilding, drawTownGround, drawPole, drawSpan,
+  DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, GUN_REACH_PX, drawBuilding, drawBuildingDepth, drawTownGround, drawPole, drawSpan,
   type BuildingKind, type Span, type Town,
 } from './Towns';
+
+/** Clear air after the departure strip, world px (3 km). */
+const CLIMB_OUT_PX = 3000 * 9;
+/** Clear air before the destination's approach starts, world px (2.5 km). */
+const APPROACH_PX = 2500 * 9;
+
+/*
+ * The surfaces nothing solid may stand above, rising from each runway.
+ *
+ * Lone masts went anywhere in the route span, which starts 350 m past the
+ * departure strip and stops 900 m short of the destination (RoutePreview's
+ * routeSpanPx) — so a 78 m mast could stand a kilometre out on final, right
+ * where the 4-degree glide-path guide puts you at about 70 m. Following the
+ * guide flew you into it. Now the climb-out has a 4-degree surface and the
+ * approach a 2.6-degree one, both well under what you actually fly.
+ */
+const SPAN_AFTER_ORIGIN_M = 350;
+const SPAN_BEFORE_DEST_M = 900;
+const CLIMB_SURFACE = Math.tan((4 * Math.PI) / 180);
+const APPROACH_SURFACE = Math.tan((2.6 * Math.PI) / 180);
 
 /**
  * Everything along the route that can actually hurt you.
@@ -85,6 +105,13 @@ export class Hazards {
   private hostileOnly: Array<ReadonlyArray<string> | null> = [];
   private spanList: Span[] = [];
   private townList: Town[] = [];
+  /**
+   * Where the open-country drop camps go, world px. Chosen BEFORE the guns
+   * and the lone obstacles, so both have to keep clear of them — camps used
+   * to be placed last, into whatever gun-free gaps were left, and on a short
+   * route there usually were none.
+   */
+  private camps: number[] = [];
   private props: Prop[] = [];
 
   /**
@@ -100,6 +127,7 @@ export class Hazards {
     this.hostileOnly = [];
     this.spanList = [];
     this.townList = [];
+    this.camps = [];
     const span = endPx - startPx;
     if (span <= 0) return;
 
@@ -108,6 +136,41 @@ export class Hazards {
     const built = layoutSettlements(startPx, endPx, seed);
     this.townList = built.towns;
     this.spanList = built.spans;
+
+    /*
+     * Then the camps. Every route gets at least two places to drop to — a
+     * route with one town gets a camp as well, a route with none gets two —
+     * plus roughly one more per twelve kilometres. Each camp sits in its own
+     * slice, clear of the towns, and its run-in is reserved the same way a
+     * town's is, so nothing tall and no gun can take it back.
+     */
+    {
+      const M = 9;
+      const wanted = Math.max(2 - Math.min(2, built.towns.length), Math.round(span / (12000 * M)));
+      const lo = startPx + 900 * M, hi = endPx - 600 * M;
+      const clearOfTowns = (x: number): boolean =>
+        built.towns.every(t => x < t.x0 - 700 * M || x > t.x1 + 700 * M);
+      const clearOfCamps = (x: number): boolean =>
+        this.camps.every(c => Math.abs(c - x) > DROP_RUN_BEFORE_PX + DROP_RUN_AFTER_PX);
+      if (wanted > 0 && hi > lo) {
+        const slice = (hi - lo) / wanted;
+        for (let i = 0; i < wanted; i++) {
+          const ideal = lo + slice * (i + 0.3 + hash(seed * 19 + i) * 0.4);
+          // Nearest spot to the ideal that is clear of towns and other camps
+          let pick: number | null = null;
+          for (let k = 0; k <= 40 && pick === null; k++) {
+            for (const sgn of [1, -1]) {
+              const x = ideal + sgn * k * 150 * M;
+              if (x < lo || x > hi) continue;
+              if (clearOfTowns(x) && clearOfCamps(x)) { pick = x; break; }
+            }
+          }
+          if (pick !== null) this.camps.push(pick);
+        }
+        this.camps.sort((a, b) => a - b);
+      }
+      for (const c of this.camps) built.reserved.push([c - DROP_RUN_BEFORE_PX, c + DROP_RUN_AFTER_PX]);
+    }
     for (const t of built.towns) this.list.push(...t.buildings);
     for (const s of built.substations) this.list.push(s.hazard);
     this.list.push(...built.pylons);
@@ -131,8 +194,15 @@ export class Hazards {
       const band = HEIGHT_BAND[kind];
       const heightM = band[0] + hash(i++) * (band[1] - band[0]);
       const half = HALF_WIDTH[kind];
-      const clear = !built.reserved.some(([ra, rb]) => x + half + 200 > ra && x - half - 200 < rb);
-      if (clear) this.list.push({ x, kind, heightM, halfWidth: half, seed: i, warn: true });
+      // Nothing tall in a town's descent corridor either — the glide path
+      // down to a drop has to be clear of more than just guns
+      const corridors = built.towns.map(t => [t.x0 - DROP_RUN_BEFORE_PX, t.x1 + DROP_RUN_AFTER_PX] as [number, number]);
+      const clear = ![...built.reserved, ...corridors].some(([ra, rb]) => x + half + 200 > ra && x - half - 200 < rb);
+      // …and nothing poking up through the climb-out or the final approach
+      const pastRunwayM = (x - startPx) / 9 + SPAN_AFTER_ORIGIN_M;
+      const shortOfRunwayM = (endPx - x) / 9 + SPAN_BEFORE_DEST_M;
+      const ceilingM = Math.min((pastRunwayM + 150) * CLIMB_SURFACE, shortOfRunwayM * APPROACH_SURFACE - 6);
+      if (clear && heightM <= ceilingM) this.list.push({ x, kind, heightM, halfWidth: half, seed: i, warn: true });
       x += minGap + hash(i++) * 3000;
     }
     this.list.sort((p, q) => p.x - q.x);
@@ -151,8 +221,10 @@ export class Hazards {
      * guns effectively vanished from the game. One stretch per ~4.5 km keeps
      * a crossing every half-minute or so whatever the aircraft.
      */
-    const PX_PER_ZONE = 3.2 * 1000 * 9;   // 3.2 km at WORLD_PX_PER_M
-    const zoneCount = Math.max(2, Math.min(18, Math.round(span / PX_PER_ZONE)));
+    // 2.6 km: denser than the old 3.2, because the drop runs now take their
+    // share of the route and a zone that cannot fit in its slice is dropped
+    const PX_PER_ZONE = 2.6 * 1000 * 9;
+    const zoneCount = Math.max(2, Math.min(24, Math.round(span / PX_PER_ZONE)));
 
     /*
      * And they must be SPREAD. The previous version fed `z` to the hash but
@@ -187,11 +259,28 @@ export class Hazards {
     // The riflemen round a besieged town must not reach a neighbour's run
     if (besieged) {
       const [a, b] = siegeOf(besieged);
-      const safe = towns.every(t => t === besieged || runOf(t)[1] <= a || runOf(t)[0] >= b);
+      const safe = towns.every(t => t === besieged || runOf(t)[1] <= a || runOf(t)[0] >= b)
+        && this.camps.every(c => c + DROP_RUN_AFTER_PX + GUN_REACH_PX <= a || c - DROP_RUN_BEFORE_PX - GUN_REACH_PX >= b);
       if (!safe) besieged = null;
     }
     if (besieged) besieged.besieged = true;
     const keepOut: Array<[number, number]> = towns.filter(t => t !== besieged).map(runOf);
+    // The camps' run-ins are kept out of gun range exactly like the towns'
+    for (const c of this.camps) {
+      keepOut.push([c - DROP_RUN_BEFORE_PX - GUN_REACH_PX, c + DROP_RUN_AFTER_PX + GUN_REACH_PX]);
+    }
+    /*
+     * The climb-out and the final approach are nobody's ground.
+     *
+     * Furniture could start 350 m past the end of the strip, and a raider
+     * zone with it — so a new pilot, still at forty metres with the flaps out
+     * and no speed, was inside the reach of every gun on the route. That is
+     * not a decision, it is a tax on taking off. Three kilometres to climb in
+     * and two and a half to set up the approach are kept clear of anything
+     * that shoots, guns' reach included.
+     */
+    keepOut.push([startPx - GUN_REACH_PX, startPx + CLIMB_OUT_PX + GUN_REACH_PX]);
+    keepOut.push([endPx - APPROACH_PX - GUN_REACH_PX, endPx + GUN_REACH_PX]);
     const clashes = (a: number, b: number): boolean => keepOut.some(([p, q]) => a < q && b > p);
 
     const slice = span / zoneCount;
@@ -256,9 +345,13 @@ export class Hazards {
     } else {
       this.props = [];
     }
-    const zone: [number, number] = [km(routeKm * 0.64), km(routeKm * 0.64 + 0.7)];
+    // Long enough, and armed well enough, that the cruise height you were
+    // taught does NOT keep you out of it: machine guns reach 165 m, so the
+    // lesson is the real one — climb above them or get shot at.
+    const zone: [number, number] = [km(routeKm * 0.62), km(routeKm * 0.62 + 1.1)];
     this.hostile.push(zone);
-    this.hostileOnly = [['nest']];
+    this.hostileOnly = [['nest', 'technical']];
+    this.camps = [];
     const lineEndX = built.towns[0].poles[0].x;
     return { mastX, lineEndX, zone };
   }
@@ -380,11 +473,14 @@ export class Hazards {
    * Skips what we are already comfortably above, so the klaxon names the
    * thing we would actually hit rather than the shed in front of it.
    */
-  ahead(worldX: number, rangePx: number, altM = -Infinity): { hazard: Hazard; distancePx: number } | null {
+  ahead(
+    worldX: number, rangePx: number, altM = -Infinity, dir: 1 | -1 = 1,
+  ): { hazard: Hazard; distancePx: number } | null {
     let best: { hazard: Hazard; distancePx: number } | null = null;
     for (const h of this.list) {
       if (h.warn === false) continue;
-      const d = h.x - worldX;
+      // "Ahead" is whichever way the aeroplane is pointing — it can turn back
+      const d = (h.x - worldX) * dir;
       if (d <= 0 || d >= rangePx) continue;
       if (altM > h.heightM + 12) continue;
       if (!best || d < best.distancePx) best = { hazard: h, distancePx: d };
@@ -401,6 +497,8 @@ export class Hazards {
   }
 
   get towns(): ReadonlyArray<Town> { return this.townList; }
+  /** Open-country drop camps, world px — see generate. */
+  get campAnchors(): ReadonlyArray<number> { return this.camps; }
   get spans(): ReadonlyArray<Span> { return this.spanList; }
 
   isHostile(worldX: number): boolean {
@@ -449,15 +547,29 @@ export class Hazards {
       }
     }
 
+    const centreX = width / 2;
     // The leftovers in the open country, first — everything else stands in front
     for (const p of this.props) {
       const sx = p.x - scrollX;
-      if (sx > -120 && sx < width + 120) drawProp(g, p, sx, baseY, pxPerM, t, style);
+      if (sx > -120 && sx < width + 120) drawProp(g, p, sx, baseY, pxPerM, t, style, centreX);
     }
     // Towns: the road and barricades, then the buildings standing on them
     for (const town of this.townList) {
       if (town.x1 - scrollX < -200 || town.x0 - scrollX > width + 200) continue;
       drawTownGround(g, town, scrollX, baseY, width, style);
+    }
+    /*
+     * Depth before any fronts: every roof and side wall in view, from the
+     * edges of the screen inward, so a building nearer the middle covers the
+     * wall of the one beside it — and every front then covers the depth of
+     * whatever stands behind it.
+     */
+    const inView = this.list.filter(h => h.x - scrollX > -140 && h.x - scrollX < width + 140);
+    inView.sort((a, b) => Math.abs(b.x - scrollX - centreX) - Math.abs(a.x - scrollX - centreX));
+    for (const h of inView) {
+      const sx = h.x - scrollX;
+      if (isBuilding(h.kind)) drawBuildingDepth(g, h, sx, baseY, pxPerM, style, centreX);
+      else drawObstacleDepth(g, h.kind, sx, baseY, baseY - h.heightM * pxPerM, h.halfWidth, h.seed, style, centreX);
     }
     for (const h of this.list) {
       const sx = h.x - scrollX;

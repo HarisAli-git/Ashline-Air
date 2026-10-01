@@ -53,21 +53,34 @@ export interface WeatherHazardReport {
  * severe icing around twenty — enough to decide to descend and get there.
  */
 const ICING: Partial<Record<WeatherCondition, number>> = {
-  blizzard: 0.028,
-  thunderstorm: 0.015,
-  fog: 0.006,
+  blizzard: 0.016,
+  thunderstorm: 0.008,
+  fog: 0.003,
 };
 
-/** Grit ingestion per second. */
+/**
+ * Grit ingestion per second.
+ *
+ * At 0.075 a dust storm filled the intake in half a minute and then ground a
+ * third of the airframe away every minute after — crossing one cell at cruise
+ * cost more hull than a gun nest. Sand is now a nuisance with a clock on it:
+ * the caution comes a good while in, and leaving the cell clears it.
+ */
 const GRIT: Partial<Record<WeatherCondition, number>> = {
-  dust_storm: 0.075,
-  strong_winds: 0.012,
+  dust_storm: 0.03,
+  strong_winds: 0.004,
 };
 
-/** Below this altitude the air is warm enough that ice comes off. */
-const MELT_ALTITUDE = 55;
+/**
+ * Below this altitude the air is warm enough that ice comes off. It was 55 m —
+ * "descend" meant diving most of the way to the ground from a normal cruise.
+ * A hundred metres is a step down, not a dive.
+ */
+const MELT_ALTITUDE = 100;
 /** Mean seconds between strikes while inside a thunderstorm. */
-const STRIKE_MEAN_SECONDS = 26;
+const STRIKE_MEAN_SECONDS = 45;
+/** Weather alone wears the airframe down to here and no further. */
+const WEATHER_HULL_FLOOR = 35;
 
 export class WeatherHazards {
   private ice = 0;
@@ -131,23 +144,26 @@ export class WeatherHazards {
       const lowFactor = clamp(1 - state.altitude / 700, 0.3, 1);
       this.grit = clamp(this.grit + gritRate * lowFactor * state.throttle * dt, 0, 1);
     } else {
-      this.grit = clamp(this.grit - 0.045 * dt, 0, 1);
+      this.grit = clamp(this.grit - 0.08 * dt, 0, 1);
     }
 
     // ── Effects on the aircraft ───────────────────────────────────────────
     // Ice is heavy and the wrong shape: it destroys lift and piles on drag,
     // so the stall creeps up on you at a speed that was comfortable a minute
     // ago. This is what makes a blizzard a problem you have to solve.
-    state.modifiers.liftMult = 1 - this.ice * 0.42;
-    state.modifiers.dragMult = 1 + this.ice * 0.85 + this.grit * 0.15;
+    state.modifiers.liftMult = 1 - this.ice * 0.28;
+    state.modifiers.dragMult = 1 + this.ice * 0.55 + this.grit * 0.12;
 
     // Grit cooks the engine and grinds it away
     if (this.grit > 0.05) {
-      state.engineTemp = clamp(state.engineTemp + this.grit * 0.055 * dt, 0, 1);
-      damage += this.grit * 0.55 * dt;
+      state.engineTemp = clamp(state.engineTemp + this.grit * 0.03 * dt, 0, 1);
+      if (this.grit > 0.3) damage += (this.grit - 0.3) * 0.25 * dt;
     }
     // Ice on the airframe scours it too, once there is a lot of it
-    if (this.ice > 0.6) damage += (this.ice - 0.6) * 1.2 * dt;
+    if (this.ice > 0.7) damage += (this.ice - 0.7) * 0.8 * dt;
+    // Wear, not a death sentence: the weather can take the airframe down to
+    // a worn floor, and from there it is guns and rocks that finish it
+    damage = Math.min(damage, Math.max(0, state.integrity - WEATHER_HULL_FLOOR));
 
     // ── Lightning ─────────────────────────────────────────────────────────
     if (condition === 'thunderstorm' && state.altitude > 25) {
@@ -157,13 +173,13 @@ export class WeatherHazards {
         struck = true;
         killEngine = engineRunning;
         this.blackout = 3.2 + Math.random() * 2.2;
-        damage += 8 + Math.random() * 7;
+        damage += 4 + Math.random() * 4;
       }
     }
 
     // ── Grit-driven engine failure ────────────────────────────────────────
     // Not a cliff: the odds climb with how much sand has gone through it.
-    if (this.grit > 0.45 && engineRunning && Math.random() < (this.grit - 0.45) * 0.28 * dt) {
+    if (this.grit > 0.7 && engineRunning && Math.random() < (this.grit - 0.7) * 0.15 * dt) {
       killEngine = true;
     }
 
@@ -185,7 +201,7 @@ export class WeatherHazards {
     else if (this.ice > 0.6) c = `SEVERE ICING ${Math.round(this.ice * 100)}% — DESCEND`;
     else if (this.ice > 0.22) c = `ICING ${Math.round(this.ice * 100)}% — DESCEND`;
     else if (this.grit > 0.5) c = 'SAND INGESTION — CLIMB OR THROTTLE BACK';
-    else if (this.grit > 0.22) c = 'SAND IN THE INTAKE';
+    else if (this.grit > 0.3) c = 'SAND IN THE INTAKE';
     this.lastCaution = c;
     return c;
   }

@@ -39,6 +39,10 @@ interface UnlockRule {
  * pace the hangar does and there is always a next thing to be working toward.
  */
 /*
+ * Ten deliveries to the far end of the chart, not fourteen: every rung used
+ * to ask for a third more runs than it needed to, and a tester could play an
+ * evening and still be looking at locked fields.
+ *
  * Ordered by what you can actually REACH, not by how far away it looks.
  *
  * The previous table was written before the map rework moved the settlements,
@@ -62,20 +66,20 @@ const UNLOCKS: UnlockRule[] = [
   },
   {
     settlementId: 'saltmarsh_docks',
-    deliveries: 5,
-    reputation: 12,
+    deliveries: 4,
+    reputation: 8,
     blurb: 'The barge crews have vouched for you. Saltmarsh Docks is on your chart — mind the channels, they are not all empty.',
   },
   {
     settlementId: 'irongate_station',
-    deliveries: 9,
-    reputation: 35,
+    deliveries: 7,
+    reputation: 24,
     blurb: 'The Guild has seen your manifests. Irongate Station will take your traffic — if you turn up in something that can carry it.',
   },
   {
     settlementId: 'cinder_flats',
-    deliveries: 14,
-    reputation: 70,
+    deliveries: 10,
+    reputation: 45,
     blurb: 'Word reached the Flats that you fly through trouble instead of around it. They want a word — and they pay.',
   },
 ];

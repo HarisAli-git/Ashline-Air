@@ -211,7 +211,7 @@ export class WeatherField {
     return c.peak * Math.min(grow, fade);
   }
 
-  sample(worldX: number): WeatherSample {
+  sample(worldX: number, dir: 1 | -1 = 1): WeatherSample {
     let condition: WeatherCondition = 'clear';
     let intensity = 0;
     let draught = 0;
@@ -224,9 +224,11 @@ export class WeatherField {
       const d = worldX - c.x;                 // + = we are past the centre
       const inside = Math.abs(d) / c.radius;
 
-      // Track the nearest cell in front for the horizon art and the warning
-      if (c.x + c.radius > worldX) {
-        const gap = (c.x - c.radius) - worldX;
+      // Track the nearest cell in front for the horizon art and the warning —
+      // in front meaning the way the aeroplane is pointing
+      const rel = (c.x - worldX) * dir;
+      if (rel + c.radius > 0) {
+        const gap = rel - c.radius;
         if (gap < bestAheadDist) { bestAheadDist = gap; ahead = c; }
         if (gap > 0) distanceToEdge = Math.min(distanceToEdge, gap);
       }

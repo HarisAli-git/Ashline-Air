@@ -46,7 +46,21 @@ export const GAMEPLAY_KM_PER_LORE_KM = 1 / 4.5;
  * around a cell, an overheating engine held at full throttle - not the
  * baseline the contract board hands you.
  */
-export const FUEL_RESERVE = 0.22;
+export const FUEL_RESERVE = 0.2;
+
+/**
+ * The share of full throttle the published cruise speed takes.
+ *
+ * Range used to be worked out as if the whole leg were flown at FULL throttle
+ * and at cruise speed at once — burn and speed from two different power
+ * settings — and then the reserve came off the top of that. Measured in the
+ * flight model, every aircraft goes 35-55% further than the board allowed, so
+ * a starter aeroplane that could comfortably fly 25 km was offered nothing
+ * past 17, and whole destinations sat out of reach for no reason the pilot
+ * could see. At 85% power the planes make their book cruise speed, and that
+ * is the burn a route is planned on.
+ */
+const CRUISE_POWER = 0.85;
 
 /** Lore distance between two settlements, km. */
 export function loreKmBetween(a: SettlementDefinition, b: SettlementDefinition): number {
@@ -68,7 +82,7 @@ export function routeKmBetween(a: SettlementDefinition, b: SettlementDefinition)
 export function rangeKm(def: AircraftDefinition): number {
   const s = def.stats;
   if (s.fuelBurnRate <= 0) return Infinity;
-  const enduranceMin = s.fuelCapacity / s.fuelBurnRate;
+  const enduranceMin = s.fuelCapacity / (s.fuelBurnRate * CRUISE_POWER);
   return (s.cruiseSpeed / 60) * enduranceMin;
 }
 

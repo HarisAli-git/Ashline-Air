@@ -1,4 +1,6 @@
 import Phaser from 'phaser';
+import { AircraftModel, type ModelLight } from '../entities/aircraft/render/AircraftModel';
+import { specFor } from '../entities/aircraft/render/AircraftVisualSpec';
 
 /**
  * Other people are still flying out here.
@@ -112,7 +114,44 @@ export class AirTraffic {
   private seed = 1;
   private elapsed = 0;
 
+  /**
+   * Give traffic a scene to draw real aeroplanes in. Without it (the route
+   * preview builds an AirTraffic with no scene) the old flat drawing is used.
+   */
+  attachModels(scene: Phaser.Scene, depth: number): void {
+    this.scene = scene;
+    this.modelDepth = depth;
+  }
+
+  private scene: Phaser.Scene | null = null;
+  private modelDepth = 5;
+  private readonly models = new Map<TrafficPlane, AircraftModel>();
+
+  /** On-screen length of each kind, px — the same scale as your own aircraft. */
+  private static readonly SIZE: Record<TrafficKind, number> = {
+    hauler: 196, courier: 152, ultralight: 104, gunship: 196,
+  };
+
+  private modelFor(p: TrafficPlane): AircraftModel {
+    let m = this.models.get(p);
+    if (!m) {
+      const spec = specFor(`traffic_${p.kind}`);
+      const g = spec.gear;
+      m = new AircraftModel(this.scene!, spec, g.hingeY + g.strutLen + g.wheelR, 'low');
+      m.setDepth(this.modelDepth);
+      this.models.set(p, m);
+    }
+    return m;
+  }
+
+  private dropModels(keep: (p: TrafficPlane) => boolean): void {
+    for (const [p, m] of this.models) {
+      if (!keep(p)) { m.destroy(); this.models.delete(p); }
+    }
+  }
+
   reset(seed: number): void {
+    this.dropModels(() => false);
     this.list = [];
     this.wrecks = [];
     this.seed = seed;
@@ -133,6 +172,8 @@ export class AirTraffic {
       planeWorldX: number;
       planeAlt: number;
       planeSpeedPx: number;   // player's ground speed in world px/s
+      /** Which way the player is flying: +1 down the route, -1 back up it. */
+      heading?: 1 | -1;
       airborne: boolean;
       routeEndPx: number;
       /** The Director's budget, 0-1. Sets the gap between encounters and how
@@ -193,7 +234,7 @@ export class AirTraffic {
     // Nothing new joins the party once you are on the approach — a traffic
     // conflict thrown at you while you are configured to land is not a
     // decision, it is an ambush.
-    if (ctx.routeEndPx - ctx.planeWorldX < 3000) return;
+    if (Math.abs(ctx.routeEndPx - ctx.planeWorldX) < 3000) return;
     const pressure = Phaser.Math.Clamp(ctx.pressure ?? 0.5, 0, 1);
     // In a respite two aeroplanes at once would undo the quiet, so the second
     // slot only opens when the Director is actually spending.
@@ -206,9 +247,10 @@ export class AirTraffic {
   }
 
   private spawn(
-    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; routeEndPx: number },
+    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; routeEndPx: number; heading?: 1 | -1 },
     pressure = 0.5,
   ): void {
+    const h = ctx.heading ?? 1;
     const id = this.seed * 7919 + Math.floor(this.elapsed * 13);
     const r = rnd(id);
     const headOn = r < 0.4;
@@ -241,15 +283,15 @@ export class AirTraffic {
     let wx: number, vx: number, dir: 1 | -1;
     if (headOn) {
       // Well beyond the screen, so the advisory lands before they are visible
-      wx = ctx.planeWorldX + 5200 + rnd(id + 19) * 2600;
-      vx = -(300 + rnd(id + 23) * 230);
-      dir = -1;
+      wx = ctx.planeWorldX + h * (5200 + rnd(id + 19) * 2600);
+      vx = -h * (300 + rnd(id + 23) * 230);
+      dir = -h as 1 | -1;
     } else {
       // Same direction, slower: you run them down over several seconds
       const slower = Phaser.Math.Clamp(ctx.planeSpeedPx * (0.55 + rnd(id + 29) * 0.28), 140, 420);
-      wx = ctx.planeWorldX + 2600 + rnd(id + 31) * 2200;
-      vx = slower;
-      dir = 1;
+      wx = ctx.planeWorldX + h * (2600 + rnd(id + 31) * 2200);
+      vx = h * slower;
+      dir = h;
     }
 
     // Pilot quality is rolled per aeroplane and never shown. You find out
@@ -291,12 +333,15 @@ export class AirTraffic {
    */
   private think(
     p: TrafficPlane, dt: number,
-    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; airborne: boolean },
+    ctx: { planeWorldX: number; planeAlt: number; planeSpeedPx: number; airborne: boolean; heading?: 1 | -1 },
   ): void {
     if (!ctx.airborne) return;
 
-    const dx = p.wx - ctx.planeWorldX;
-    const closure = ctx.planeSpeedPx - p.vx;
+    // Measured along the way the player is pointing, so a turn-around does
+    // not leave every other pilot convinced you are still going the other way
+    const h = ctx.heading ?? 1;
+    const dx = (p.wx - ctx.planeWorldX) * h;
+    const closure = (h * ctx.planeSpeedPx - p.vx) * h;
     const dAlt = p.alt - ctx.planeAlt;
     const converging = closure > 20 && dx > 0;
     const seconds = converging ? dx / closure : Infinity;
@@ -342,12 +387,12 @@ export class AirTraffic {
     if (p.alt < TRAFFIC_FLOOR_M && p.vAlt < 0) p.vAlt *= Math.max(0, 1 - dt * 4);
   }
 
-  advisory(planeWorldX: number, planeAlt: number, planeSpeedPx: number): TrafficAdvisory | null {
+  advisory(planeWorldX: number, planeAlt: number, planeSpeedPx: number, heading: 1 | -1 = 1): TrafficAdvisory | null {
     let best: TrafficAdvisory | null = null;
     for (const p of this.list) {
       if (p.doom !== null) continue;
-      const dx = p.wx - planeWorldX;
-      const closure = planeSpeedPx - p.vx;     // px/s we are eating the gap at
+      const dx = (p.wx - planeWorldX) * heading;
+      const closure = (heading * planeSpeedPx - p.vx) * heading;     // px/s we are eating the gap at
       if (closure <= 20 || dx <= 0) continue;
       const seconds = dx / closure;
       if (seconds > ADVISORY_SECONDS) continue;
@@ -374,10 +419,14 @@ export class AirTraffic {
       if (p.doom !== null) continue;
       const dx = Math.abs(p.wx - planeWorldX);
       const dAlt = Math.abs(p.alt - planeAlt);
-      // Audible out to about 1.8 km horizontally and 120 m vertically
-      const h = Math.max(0, 1 - dx / 1600);
-      const v = Math.max(0, 1 - dAlt / 120);
-      const prox = h * h * v;
+      /*
+       * Audible from about 780 m out and 200 m above or below. The old 1600 px
+       * — 180 m — meant an aeroplane passing close enough to see was only
+       * heard for the second it was on top of you, so traffic was silent.
+       */
+      const h = Math.max(0, 1 - dx / 7000);
+      const v = Math.max(0, 1 - dAlt / 200);
+      const prox = Math.pow(h, 1.6) * v;
       if (prox <= proximity) continue;
       proximity = prox;
       // Positive while it is still coming toward us
@@ -405,7 +454,11 @@ export class AirTraffic {
     width: number,
     t: number,
     dl: number,
+    light: ModelLight | null = null,
   ): void {
+    // Aeroplanes that have left the route take their models with them
+    if (this.models.size) this.dropModels(p => this.list.includes(p));
+    for (const m of this.models.values()) m.setVisible(false);
     // Burning wrecks on the ground, where they came down
     for (const w of this.wrecks) {
       const sx = w.wx - scrollX;
@@ -444,8 +497,38 @@ export class AirTraffic {
       if (sx < -160 || sx > width + 160) continue;
       const sy = groundScreenY - p.alt * pxPerM;
       if (sy < -140 || sy > 4000) continue;
-      this.drawPlane(g, sx, sy, p, t, dl);
+      if (this.scene && light) this.drawModel(p, sx, sy, t, light);
+      else this.drawPlane(g, sx, sy, p, t, dl);
     }
+  }
+
+  /**
+   * One aircraft as a lit 3D model — the same renderer as your own, with an
+   * airframe old enough to still be flying out here. It banks as it turns,
+   * pitches with its climb and descent, and goes down in a real spiral.
+   */
+  private drawModel(p: TrafficPlane, sx: number, sy: number, t: number, light: ModelLight): void {
+    const m = this.modelFor(p);
+    const spec = specFor(`traffic_${p.kind}`);
+    const scale = AirTraffic.SIZE[p.kind] / spec.length;
+    const speed = Math.max(20, Math.abs(p.vx) / 9);
+    const climb = Math.atan2(p.vAlt, speed);
+    const pitch = p.doom === null ? Phaser.Math.Clamp(climb, -0.3, 0.3) : Phaser.Math.Clamp(-p.doom * 0.35, -1.0, 0);
+    m.setVisible(true);
+    m.render(sx, sy, 0, scale, 1, {
+      yaw: p.dir > 0 ? -0.14 : Math.PI + 0.14,
+      roll: p.bank + Math.sin(t * 0.8 + p.seed) * 0.04,
+      pitch,
+      flapDeg: 0, aileron: 0, elevator: 0, rudder: 0,
+      gear: 0,
+      propAngle: t * 42 + p.seed,
+      propSpeed: p.doom === null ? 1 : 0.3,
+      damage: p.doom === null ? 0 : 3,
+      ice: 0,
+      beacon: (t * 1.1 + p.seed) % 1 < 0.07 ? 1 : 0,
+      landingLight: false,
+      shed: false,
+    }, light);
   }
 
   /** One aircraft, drawn in its own local frame then banked into place. */

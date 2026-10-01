@@ -74,7 +74,7 @@
     "description": "The fuel gauge is dropping faster than expected. You spot a thin mist trailing from the wing.",
     "trigger": "on_fuel_low",
     "triggerThreshold": 0.4,
-    "probability": 0.22,
+    "probability": 0.03,
     "cooldownSeconds": 999,
     "tags": [
       "fuel",
@@ -88,8 +88,8 @@
           {
             "type": "multiply",
             "target": "fuelBurnRate",
-            "value": 1.3,
-            "description": "Leak slowed, not stopped — burn up 30%"
+            "value": 1.15,
+            "description": "Leak slowed, not stopped — burn up 15%"
           },
           {
             "type": "delta",

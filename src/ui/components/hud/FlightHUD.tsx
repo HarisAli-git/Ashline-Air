@@ -42,7 +42,7 @@ export function FlightHUD(): React.ReactElement | null {
   const compact = vp.isCompact;
   const styles = hudStyles(
     vp.uiScale, compact, vp.isTouch, event ? event.choices.length : 0,
-    compact && !!tutorial?.training,
+    compact && !!(tutorial?.training || tutorial?.coach),
   );
 
   const { def } = SaveService.getActiveAircraft();
@@ -92,6 +92,9 @@ export function FlightHUD(): React.ReactElement | null {
               tone={status.avionicsOut || status.iceLoad > 0.6 ? '#ff4a3a' : '#88ccff'} />
           )}
           {status.overspeed && <Chip s={styles} tone="#ff4a3a" text="OVERSPEED" />}
+          {status.flaps?.overspeed && (
+            <Chip s={styles} tone="#ff4a3a" text={`FLAP SPEED — BELOW ${status.flaps.limitKmh ?? ''}`} />
+          )}
           {status.trafficDeltaM !== null && (
             <Chip s={styles} tone="#ff4a3a"
               text={`TRAFFIC ${Math.abs(Math.round(status.trafficDeltaM))}m ${status.trafficDeltaM >= 0 ? '▲' : '▼'} — ${status.trafficAvoid === 1 ? 'CLIMB' : 'DESCEND'}`} />
@@ -109,6 +112,9 @@ export function FlightHUD(): React.ReactElement | null {
           {status.underFire && status.rangedOn > 0.45 && (
             <Chip s={styles} tone={status.rangedOn > 0.75 ? '#ff4a3a' : '#ff8844'}
               text={status.rangedOn > 0.75 ? 'THEY HAVE YOUR NUMBER — JINK' : 'GUNNERS RANGING YOU'} />
+          )}
+          {status.overshot && (
+            <Chip s={styles} tone="#ffd080" text={`OVERSHOT — ${press('turn').toUpperCase()} TO TURN BACK`} />
           )}
           {status.obstacleAheadM !== null && (
             <Chip s={styles} tone="#ffd080"
@@ -137,6 +143,21 @@ export function FlightHUD(): React.ReactElement | null {
             <span style={styles.bigNum}>{speedKmh}</span>
             <span style={styles.unit}>km/h</span>
           </div>
+          {/*
+            * The stall speed for the flaps you have out, in the air you are in.
+            * Shown when it is close enough to matter — near the ground, with
+            * flap out, or slowing toward it — because that is the number an
+            * approach is flown against, and it MOVES with every notch of flap.
+            */}
+          {status && status.stallKmh > 0 && (state.altitude < 60 || state.flapsDeployed || speedKmh < status.stallKmh * 1.6) && (
+            <div style={{
+              ...styles.vs,
+              color: speedKmh < status.stallKmh * 1.15 ? '#ff6a4a'
+                : speedKmh < status.stallKmh * 1.3 ? '#ffd080' : '#8a7a5a',
+            }}>
+              STALL {status.stallKmh}
+            </div>
+          )}
           <div style={styles.bigRow}>
             <span style={{ ...styles.bigNum, ...styles.bigNumAlt }}>{state.altitude.toFixed(0)}</span>
             <span style={styles.unit}>m</span>
@@ -199,8 +220,11 @@ export function FlightHUD(): React.ReactElement | null {
           {status?.retractableGear !== false && (
             <span style={{ color: gearDown ? '#9fe8b0' : '#5a5040' }}>GEAR</span>
           )}
-          <span style={{ color: flapsDeployed ? '#ffd080' : '#5a5040' }}>FLAP</span>
         </div>
+        <FlapGauge scale={vp.uiScale} compact={compact} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)}
+          angle={state.flapAngle ?? 0} stops={status?.flaps?.stops ?? [0, 10, 20, 35]}
+          limitKmh={status?.flaps?.limitKmh ?? null} nextLimitKmh={status?.flaps?.nextLimitKmh ?? null}
+          overspeed={!!status?.flaps?.overspeed} blownBack={!!status?.flaps?.blownBack} speedKmh={speedKmh} touch={vp.isTouch} />
       </div>
 
       {/* ── The radio call ──────────────────────────────────────────────── */}
@@ -211,7 +235,7 @@ export function FlightHUD(): React.ReactElement | null {
         * the keyboard legend sits (FlightScene hides that while this shows,
         * so they can never overlap).
         */}
-      {tutorial && (tutorial.training
+      {tutorial && (tutorial.training || tutorial.coach
         ? <TrainingPanel lesson={tutorial} scale={vp.uiScale} compact={compact} touch={vp.isTouch} />
         : <div style={styles.tutorial}>{tutorial.text}</div>)}
       <TrainingDebrief scale={vp.uiScale} compact={compact} />
@@ -236,16 +260,22 @@ function DropCard({ s, zone, compact, touch }: {
   const band = `${zone.lo}–${zone.hi} m`;
   const cue: Record<DropZoneStatus['cue'], { text: string; tone: string; pulse?: boolean }> = {
     hold: {
-      text: zone.descendInKm > 0.05
-        ? `HOLD · start down in ${zone.descendInKm.toFixed(1)} km`
-        : `HOLD · then down to ${band}`,
-      tone: '#c8b888',
+      // Outside the corridor the guns can still reach you low — say so. From
+      // the far side they may cover the whole approach.
+      text: zone.covered
+        ? 'HOLD HEIGHT · guns cover this side — come in from the other way'
+        : `HOLD HEIGHT · safe to descend in ${Math.max(0.1, zone.descendInKm).toFixed(1)} km`,
+      tone: zone.covered ? '#ff8844' : '#c8b888',
     },
-    descend: { text: `▼ DESCEND to ${band}`, tone: '#ffd080', pulse: true },
+    descend: {
+      text: `▼ DESCEND to ${band}${zone.descentRate > 0.5 ? ` · ~${Math.round(zone.descentRate)} m/s` : ''}`,
+      tone: '#ffd080', pulse: true,
+    },
     window: { text: `IN THE BAND · wait for the pin`, tone: '#9fe8b0' },
     release: { text: touch ? 'PIN ON THEM · DROP NOW' : 'PIN ON THEM · SPACE', tone: '#b8ffc8', pulse: true },
     low: { text: `▲ TOO LOW · climb to ${zone.lo} m`, tone: '#ff8844', pulse: true },
     late: { text: 'PAST THEM · release earlier next time', tone: '#8a7a5a' },
+    behind: { text: `BEHIND YOU · ${press('turn').toUpperCase()} to go back`, tone: '#ffd080', pulse: true },
   };
   const c = cue[zone.cue];
   return (
@@ -255,15 +285,28 @@ function DropCard({ s, zone, compact, touch }: {
         {zone.besieged && <span style={s.dropBadge}>UNDER FIRE</span>}
       </div>
       <div style={s.dropRow}>
-        <span style={s.dropKm}>{zone.km < 1 ? `${Math.round(zone.km * 1000)} m` : `${zone.km.toFixed(1)} km`}</span>
+        <span style={s.dropKm}>
+          {zone.km < 1 ? `${Math.round(zone.km * 1000)} m` : `${zone.km.toFixed(1)} km`}
+          {zone.cue === 'behind' ? ' ↺' : ''}
+        </span>
         <span style={s.dropPips} aria-label={`${zone.got} of ${zone.need} crates`}>
           {Array.from({ length: zone.need }, (_, i) => (
             <span key={i} style={{
               ...s.dropPip,
               background: i < zone.got ? '#9fe8b0' : 'transparent',
-              border: `1px solid ${i < zone.got ? '#9fe8b0' : '#6a7a5a'}`,
+              border: `1px solid ${i < zone.got ? '#9fe8b0' : '#ffd080'}`,
             }} />
           ))}
+        </span>
+        {/*
+          * Said in words as well as boxes. The pips alone were the only place
+          * the count appeared, and nobody read four tiny squares as "they
+          * need two more crates".
+          */}
+        <span style={s.dropNeed}>
+          {zone.got >= zone.need ? 'SUPPLIED'
+            : `NEEDS ${zone.need - zone.got} CRATE${zone.need - zone.got > 1 ? 'S' : ''}`}
+          <span style={s.dropAboard}>{compact ? ` · ${zone.aboard} left` : ` · ${zone.aboard} aboard`}</span>
         </span>
       </div>
       <div style={{
@@ -396,6 +439,85 @@ function VarioRibbon({ s, air, inThermal }: {
         height: `${Math.abs(t) * 50}%`,
         top: air >= 0 ? `${50 - Math.abs(t) * 50}%` : '50%',
       }} />
+    </div>
+  );
+}
+
+/**
+ * Where the flaps are, drawn as what they are: a section through the wing
+ * with the flap hanging off its trailing edge at the real deflection.
+ *
+ * "FLAP" lit or unlit could not say which notch you were on, and a notch is
+ * the whole decision — the first is lift for a short take-off, the last is an
+ * air brake for the approach. The lever's notch is marked underneath; the
+ * panel itself swings to it on its motor, so you can watch them travel. The
+ * limit speed for what is out sits beside it, red when you are over it.
+ */
+function FlapGauge({ scale, compact, stage, angle, stops, limitKmh, nextLimitKmh, overspeed, blownBack, speedKmh, touch }: {
+  scale: number; compact: boolean; stage: number; angle: number; stops: number[];
+  limitKmh: number | null; nextLimitKmh: number | null; overspeed: boolean; blownBack: boolean; speedKmh: number; touch: boolean;
+}): React.ReactElement {
+  const n = (v: number): number => Math.round(v * scale);
+  const target = stops[Math.max(0, Math.min(3, stage))] ?? 0;
+  const moving = Math.abs(target - angle) > 0.5;
+  const tone = overspeed ? '#ff4a3a' : angle > 0.5 ? '#ffd080' : '#8a7a5a';
+  const labels = ['UP', '1', '2', 'FULL'];
+  const w = n(compact ? 70 : 84);
+  // Too fast for the next notch: say so before it is asked for
+  const nextTooFast = nextLimitKmh !== null && speedKmh > nextLimitKmh;
+  return (
+    <div style={{ marginTop: n(4), fontFamily: 'monospace', textShadow: '0 1px 0 #000, 0 0 6px #000' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: n(6) }}>
+        <svg width={w} height={Math.round(w * 0.42)} viewBox="0 0 100 42" style={{ overflow: 'visible', filter: 'drop-shadow(0 1px 1px #000)' }}>
+          {/* The notches, as faint rays from the hinge */}
+          {stops.map((d, i) => {
+            const r = (d * Math.PI) / 180;
+            const x0 = 66 + Math.cos(r) * 22, y0 = 16 + Math.sin(r) * 22;
+            const x1 = 66 + Math.cos(r) * 31, y1 = 16 + Math.sin(r) * 31;
+            return <line key={i} x1={x0} y1={y0} x2={x1} y2={y1}
+              stroke={i === stage ? tone : '#5a5040'} strokeWidth={i === stage ? 2 : 1.2} strokeLinecap="round" />;
+          })}
+          {/* The wing section */}
+          <path d="M3 17 C 6 9, 24 6, 44 7.5 L 66 12.5 L 66 19.5 L 44 20.5 C 26 21.5, 8 22, 3 17 Z"
+            fill="#c8b888" fillOpacity={0.85} stroke="#2a2416" strokeWidth={0.8} />
+          {/* The flap, at its real deflection */}
+          <g transform={`rotate(${angle} 66 16)`}>
+            <path d="M66 12.5 L 90 15.4 L 90 16.6 L 66 19.5 Z" fill={tone}
+              stroke="#2a2416" strokeWidth={0.8} />
+          </g>
+          <circle cx={66} cy={16} r={1.6} fill="#2a2416" />
+        </svg>
+        <div style={{ fontSize: n(compact ? 9 : 10), color: tone, lineHeight: 1.15, letterSpacing: 0.5 }}>
+          <div style={{ fontWeight: 'bold' }}>
+            {angle < 0.5 && !moving ? (blownBack ? 'WAITING' : 'FLAPS UP') : `${Math.round(angle)}°`}{moving && !blownBack ? ' ▸' : ''}
+          </div>
+          {limitKmh !== null && (
+            <div style={{ fontSize: n(8), color: overspeed ? '#ff4a3a' : '#8a7a5a' }}>MAX {limitKmh}</div>
+          )}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: n(5), fontSize: n(compact ? 8 : 9), letterSpacing: 0.5, marginTop: n(1) }}>
+        {labels.map((l, i) => (
+          <span key={l} style={{
+            color: i === stage ? tone : '#5a5040',
+            fontWeight: i === stage ? 'bold' : 'normal',
+            borderBottom: i === stage ? `1px solid ${tone}` : '1px solid transparent',
+          }}>{l}</span>
+        ))}
+        {!touch && !compact && (
+          <span style={{ color: '#5a5040', marginLeft: n(4) }}>F▼ V▲</span>
+        )}
+      </div>
+      {blownBack && (
+        <div style={{ fontSize: n(8), color: '#ffd080', marginTop: n(1) }}>
+          held back — slow down
+        </div>
+      )}
+      {!blownBack && nextTooFast && stage < 3 && angle > -1 && (
+        <div style={{ fontSize: n(8), color: '#8a7a5a', marginTop: n(1) }}>
+          {labels[stage + 1]} below {nextLimitKmh}
+        </div>
+      )}
     </div>
   );
 }
