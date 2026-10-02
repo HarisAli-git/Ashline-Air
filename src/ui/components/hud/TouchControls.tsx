@@ -123,6 +123,11 @@ export function TouchControls(): React.ReactElement | null {
           </>
         )}
 
+        {/* Airbrakes: on the way down to an approach, and whenever they are out */}
+        {!engineOut && (nearGround || (state.airbrake ?? 0) > 0.05 || !!status?.flaps?.blownBack) && state.altitude > 0.5 && (
+          <PulseButton label={(state.airbrake ?? 0) > 0.5 ? 'AIRBRAKE ●' : 'AIRBRAKE'} scale={s} control="airbrake" wide />
+        )}
+
         {/* Settled in the cruise: the only control worth a permanent slot */}
         {!engineOut && !nearGround && (
           <PulseButton label="TIME ⏩" scale={s} control="time" wide />
@@ -146,6 +151,7 @@ export function TouchControls(): React.ReactElement | null {
               <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
             )}
             <FlapRocker scale={s} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)} />
+            <PulseButton label={(state.airbrake ?? 0) > 0.5 ? 'AIRBRAKE ●' : 'AIRBRAKE'} scale={s} control="airbrake" wide />
             <PulseButton label="ENGINE" scale={s} control="engine" wide />
             <PulseButton label="TIME ⏩" scale={s} control="time" wide />
             <PulseButton label="MUTE" scale={s} control="mute" wide />

@@ -520,7 +520,7 @@ export class ParallaxWorld {
     if (this.landingGuide) this.drawLandingGuide(this.trafficGfx, f.scrollX, gy, f.planeWorldX ?? 0);
     this.drops.drawAir(
       this.trafficGfx, f.scrollX, gy, this.pxPerM, this.width, this.t,
-      this.dropReticle, this.dropGuide ?? this.trainGuide, f.planeScreenX ?? 300,
+      this.dropReticle, this.dropGuide ?? this.trainGuide, f.planeScreenX ?? 300, this.height,
     );
   }
 

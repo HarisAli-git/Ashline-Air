@@ -23,9 +23,10 @@ export interface DropZoneStatus {
    * release  in the band and the pin is on them
    * low      below the band — the roofs and wires are up here with you
    * late     the aim point is already past them
+   * away     a crate has just gone out to them — watch it down
    * behind   flown past with crates still wanted — turn round for another pass
    */
-  cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late' | 'behind';
+  cue: 'hold' | 'descend' | 'window' | 'release' | 'low' | 'late' | 'away' | 'behind';
   /** How far until you should start down, km — the edge of the gun-free corridor. */
   descendInKm: number;
   /** While descending: the sink rate that reaches the band in time, m/s. */
@@ -42,6 +43,10 @@ export interface DropZoneStatus {
   gapM: number | null;
   windowM: number;
   releaseIn: number | null;
+  /** SPACE pressed on the run-in: the crate goes by itself on the mark. */
+  armed?: boolean;
+  /** Door bundles from a light aircraft, or pallets from a transport. */
+  method?: 'bundle' | 'pallet';
 }
 
 export interface GameEvents {

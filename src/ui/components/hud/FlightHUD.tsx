@@ -220,6 +220,12 @@ export function FlightHUD(): React.ReactElement | null {
           {status?.retractableGear !== false && (
             <span style={{ color: gearDown ? '#9fe8b0' : '#5a5040' }}>GEAR</span>
           )}
+          {(state.airbrake ?? 0) > 0.05 && (
+            <span style={{
+              color: '#ffd080', marginLeft: 8,
+              animation: (state.airbrake ?? 0) < 0.95 ? 'aa-pulse 0.6s ease-in-out infinite' : 'none',
+            }}>AIRBRAKE</span>
+          )}
         </div>
         <FlapGauge scale={vp.uiScale} compact={compact} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)}
           angle={state.flapAngle ?? 0} stops={status?.flaps?.stops ?? [0, 10, 20, 35]}
@@ -255,7 +261,8 @@ export function FlightHUD(): React.ReactElement | null {
 function DropCard({ s, zone, compact, touch }: {
   s: HudStyles; zone: DropZoneStatus; compact: boolean; touch: boolean;
 }): React.ReactElement {
-  const what = zone.kind === 'rooftop' ? 'rooftop' : zone.kind === 'square' ? 'square' : '';
+  const pallet = zone.method === 'pallet';
+  const what = zone.kind === 'rooftop' ? (pallet ? 'block' : 'rooftop') : zone.kind === 'square' ? 'square' : '';
   const place = `${zone.place}${what ? ` ${what}` : ''}`;
   const band = `${zone.lo}–${zone.hi} m`;
   const cue: Record<DropZoneStatus['cue'], { text: string; tone: string; pulse?: boolean }> = {
@@ -271,17 +278,26 @@ function DropCard({ s, zone, compact, touch }: {
       text: `▼ DESCEND to ${band}${zone.descentRate > 0.5 ? ` · ~${Math.round(zone.descentRate)} m/s` : ''}`,
       tone: '#ffd080', pulse: true,
     },
-    window: { text: `IN THE BAND · wait for the pin`, tone: '#9fe8b0' },
+    window: { text: `IN THE BAND · ${touch ? 'tap DROP' : 'SPACE'} to arm`, tone: '#9fe8b0' },
     release: { text: touch ? 'PIN ON THEM · DROP NOW' : 'PIN ON THEM · SPACE', tone: '#b8ffc8', pulse: true },
     low: { text: `▲ TOO LOW · climb to ${zone.lo} m`, tone: '#ff8844', pulse: true },
     late: { text: 'PAST THEM · release earlier next time', tone: '#8a7a5a' },
+    away: {
+      text: zone.need - zone.got > 1
+        ? `CRATE AWAY · ${touch ? 'tap DROP' : 'SPACE'} again to send the next`
+        : 'CRATE AWAY · watch it down',
+      tone: '#9fe8b0',
+    },
     behind: { text: `BEHIND YOU · ${press('turn').toUpperCase()} to go back`, tone: '#ffd080', pulse: true },
   };
-  const c = cue[zone.cue];
+  // Armed overrides the run-in cues: it is going on the mark by itself
+  const c = zone.armed && (zone.cue === 'window' || zone.cue === 'release' || zone.cue === 'descend' || zone.cue === 'low')
+    ? { text: '● ARMED · goes on the mark', tone: '#b8ffc8', pulse: true }
+    : cue[zone.cue];
   return (
     <div style={s.dropCard}>
       <div style={s.dropHead}>
-        <span>📦 {compact ? place : `Drop · ${place}`}</span>
+        <span>📦 {compact ? place : `${pallet ? 'Drop zone' : 'Drop'} · ${place}`}</span>
         {zone.besieged && <span style={s.dropBadge}>UNDER FIRE</span>}
       </div>
       <div style={s.dropRow}>
@@ -510,7 +526,7 @@ function FlapGauge({ scale, compact, stage, angle, stops, limitKmh, nextLimitKmh
       </div>
       {blownBack && (
         <div style={{ fontSize: n(8), color: '#ffd080', marginTop: n(1) }}>
-          held back — slow down
+          held back — slow down · {touch ? 'AIRBRAKE' : 'B'} airbrake
         </div>
       )}
       {!blownBack && nextTooFast && stage < 3 && angle > -1 && (

@@ -43,6 +43,8 @@ export interface FlightState {
   flapStage: number;
   /** Where the flaps actually are, degrees of deflection. */
   flapAngle: number;
+  /** Airbrakes, 0 stowed … 1 fully up — the panels follow the switch on their own motor. */
+  airbrake?: number;
   distanceTravelled: number; // km
   elapsedSeconds: number;
   modifiers: FlightModifiers;

@@ -150,12 +150,12 @@ const MOMENTS: Lesson[] = [
   {
     id: 'drop-release', title: 'Release', priority: 100,
     text: c => (c.touch
-      ? 'Under the card: the dot is them, the line is where a crate lands now. Tap DROP when the dot reaches the green.'
-      : 'Under the card: the dot is them, the line is where a crate lands now. Press SPACE when the dot reaches the green.')
+      ? 'Under the card: the dot is them, the line is where a crate lands now. Tap DROP as the dot comes in — the crate goes out by itself on the mark.'
+      : 'Under the card: the dot is them, the line is where a crate lands now. Press SPACE as the dot comes in — the crate goes out by itself on the mark.')
       + ' The ticks count you in.',
     keys: ['SPACE'], touchKeys: ['📦 DROP'],
     when: (_s, c) => !!c.drop && c.drop.gapM !== null && (c.drop.cue === 'window' || c.drop.cue === 'release'),
-    done: (_s, c, t) => !c.drop || c.drop.gapM === null || c.drop.got > 0 || c.drop.cue === 'late' || t > 20,
+    done: (_s, c, t) => !c.drop || c.drop.gapM === null || c.drop.got > 0 || c.drop.cue === 'late' || c.drop.cue === 'away' || t > 20,
   },
   {
     id: 'obstacle', title: 'Obstacle ahead', priority: 90,
@@ -199,8 +199,8 @@ const MOMENTS: Lesson[] = [
   {
     id: 'approach', title: 'Approach', priority: 60,
     text: c => c.touch
-      ? 'Home stretch. Lever back to about a third and FLAP ▼ a notch at a time as you slow. Sit on the dotted green path down to the strip — the four lights by the runway show two white, two red when you are on it.'
-      : 'Home stretch. Throttle back to about a third with S and F for flap a notch at a time as you slow. Sit on the dotted green path down to the strip — the four lights by the runway show two white, two red when you are on it.',
+      ? 'Home stretch. Lever back to about a third and FLAP ▼ a notch at a time as you slow — too fast for flap, tap AIRBRAKE. Sit on the dotted green path down to the strip: two white, two red lights when you are on it.'
+      : 'Home stretch. Throttle back to about a third with S and F for flap a notch at a time as you slow — too fast for flap, B for airbrakes. Sit on the dotted green path down to the strip: two white, two red lights when you are on it.',
     keys: ['S', 'F'], touchKeys: ['LEVER ▼', 'FLAP ▼'],
     when: (_s, c) => c.remainingKm < 2.8 && !c.landed,
     done: (s, c) => ((s.flapStage ?? 0) >= 2 && s.altitude < 45 && s.throttle < 0.6) || c.landed,

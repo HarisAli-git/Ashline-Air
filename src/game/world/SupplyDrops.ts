@@ -96,6 +96,12 @@ export interface Crate {
   onRoofX: number | null;
   /** Somebody has carried it off — stop drawing it on the ground. */
   taken?: boolean;
+  /** A door bundle or a pallet — they fall differently. */
+  method: DropMethod;
+  /** Seconds since a pallet's main canopy opened; -1 while it is on the drogue. */
+  canopyT: number;
+  /** The site it was let go for, if there was one in the sight. */
+  target?: DropSite | null;
 }
 
 /** Somebody running out to a crate and carrying it back. */
@@ -166,21 +172,66 @@ const GRAVITY = 9.81;
  * on screen, where you can watch it arrive.
  */
 const CRATE_DRAG = 1.5;
+
 /**
- * Gust drift, m/s of sideways velocity per metre of drop height.
+ * How the crates go out, by the size of the aeroplane.
  *
- * This is the risk/reward. With the drogue, accuracy no longer depended on
- * height, so there was no reason to come down into gun range to drop. Wind is
- * stronger higher up (the flight model already says so), so a crate released
- * high gets pushed about by gusts the reticle cannot know — from 30 m it goes
- * where you aimed, from 300 m it goes roughly there.
+ *   bundle  a light aircraft: a crate pushed out of the door on a drogue,
+ *           low enough to put it on a roof.
+ *   pallet  a transport: a pallet on a cargo chute from a few hundred feet,
+ *           the way an ATR or a C-130 actually drops. Asking a 500 km/h
+ *           transport to come down to thirty metres and hit a roof inside a
+ *           fifth of a second was the drop nobody could make. The people mark
+ *           a drop zone in the open instead, and the target is a field.
  */
-const DRIFT_BASE = 1.2;
-const DRIFT_PER_M = 0.045;
-/** Scoring rings, metres from the target. */
-const RING_BULLSEYE = 22;
-const RING_GOOD = 55;
-const RING_CLOSE = 110;
+export type DropMethod = 'bundle' | 'pallet';
+
+interface DropProfile {
+  /** Window floor: this far over the surface they stand on, over anything near the run-in, and never below minFloor. */
+  overSurface: number;
+  overTop: number;
+  minFloor: number;
+  /** Window depth, m. */
+  depth: number;
+  /**
+   * Gust drift, m/s of sideways velocity: a base and a share per metre of
+   * height. Wind is stronger higher up, so a crate let go high gets pushed
+   * about by gusts the reticle cannot know. It was 1.2 + 0.045/m — from the
+   * window that put a crate a roof's width off the aim point one time in
+   * three, and the roofs are thirteen metres across.
+   */
+  driftBase: number;
+  driftPerM: number;
+  /** Scoring rings, metres from the target: bullseye, good, close. */
+  rings: [number, number, number];
+}
+
+const PROFILES: Record<DropMethod, DropProfile> = {
+  // 40-80 m over open ground (it was 18-42: below the tallest mast on the route)
+  bundle: { overSurface: 30, overTop: 16, minFloor: 40, depth: 40, driftBase: 0.5, driftPerM: 0.012, rings: [24, 55, 110] },
+  // 110-200 m: the transport barely leaves its cruise
+  pallet: { overSurface: 110, overTop: 60, minFloor: 110, depth: 90, driftBase: 0.4, driftPerM: 0.004, rings: [45, 100, 180] },
+};
+
+/** Transports drop pallets; light aircraft push bundles out of the door. */
+export function dropMethodFor(def: { tier: number }): DropMethod {
+  return def.tier >= 2 ? 'pallet' : 'bundle';
+}
+
+/**
+ * A pallet's drogue: forward speed shed per second, and the speed it falls at.
+ * Strong enough that the throw stays inside the view ahead of the aircraft —
+ * at 1.1 a C-130's pallet carried 115 m, and the panels and the aim pin were
+ * off the right edge of the screen at the moment of release.
+ */
+const PALLET_DRAG = 2.4;
+const PALLET_DROGUE_VT = 38;
+/** The main canopy opens this high over whatever is below it, and lets the pallet down at this. */
+const PALLET_OPEN_M = 70;
+const PALLET_CANOPY_VT = 8;
+
+/** The state one step of a fall needs — a real crate or the reticle's ghost. */
+interface Falling { wx: number; alt: number; vx: number; vAlt: number; canopyT: number }
 
 /** Pay multiplier by how hard the site is to reach. */
 const SITE_PAY: Record<SiteKind, number> = { camp: 1, square: 1.2, rooftop: 1.5 };
@@ -214,7 +265,13 @@ export class SupplyDrops {
   sites: DropSite[] = [];
   crates: Crate[] = [];
   cratesLeft = 3;
+  /** Set before layout(): it decides the windows and the targets. */
+  method: DropMethod = 'bundle';
   private world: DropWorld | null = null;
+
+  private get profile(): DropProfile {
+    return PROFILES[this.method];
+  }
 
   /**
    * One site in most towns, and camps in the open country between them.
@@ -309,8 +366,9 @@ export class SupplyDrops {
       // The run-in and the site, not the far side: once the crates are out
       // the obstacle calls take over again
       const top = world ? world.tallestBetween(s.x - DROP_BAND_RUN_PX, s.x + 90 * M) : 0;
-      s.bandLo = Math.round(Math.max(s.surfaceM + 14, top + 7, 18));
-      s.bandHi = s.bandLo + 24;
+      const p = this.profile;
+      s.bandLo = Math.round(Math.max(s.surfaceM + p.overSurface, top + p.overTop, p.minFloor));
+      s.bandHi = s.bandLo + p.depth;
     }
   }
 
@@ -356,20 +414,57 @@ export class SupplyDrops {
    * It leaves with the aircraft's ground speed and no vertical speed — which is
    * the whole trick of a supply drop, and why the reticle leads the aircraft.
    */
-  release(planeWorldX: number, planeAlt: number, groundSpeedMs: number, dir: 1 | -1 = 1): boolean {
+  release(planeWorldX: number, planeAlt: number, groundSpeedMs: number, dir: 1 | -1 = 1, target: DropSite | null = null): boolean {
     if (this.cratesLeft <= 0 || planeAlt < 4) return false;
     this.cratesLeft--;
     // Box-Muller: a gust you cannot predict, larger the higher you let go
     const u = Math.max(1e-6, Math.random()), v = Math.random();
     const gauss = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-    const sigma = DRIFT_BASE + planeAlt * DRIFT_PER_M;
+    const sigma = this.profile.driftBase + planeAlt * this.profile.driftPerM;
     this.crates.push({
       wx: planeWorldX, alt: planeAlt,
       vx: dir * groundSpeedMs * WORLD_PX_PER_M, vAlt: 0,
       drift: gauss * sigma * WORLD_PX_PER_M,
-      spin: (Math.random() - 0.5) * 6, age: 0, landed: false, landedT: 0, onRoofX: null,
+      spin: (Math.random() - 0.5) * (this.method === 'pallet' ? 1.5 : 6),
+      age: 0, landed: false, landedT: 0, onRoofX: null,
+      method: this.method, canopyT: -1, target,
     });
     return true;
+  }
+
+  /** A crate let go for this site is still in the air. */
+  inFlightFor(s: DropSite): boolean {
+    return this.crates.some(c => !c.landed && c.target === s);
+  }
+
+  /**
+   * Half-width of "on them", metres: the roof for a bundle aimed at a
+   * rooftop, otherwise the bullseye ring of how this aircraft drops.
+   */
+  targetHalfM(s: DropSite): number {
+    if (s.kind === 'rooftop' && s.roof && this.method === 'bundle') return s.roof.halfWidth / WORLD_PX_PER_M;
+    return this.profile.rings[0];
+  }
+
+  /** One step of a fall, shared by the real crates and the reticle so they cannot disagree. */
+  private step(c: Falling, method: DropMethod, dt: number, drift: number): void {
+    if (method === 'bundle') {
+      c.vAlt -= GRAVITY * dt;
+      c.vx *= Math.exp(-CRATE_DRAG * dt);
+    } else if (c.canopyT < 0) {
+      // On the drogue: falling toward its terminal speed, shedding the throw
+      c.vAlt -= GRAVITY * (1 - (c.vAlt / PALLET_DROGUE_VT) ** 2) * dt;
+      c.vx *= Math.exp(-PALLET_DRAG * dt);
+    } else {
+      // Under the main canopy: slowed to a walking-pace descent, no throw left
+      c.canopyT += dt;
+      c.vAlt += (-PALLET_CANOPY_VT - c.vAlt) * (1 - Math.exp(-dt / 0.6));
+      c.vx *= Math.exp(-dt / 0.8);
+    }
+    c.wx += (c.vx + drift) * dt;
+    c.alt += c.vAlt * dt;
+    if (method === 'pallet' && c.canopyT < 0 && c.alt < PALLET_OPEN_M + 90
+      && c.alt - this.surface(c.wx).altM <= PALLET_OPEN_M) c.canopyT = 0;
   }
 
   /**
@@ -379,9 +474,9 @@ export class SupplyDrops {
    * ring is a tight mark on the camp, up high it is a wide faint smear that
    * honestly says "somewhere around here".
    */
-  spreadM(planeAlt: number): number {
-    const fall = Math.sqrt(2 * Math.max(0, planeAlt) / GRAVITY);
-    return 2 * (DRIFT_BASE + planeAlt * DRIFT_PER_M) * fall;
+  spreadM(planeAlt: number, fallS?: number): number {
+    const fall = fallS ?? Math.sqrt(2 * Math.max(0, planeAlt) / GRAVITY);
+    return 2 * (this.profile.driftBase + planeAlt * this.profile.driftPerM) * fall;
   }
 
   private surface(x: number): { altM: number; on: Hazard | null } {
@@ -398,19 +493,17 @@ export class SupplyDrops {
    */
   predictImpact(
     planeWorldX: number, planeAlt: number, groundSpeedMs: number, dir: 1 | -1 = 1,
-  ): { x: number; altM: number } {
-    let x = planeWorldX, alt = planeAlt, vx = dir * groundSpeedMs * WORLD_PX_PER_M, vAlt = 0;
+  ): { x: number; altM: number; fallS: number } {
+    const c: Falling = { wx: planeWorldX, alt: planeAlt, vx: dir * groundSpeedMs * WORLD_PX_PER_M, vAlt: 0, canopyT: -1 };
     const dt = 1 / 30;
-    let floor = 0;
-    for (let i = 0; i < 900; i++) {
-      vAlt -= GRAVITY * dt;
-      vx *= Math.exp(-CRATE_DRAG * dt);
-      x += vx * dt;
-      alt += vAlt * dt;
-      floor = this.surface(x).altM;
-      if (alt <= floor) break;
+    let floor = 0, t = 0;
+    for (let i = 0; i < 1800; i++) {
+      this.step(c, this.method, dt, 0);
+      t += dt;
+      floor = this.surface(c.wx).altM;
+      if (c.alt <= floor) break;
     }
-    return { x, altM: floor };
+    return { x: c.wx, altM: floor, fallS: t };
   }
 
   /**
@@ -450,10 +543,15 @@ export class SupplyDrops {
     for (const c of this.crates) {
       c.age += dt;
       if (c.landed) { c.landedT += dt; continue; }
-      c.vAlt -= GRAVITY * dt;
-      c.vx *= Math.exp(-CRATE_DRAG * dt);
-      c.wx += (c.vx + c.drift) * dt;
-      c.alt += c.vAlt * dt;
+      // Fixed sub-steps: a pallet's fall is long, and slow motion and warp
+      // must not change where it lands relative to the reticle
+      let left = dt;
+      while (left > 1e-6) {
+        const h = Math.min(1 / 30, left);
+        this.step(c, c.method, h, c.drift);
+        left -= h;
+        if (c.alt <= this.surface(c.wx).altM) break;
+      }
       const surf = this.surface(c.wx);
       if (c.alt <= surf.altM) {
         c.alt = surf.altM;
@@ -491,28 +589,35 @@ export class SupplyDrops {
       if (d < best) { best = d; site = s; }
     }
     let result: DropResult;
-    if (site?.kind === 'rooftop' && site.roof) {
+    const [ringB, ringG, ringC] = PROFILES[c.method].rings;
+    // A bundle has to land ON a roof; a pallet comes down in the yard they
+    // have cleared beside the block, which is the drop zone
+    const roofOnly = site?.kind === 'rooftop' && !!site.roof && c.method === 'bundle';
+    if (roofOnly && site?.roof) {
       // On the roof or it does not really count — the street is full of the dead
       const onRoof = c.onRoofX !== null && Math.abs(c.onRoofX - site.roof.x) < 1;
-      result = onRoof ? 'bullseye' : best <= RING_GOOD ? 'close' : 'miss';
+      result = onRoof ? 'bullseye' : best <= ringG ? 'close' : 'miss';
     } else {
-      result = best <= RING_BULLSEYE ? 'bullseye'
-        : best <= RING_GOOD ? 'good'
-          : best <= RING_CLOSE ? 'close' : 'miss';
-      // Stuck on somebody's roof: they will get it down, eventually
-      if (c.onRoofX !== null && (result === 'bullseye' || result === 'good')) result = 'close';
+      result = best <= ringB ? 'bullseye'
+        : best <= ringG ? 'good'
+          : best <= ringC ? 'close' : 'miss';
+      // A bundle stuck on somebody else's roof: they will get it down,
+      // eventually. A pallet inside the drop zone is reachable wherever it
+      // settled — a shed roof next to the panels is a ladder, not a loss.
+      const theirRoof = site?.kind === 'rooftop' && site.roof && c.onRoofX === site.roof.x;
+      if (c.method === 'bundle' && c.onRoofX !== null && !theirRoof && (result === 'bullseye' || result === 'good')) result = 'close';
     }
     if (!site || result === 'miss') return { site: null, result: 'miss', distM: best, money: 0, rep: 0 };
     // On a rooftop, near is not good enough: a crate in the street is a
     // crate they cannot reach, so it neither pays nor counts
-    if (site.kind === 'rooftop' && c.onRoofX === null) {
+    if (roofOnly && c.onRoofX === null) {
       return { site, result: 'close', distM: best, money: 0, rep: 0, unreachable: true };
     }
 
     site.got++;
     if (!site.result || RANK[result] > RANK[site.result]) site.result = result;
     // Somebody runs out for it — unless it is in a street full of the dead
-    const reachable = site.kind !== 'rooftop' || c.onRoofX !== null;
+    const reachable = !roofOnly || c.onRoofX !== null;
     if (reachable) {
       const from = site.x + (c.wx > site.x ? 10 : -10);
       site.fetches.push({
@@ -543,6 +648,7 @@ export class SupplyDrops {
       else if (s.kind === 'square') this.drawSquare(g, s, sx, groundY, t, dl, calling);
       else this.drawCamp(g, s, sx, groundY, t, dl, calling);
       if (s.besieged) this.drawDefences(g, s, sx, groundY - s.surfaceM * pxPerM, t, dl);
+      if (this.method === 'pallet' && s.state !== 'served') this.drawDropZone(g, s, sx, groundY, t);
       // Runners: out to the crate, then back with it on their shoulder
       for (const f of s.fetches) {
         const out = f.t < f.run;
@@ -591,6 +697,32 @@ export class SupplyDrops {
     if (calling) {
       g.fillStyle(0xff5a2a, 0.9);
       g.fillRect(sx - w / 2, y + 0.5, w, 1.2);
+    }
+  }
+
+  /**
+   * A transport's drop zone: the bullseye ring pegged out on open ground with
+   * orange panels and a flag at each end, so from a few hundred feet the
+   * target is a field you can see the size of, not a roof.
+   */
+  private drawDropZone(g: Phaser.GameObjects.Graphics, s: DropSite, sx: number, groundY: number, t: number): void {
+    const half = PROFILES.pallet.rings[0] * WORLD_PX_PER_M;
+    const y = groundY;
+    g.fillStyle(0xff8a2a, 0.28);
+    g.fillRect(sx - half, y - 2, half * 2, 3);
+    // Panels along it, and a cross on the centre
+    g.fillStyle(0xff9a3a, 0.9);
+    for (let k = -2; k <= 2; k++) g.fillRect(sx + k * half * 0.45 - 9, y - 2, 18, 3);
+    g.fillStyle(0xf0e8d8, 0.9);
+    g.fillRect(sx - 3, y - 4, 6, 6);
+    // A flag at each end, streaming with the breeze
+    for (const e of [-1, 1]) {
+      const fx = sx + e * half;
+      g.lineStyle(1.4, 0x2a2418, 0.9);
+      g.lineBetween(fx, y, fx, y - 16);
+      const flap = Math.sin(t * 5 + e + s.seed) * 2;
+      g.fillStyle(0xff7a1a, 0.95);
+      g.fillTriangle(fx, y - 16, fx + 11, y - 13 + flap, fx, y - 10);
     }
   }
 
@@ -727,6 +859,7 @@ export class SupplyDrops {
     reticle: { x: number; altM: number; onTarget: boolean; spreadM: number } | null,
     guide: DropGuide | null,
     planeScreenX = 300,
+    height = 600,
   ): void {
     /*
      * The window, as a band across the sky ahead of the aircraft.
@@ -888,6 +1021,57 @@ export class SupplyDrops {
       }
     }
 
+    /*
+     * ── The drop sight, when the ground has sunk out of the frame ─────────
+     *
+     * A transport drops from 110-200 m, and above 70 m the camera lets the
+     * ground fall away below the screen — the people, the panels and the
+     * reticle were all being drawn off the bottom. Pin the target and the aim
+     * point to the bottom edge on the same horizontal scale instead, so the
+     * run-in still reads as the pin sliding onto the panels.
+     */
+    {
+      const aimX = reticle ? reticle.x : scrollX + planeScreenX;
+      let target: DropSite | null = null;
+      for (const s of this.sites) {
+        if (s.state !== 'signalled') continue;
+        if (!target || Math.abs(s.x - aimX) < Math.abs(target.x - aimX)) target = s;
+      }
+      const edgeY = height - 66;
+      const base = target ? groundY - target.surfaceM * pxPerM : 0;
+      if (target && base > height - 16) {
+        const sx = target.x - scrollX;
+        const half = this.targetHalfM(target) * WORLD_PX_PER_M;
+        const pulse = 0.7 + Math.sin(t * 5) * 0.3;
+        // The ground, a long way down: a faint line kept clear of the corner gauges
+        g.lineStyle(1, 0xc8b888, 0.3);
+        for (let x = 110; x < width - 130; x += 14) g.lineBetween(x, edgeY + 8, x + 7, edgeY + 8);
+        if (sx > -half && sx < width + half) {
+          g.fillStyle(0xff8a2a, 0.8);
+          g.fillRect(sx - half, edgeY + 6, half * 2, 4);
+          g.fillStyle(0x9fe8b0, 1);
+          g.fillCircle(sx, edgeY + 2, 3.5);
+          g.fillStyle(0x9fe8b0, 0.25 * pulse);
+          g.fillCircle(sx, edgeY + 2, 9);
+        }
+        if (reticle) {
+          const rx = reticle.x - scrollX;
+          if (rx > -20 && rx < width + 20) {
+            const col = reticle.onTarget ? 0x9fe8b0 : 0xffd080;
+            g.lineStyle(2.5, 0x000000, 0.5);
+            g.lineBetween(rx, edgeY - 16, rx, edgeY + 8);
+            g.lineStyle(2, col, 0.95);
+            g.lineBetween(rx, edgeY - 16, rx, edgeY + 8);
+            g.fillStyle(col, 1);
+            g.fillTriangle(rx - 6, edgeY - 20, rx + 6, edgeY - 20, rx, edgeY - 12);
+          }
+        }
+        // "Down there": chevrons under the line at each end of it
+        g.fillStyle(0xc8b888, 0.45);
+        for (const x of [100, width - 120]) g.fillTriangle(x - 5, edgeY + 12, x + 5, edgeY + 12, x, edgeY + 18);
+      }
+    }
+
     // ── Crates in the air, and a puff where they come down ────────────────
     for (const c of this.crates) {
       const sx = c.wx - scrollX;
@@ -900,9 +1084,57 @@ export class SupplyDrops {
           g.fillStyle(0xcab89a, 0.4 * (1 - k));
           g.fillEllipse(sx, cy - 3, 14 + k * 34, 6 + k * 12);
         }
+        if (c.method === 'pallet') {
+          // The canopy lies collapsed downwind of the load
+          g.fillStyle(0xd8c8a0, 0.85);
+          g.fillEllipse(sx + 16, cy - 2, 26, 5);
+          extrudeBox(g, sx - 8, sx + 9, cy, 12, depthOffset(sx, width / 2, 12), CRATE, CRATE_SKY);
+          g.fillStyle(0x5a4a2a, 1);
+          g.fillRect(sx - 8, cy - 12, 17, 12);
+          g.lineStyle(1, 0x2a2010, 0.9);
+          g.lineBetween(sx - 8, cy - 6, sx + 9, cy - 6);
+          continue;
+        }
         extrudeBox(g, sx - 5, sx + 6, cy, 9, depthOffset(sx, width / 2, 9), CRATE, CRATE_SKY);
         g.fillStyle(0x6a5430, 1);
         g.fillRect(sx - 5, cy - 9, 11, 9);
+        continue;
+      }
+      if (c.method === 'pallet') {
+        if (c.canopyT >= 0) {
+          // The main canopy blossoming over it: a dome on rigging lines
+          const r = 6 + Math.min(1, c.canopyT / 0.7) * 18;
+          const top = cy - 12 - r * 1.5;
+          g.lineStyle(0.8, 0xc8b8a0, 0.75);
+          for (const k of [-1, -0.4, 0.4, 1]) g.lineBetween(sx + k * 7, cy - 10, sx + k * r, top);
+          g.fillStyle(0xd8c8a0, 0.95);
+          g.beginPath();
+          g.arc(sx, top, r, Math.PI, 0, false);
+          g.closePath();
+          g.fillPath();
+          g.fillStyle(0xff8a2a, 0.85);
+          g.beginPath();
+          g.arc(sx, top, r, Math.PI * 1.35, Math.PI * 1.65, false);
+          g.lineTo(sx, top);
+          g.closePath();
+          g.fillPath();
+        } else if (c.age > 0.3) {
+          g.lineStyle(0.8, 0xc8b8a0, 0.7);
+          g.lineBetween(sx - 5, cy - 8, sx - 2, cy - 22);
+          g.lineBetween(sx + 5, cy - 8, sx + 2, cy - 22);
+          g.fillStyle(0xd8c8a8, 0.9);
+          g.fillEllipse(sx, cy - 24, 14, 6);
+        }
+        const a = c.canopyT >= 0 ? Math.sin(c.age * 2) * 0.08 : c.age * c.spin * 0.3;
+        const co = Math.cos(a), si = Math.sin(a);
+        const pts = [[-8, -6], [8, -6], [8, 6], [-8, 6]].map(([x, y]) => ({
+          x: sx + x * co - y * si, y: cy + x * si + y * co,
+        }));
+        extrude(g, pts, depthOffset(sx, width / 2, 12), CRATE, CRATE_SKY, CRATE_SKY);
+        g.fillStyle(0x5a4a2a, 1);
+        g.fillPoints(pts, true);
+        g.lineStyle(1, 0x2a2010, 0.9);
+        g.strokePoints(pts, true);
         continue;
       }
       // A drogue above it once it has had a moment to open
