@@ -39,6 +39,12 @@ const GROUND_Y_OFFSET = 110;  // px from screen bottom to ground line
 // TU-46 camera: the aircraft holds a fixed screen position and the WORLD does
 // all the moving — speed reads through scroll, never by sliding the sprite.
 const AIRCRAFT_X      = 300;
+/**
+ * How often React is sent the flight state. It redraws the whole HUD for
+ * each one; at the frame rate that was a fifth of every frame (profiled
+ * 2026-10-02). 30 is still two updates per screen refresh.
+ */
+const HUD_HZ = 30;
 
 interface FlightSceneData {
   contractId: string;
@@ -138,6 +144,9 @@ export class FlightScene extends Phaser.Scene {
   // ── Animation state ───────────────────────────────────────────────────────
   private scrollX       = 0;     // cumulative world scroll (world px)
   private smoothDt      = 1 / 60; // low-passed frame delta, kills scroll judder
+  /** Real seconds since React was last sent the state, and whether this frame sends it. */
+  private hudSince = 0;
+  private hudDue = true;
   private shakeDuration = 0;
   private gustTimer     = 0;
   /** Slow wave driving sustained gusts and downdraughts. */
@@ -318,6 +327,8 @@ export class FlightScene extends Phaser.Scene {
     this.turn                = null;
     this.overshotCalled      = false;
     this.smoothDt            = 1 / 60;
+    this.hudSince            = 0;
+    this.hudDue              = true;
     this.shakeDuration       = 0;
     this.gearToggleCooldown  = 0;
     this.flapsToggleCooldown = 0;
@@ -827,6 +838,10 @@ export class FlightScene extends Phaser.Scene {
 
     if (this.crashing) { this.updateCrashSlide(delta / 1000); return; }
     if (this.landed) return;
+
+    this.hudSince += delta / 1000;
+    this.hudDue = this.hudSince >= 1 / HUD_HZ;
+    if (this.hudDue) this.hudSince = Math.min(this.hudSince - 1 / HUD_HZ, 1 / HUD_HZ);
 
     // Browsers hand out jittery frame deltas — ±2 ms is normal even on a
     // locked 60 Hz display, and a tab hiccup gives one 40 ms frame followed by
@@ -1358,7 +1373,7 @@ export class FlightScene extends Phaser.Scene {
     SoundEngine.setStallWarning(this.stallWarning);
 
     // ── Events to React ────────────────────────────────────────────────────
-    EventBus.emit('flight:state-update', this.state);
+    if (this.hudDue) EventBus.emit('flight:state-update', this.state);
   }
 
   /**
@@ -1818,47 +1833,49 @@ export class FlightScene extends Phaser.Scene {
     // ── The coach ─────────────────────────────────────────────────────────
     this.updateCoach(sdt);
 
-    // Annunciator panel state for the React HUD
-    EventBus.emit('flight:status', {
-      engineFailed: this.engineFailed,
-      underFire: this.underFire,
-      groundThreat: this.groundThreat,
-      rangedOn: this.world.raiders.rangedOn,
-      airVertical: this.airVertical,
-      inThermal: this.inThermal,
-      weatherAhead: this.weatherAhead,
-      weatherCaution: this.weatherCaution,
-      iceLoad: this.iceLoad,
-      avionicsOut: this.avionicsOut,
-      stall: this.stallWarning,
-      overspeed,
-      obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
-      obstacleLabel: ahead && alt < ahead.hazard.heightM + 18
-        ? (ahead.hazard.kind === 'pylon' ? 'POWER LINES' : STRUCTURE_NAME[ahead.hazard.kind] ?? 'OBSTACLE')
-        : null,
-      trafficDeltaM: this.trafficAdvisory,
-      trafficAvoid: this.trafficAvoid,
-      fuelAtArrival: this.fuelAtArrival,
-      retractableGear: this.aircraft.hasRetractableGear,
-      // A camp is signalling and there is something left to drop on it
-      dropReady: this.world.dropReticle !== null,
-      cratesLeft: this.world.drops.cratesLeft,
-      dropZone: this.dropZone,
-      overshot: this.overshotCalled && this.heading === 1,
-      canTurn: this.hasBeenAirborne && !this.landed && this.state.altitude > 12 && this.turn === null,
-      flaps: {
-        stops: this.controller.flapStops,
-        limitKmh: Number.isFinite(this.controller.flapLimit) ? Math.round(this.controller.flapLimit * 3.6) : null,
-        nextLimitKmh: this.state.flapStage < 3 ? Math.round(this.controller.flapLimitAt(this.state.flapStage + 1) * 3.6) : null,
-        overspeed: this.controller.flapOverspeed,
-        blownBack: this.controller.flapBlownBack,
-      },
-      stallKmh: Math.round(this.controller.stallSpeedNow * 3.6),
-      climbReserve: this.controller.climbReserve,
-      eventCaution: this.eventCaution && this.state.elapsedSeconds < this.eventCaution.until
-        ? this.eventCaution.text : null,
-      coolantLeft: this.coolantLeft,
-    });
+    // Annunciator panel state for the React HUD — at HUD_HZ, like the state
+    if (this.hudDue) {
+      EventBus.emit('flight:status', {
+        engineFailed: this.engineFailed,
+        underFire: this.underFire,
+        groundThreat: this.groundThreat,
+        rangedOn: this.world.raiders.rangedOn,
+        airVertical: this.airVertical,
+        inThermal: this.inThermal,
+        weatherAhead: this.weatherAhead,
+        weatherCaution: this.weatherCaution,
+        iceLoad: this.iceLoad,
+        avionicsOut: this.avionicsOut,
+        stall: this.stallWarning,
+        overspeed,
+        obstacleAheadM: ahead && alt < ahead.hazard.heightM + 18 ? ahead.hazard.heightM : null,
+        obstacleLabel: ahead && alt < ahead.hazard.heightM + 18
+          ? (ahead.hazard.kind === 'pylon' ? 'POWER LINES' : STRUCTURE_NAME[ahead.hazard.kind] ?? 'OBSTACLE')
+          : null,
+        trafficDeltaM: this.trafficAdvisory,
+        trafficAvoid: this.trafficAvoid,
+        fuelAtArrival: this.fuelAtArrival,
+        retractableGear: this.aircraft.hasRetractableGear,
+        // A camp is signalling and there is something left to drop on it
+        dropReady: this.world.dropReticle !== null,
+        cratesLeft: this.world.drops.cratesLeft,
+        dropZone: this.dropZone,
+        overshot: this.overshotCalled && this.heading === 1,
+        canTurn: this.hasBeenAirborne && !this.landed && this.state.altitude > 12 && this.turn === null,
+        flaps: {
+          stops: this.controller.flapStops,
+          limitKmh: Number.isFinite(this.controller.flapLimit) ? Math.round(this.controller.flapLimit * 3.6) : null,
+          nextLimitKmh: this.state.flapStage < 3 ? Math.round(this.controller.flapLimitAt(this.state.flapStage + 1) * 3.6) : null,
+          overspeed: this.controller.flapOverspeed,
+          blownBack: this.controller.flapBlownBack,
+        },
+        stallKmh: Math.round(this.controller.stallSpeedNow * 3.6),
+        climbReserve: this.controller.climbReserve,
+        eventCaution: this.eventCaution && this.state.elapsedSeconds < this.eventCaution.until
+          ? this.eventCaution.text : null,
+        coolantLeft: this.coolantLeft,
+      });
+    }
   }
 
   // ── Weather that costs you something ──────────────────────────────────────

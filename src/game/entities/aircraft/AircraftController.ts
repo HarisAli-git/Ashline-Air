@@ -92,7 +92,7 @@ export const TUNING = {
   idleDragPiston: 0.035,
   idleDragTurboprop: 0.065,
   /** Airbrake panels fully up: drag, lift spoiled in the air, lift dumped on the ground. */
-  airbrakeCD: 0.055,
+  airbrakeCD: 0.1,
   airbrakeLift: 0.08,
   airbrakeGroundDump: 0.55,
   /** Seconds for the panels to travel all the way. */
@@ -662,7 +662,11 @@ export class AircraftController {
     // first, so the nose goes down; then easing, so the speed comes back to
     // a glide. Held fast all the way down, a heavy arrived at 300 km/h with
     // nothing left to flare with.
-    const excessDrag = (aT * Math.cos(alpha) - aD) / GRAVITY;
+    // The airbrake's share is left out: the panels are a request to SLOW
+    // DOWN, and counted as missing power they tipped the nose over instead —
+    // half the braking came out as a dive and the speed barely moved.
+    const aBrake = qK * TUNING.airbrakeCD * brakeF * s.modifiers.dragMult * dmgDrag;
+    const excessDrag = (aT * Math.cos(alpha) - (aD - aBrake)) / GRAVITY;
     this.deficitT = excessDrag < -0.02 && !onGround
       ? this.deficitT + dt : Math.max(0, this.deficitT - 2 * dt);
     const decelCap = TUNING.pathDecelMax

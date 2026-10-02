@@ -21,6 +21,7 @@ import { attachResponsiveScale } from './game/utils/responsive';
 import { bindViewportCanvas, refreshViewport, useViewport } from './ui/viewport';
 import { armFullscreenOnGesture } from './ui/fullscreen';
 import { isTouchDevice } from './game/utils/device';
+import { installAdaptiveTessellation } from './game/utils/tessellation';
 
 type UILayer = 'none' | 'flight' | 'preflight';
 
@@ -59,6 +60,10 @@ export default function App(): React.ReactElement {
 
   useEffect(() => {
     if (!containerRef.current || gameRef.current) return;
+
+    // Before anything draws: circles and ellipses traced as finely as the eye
+    // resolves, not a hundred vertices each (see tessellation.ts)
+    installAdaptiveTessellation();
 
     // The design canvas is shaped like the device (see GameSize.ts) and then
     // FIT-scaled onto it: the art and the flight model are authored at a fixed
