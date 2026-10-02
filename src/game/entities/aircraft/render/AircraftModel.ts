@@ -434,17 +434,31 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
     const c = surf((u0 + u1) / 2, (a0 + a1) / 2, -2);
     B.quad(p[0], p[1], p[2], p[3], mat, 3, c);
   };
+  /*
+   * A cabin behind a nose engine. The hull turns to cowl metal at u 0.875, and
+   * the generic panes at 0.8–0.94 landed on it: the bush plane flew with a dark
+   * smear on its engine and a blank cabin. Its glass starts at the firewall — a
+   * raked windscreen running up to the wing, the door window under the wing,
+   * and one more aft.
+   */
+  const cabinBehindCowl: Array<[number, number, number, number, number?]> = [
+    [0.800, 0.835, -1.50, -0.70, 0.035],
+    [0.690, 0.790, -1.15, -0.30],
+    [0.580, 0.670, -1.05, -0.38],
+  ];
+  const single = noseEngine && spec.engines.length === 1;
   for (const side of [1, -1]) {
     const A = (a: number): number => (side > 0 ? a : Math.PI - a);
     // Flight deck glazing
     if (spec.canopy.style === 'windows') {
-      if (spec.canopy.deck) {
+      const panes = spec.canopy.deck ?? (noseEngine ? cabinBehindCowl : null);
+      if (panes) {
         /*
          * Each pane in strips that follow the skin. One flat quad across
          * thirty degrees of a curved nose sagged inside the hull in the
          * middle, and the panes came out as ragged black glyphs.
          */
-        for (const [u0, u1, a0, a1, rake = 0] of spec.canopy.deck) {
+        for (const [u0, u1, a0, a1, rake = 0] of panes) {
           const na = Math.max(1, Math.ceil(Math.abs(a1 - a0) / 0.1));
           const nu = 2;
           for (let i = 0; i < na; i++) {
@@ -463,8 +477,8 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
         decal(0.8, 0.9, A(-0.95), A(-0.42), MAT.glass, 0.4);
         decal(0.905, 0.94, A(-0.85), A(-0.45), MAT.glass, 0.4);
       }
-      // A row of cabin windows down the side
-      const n = Math.round(L / 22);
+      // A row of cabin windows down the side — a transport's, not a single's
+      const n = single ? 0 : Math.round(L / 22);
       for (let i = 0; i < n; i++) {
         const u = 0.36 + (0.38 * i) / Math.max(1, n - 1);
         decal(u, u + 0.014, A(-0.42), A(-0.18), MAT.glass, 0.4);

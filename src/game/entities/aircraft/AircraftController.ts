@@ -128,6 +128,21 @@ export const TUNING = {
   powerTrimShift: 1.6,
   /** Seconds for the trimmed speed to follow a change of POWER. */
   trimLag: 9,
+  /**
+   * The power-off glide path — see "The path a thrust deficit buys". The
+   * slowing-down the trim asks for takes this long, and is never harder than
+   * pathDecelMax (in g) when the power first goes, relaxing to pathDecelLate
+   * over pathSettle seconds of deficit; the steepest the deficit may tip the
+   * nose; how hard the path is chased (lift shed per radian off it) and the
+   * most lift ever shed doing so.
+   */
+  pathSpeedLag: 8,
+  pathDecelMax: 0.05,
+  pathDecelLate: 0.2,
+  pathSettle: 20,
+  pathMaxDive: 10 * DEG,
+  pathGain: 3,
+  pathShedMax: 0.35,
   pitchDamping: 2.8,
   stallPitchDamp: 3.0,
   stallNoseDown: 54,        // deg/s² nose-down once fully stalled
@@ -153,8 +168,13 @@ export const TUNING = {
 };
 
 const STEP = 1 / 120;       // fixed physics step (s)
-const MAX_FRAME_DT = 0.25;  // allows time warp up to ×8 at 30+ fps
-const MAX_SUBSTEPS = 32;
+/*
+ * Time warp ×8 on FlightScene's 50 ms frame cap is 0.4 s a frame. At 0.25 the
+ * physics fell behind the world scroll below ~32 fps: the aeroplane covered a
+ * quarter more ground than it flew, gliding and burning fuel at 80%.
+ */
+const MAX_FRAME_DT = 0.4;
+const MAX_SUBSTEPS = 48;
 
 /** Standard-atmosphere density ratio at a real height in metres. */
 function isaSigma(realM: number): number {
@@ -232,6 +252,8 @@ export class AircraftController {
   private vTrim: number;
   /** Flap lift increment at the previous step (−1 before the first). */
   private lastFlapCL = -1;
+  /** Seconds the power has been short of level flight — see the deficit path. */
+  private deficitT = 0;
 
   private accumulator = 0;
 
@@ -395,6 +417,7 @@ export class AircraftController {
     const { stats } = this.def;
     this.vTrim = this.vStall * 1.45;
     this.lastFlapCL = -1;
+    this.deficitT = 0;
     return {
       throttle: 0,
       enginePower: 0,
@@ -615,6 +638,43 @@ export class AircraftController {
     const vFloor = vsCfg * (1.25 + 0.2 * (1 - flapBlend));
     const vTrimNow = Math.max(vFloor, this.vTrim + (vApp - this.vTrim) * flapBlend);
     /*
+     * ── The path a thrust deficit buys ──────────────────────────────────
+     *
+     * Cut the engine and the aeroplane held its height for five to ten
+     * seconds — the ATR actually gained a few metres — while drag ate the
+     * speed: the round-out below asked for level lift the moment the path
+     * dipped, so every bit of missing thrust went into slowing down level.
+     * An engine cut read as nothing happening at all.
+     *
+     * Now, when the power cannot pay for the drag at the speed the trim is
+     * heading for, the shortfall becomes a descent: the path along which the
+     * aeroplane slows only as fast as the trim wants, never steeper than
+     * pathMaxDive. With power to spare it is level and nothing changes.
+     * Clean only — flaps out is the approach, which has its own rules below —
+     * and fading out from 60 m to 15 m, so a forced landing rounds out the way
+     * a pilot would and the flare is never pushed into the runway.
+     */
+    // Only ever a slowing-down: speeding up toward the trim is the trim's own
+    // job, and asking for it here pushed the nose over in every climb.
+    // At full power the anti-balloon cap below holds it level FASTER than its
+    // trim, so the slowing-down is capped too — or it would soak up the whole
+    // deficit and the cut would be a level deceleration again. Tightly at
+    // first, so the nose goes down; then easing, so the speed comes back to
+    // a glide. Held fast all the way down, a heavy arrived at 300 km/h with
+    // nothing left to flare with.
+    const excessDrag = (aT * Math.cos(alpha) - aD) / GRAVITY;
+    this.deficitT = excessDrag < -0.02 && !onGround
+      ? this.deficitT + dt : Math.max(0, this.deficitT - 2 * dt);
+    const decelCap = TUNING.pathDecelMax
+      + (TUNING.pathDecelLate - TUNING.pathDecelMax) * clamp(this.deficitT / TUNING.pathSettle, 0, 1);
+    const wantAccel = clamp(
+      (vTrimNow / sqrtSigma - s.speed) / TUNING.pathSpeedLag, -decelCap * GRAVITY, 0,
+    );
+    const shortfall = excessDrag - wantAccel / GRAVITY;
+    const pathGate = (1 - flapBlend) * clamp((s.altitude - 15) / 45, 0, 1);
+    const gammaPath = onGround ? 0
+      : Math.max(-TUNING.pathMaxDive, Math.asin(clamp(shortfall, -1, 0))) * pathGate;
+    /*
      * The trim may ask for less lift than level flight needs (to speed up, it
      * dives) but never MORE than level flight at the current speed needs.
      *
@@ -628,10 +688,14 @@ export class AircraftController {
      * descent at once.
      */
     // (Descending, it may still ask for more — enough to round out of the
-    // dive back toward level, never enough to climb.)
+    // dive back toward level, never enough to climb. Short of power, it
+    // rounds out onto the deficit path instead, and sheds lift to reach it.)
     const clTrim = clamp(GRAVITY / (this.K * vTrimNow * vTrimNow), 0, clMax);
     const clLevelNow = (GRAVITY * Math.cos(gamma)) / (this.K * Math.max(1, vEAS) ** 2);
-    const clForLevel = Math.min(clTrim, clLevelNow * (1 + 2.6 * Math.max(0, -gamma)));
+    const pushOver = gammaPath < 0
+      ? clamp(TUNING.pathGain * (gamma - gammaPath), 0, TUNING.pathShedMax) : 0;
+    const clForLevel = Math.min(clTrim, clLevelNow * (1 + 2.6 * Math.max(0, gammaPath - gamma)))
+      * (1 - pushOver);
     // Down to -12°: a big slotted flap at speed needs a nose-down wing to make
     // only the lift it needs, and at -3° the trim fought that and ballooned.
     const alphaTrim = clamp((clForLevel - clBase) / clAlpha, -12 * DEG, alphaKnee);

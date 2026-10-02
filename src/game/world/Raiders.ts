@@ -86,7 +86,9 @@ export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
   // 300 m, not 420: every aeroplane in the fleet can actually climb over it.
   // At 420 the crop duster — whose real ceiling is nearer 320 — could never
   // get out of reach, and a battery became a hit you simply had to take.
-  aa:        { ceilingM: 300, rangePx: 3000, rounds: 2, spread: 0.03, damage: 7.0, cadence: 1.75, flak: true,  label: 'AA BATTERY' },
+  // Damage is per shell at the core of the burst, for a 300 m gun — the
+  // bigger batteries that reach the heavies hit harder. See setAircraftCeiling.
+  aa:        { ceilingM: 300, rangePx: 3000, rounds: 2, spread: 0.03, damage: 2.3, cadence: 1.75, flak: true,  label: 'AA BATTERY' },
   /*
    * A gun barge in the tidal channels. Between a technical and a battery: it
    * reaches higher than anything else that is not proper AA, and it is the
@@ -124,10 +126,28 @@ const HIT_HALF_H = 13;
 /** Weapons further out than this do not set the "climb above" bar. */
 const COMMITTED_RANGE_PX = 2600;
 
-/** Highest ceiling of anything that shoots — the "you are safe" altitude. */
-export const MAX_ENGAGEMENT_M = Math.max(
+/** Highest ceiling in the stock table. AA can reach higher — see `setAircraftCeiling`. */
+const MAX_ENGAGEMENT_M = Math.max(
   ...Object.values(WEAPONS).filter((w): w is WeaponProfile => w !== null).map(w => w.ceilingM),
 );
+
+/**
+ * How much of the aircraft's own ceiling an AA battery reaches.
+ *
+ * With one fixed 300 m reach, everything above the crop duster cruised clear
+ * of every gun on the map — the ATR and the transport were never shot at
+ * again once they had climbed out. Scaled to the airframe, the battery is
+ * the thing you climb for in every aeroplane, and clearing it means flying
+ * near your ceiling, into the headwind aloft, on the fuel that costs.
+ */
+const AA_REACH_OF_CEILING = 0.7;
+
+/**
+ * Flak bursts hurt by proximity, in screen px from the airframe: full damage
+ * inside the core, nothing past the outer edge.
+ */
+const FLAK_CORE_PX = 26;
+const FLAK_OUTER_PX = 80;
 
 /** What is currently able to reach the aircraft. */
 export interface RaiderFireReport {
@@ -157,6 +177,8 @@ export interface RaiderFireReport {
 
 /** An AA shell that went off near the aircraft. */
 interface Flak { wx: number; y: number; age: number; big: boolean; }
+/** A shell still climbing to its fuse height. */
+interface FlakShell { wx: number; y: number; in: number; big: boolean; damage: number; }
 
 interface Tracer {
   wx: number;           // world px
@@ -204,6 +226,38 @@ export class Raiders {
   /** Damage from rounds that struck since the last engage() — see update(). */
   private pendingDamage = 0;
   private pendingHits = 0;
+  /** The AA battery as it stands on this route — see setAircraftCeiling. */
+  private aaProfile: WeaponProfile = WEAPONS.aa!;
+  /** Where the aircraft was at the last engage(), and its smoothed ground track, px/s. */
+  private lastTargetX: number | null = null;
+  private targetVx = 0;
+
+  /**
+   * Scale the AA's reach to the aeroplane it is shooting at. Never below the
+   * stock 300 m, so the crop duster can still climb out of it.
+   *
+   * A gun that reaches 700 m is a heavier gun, and it has to be: a transport
+   * crosses its envelope in half the time a crop duster does, and its bursts
+   * open five times further off. Shell damage goes as the square of the reach,
+   * which, measured, puts one battery at roughly 5–14% of the airframe a pass
+   * down low and 2–5% near its ceiling in every aeroplane in the fleet.
+   */
+  setAircraftCeiling(maxAltitudeM: number): void {
+    const stock = WEAPONS.aa!;
+    const ceilingM = Math.max(stock.ceilingM, Math.round(maxAltitudeM * AA_REACH_OF_CEILING));
+    const heavier = (ceilingM / stock.ceilingM) ** 2;
+    this.aaProfile = { ...stock, ceilingM, damage: stock.damage * heavier };
+  }
+
+  /** The weapon a position fields on this route. */
+  private weapon(kind: EmplacementKind): WeaponProfile | null {
+    return kind === 'aa' ? this.aaProfile : WEAPONS[kind];
+  }
+
+  /** Highest anything on this route can reach — above it the guns stand down. */
+  get maxCeilingM(): number {
+    return Math.max(MAX_ENGAGEMENT_M, this.aaProfile.ceilingM);
+  }
 
   // ── Reading the pilot ─────────────────────────────────────────────────────
   /**
@@ -282,6 +336,22 @@ export class Raiders {
     return false;
   }
 
+  /** Bank a hit on the airframe, with the flash and sparks that show it. */
+  private strike(target: { worldX: number; screenY: number }, damage: number): void {
+    this.pendingDamage += damage;
+    this.pendingHits++;
+    this.impacts.push({ x: target.worldX, y: target.screenY, age: 0 });
+    for (let k = 0; k < 7; k++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 50 + Math.random() * 170;
+      this.sparks.push({
+        x: target.worldX, y: target.screenY,
+        vx: Math.cos(a) * sp - 120, vy: Math.sin(a) * sp - 40,
+        life: 0.2 + Math.random() * 0.25,
+      });
+    }
+  }
+
   /** Lay out positions inside each hostile stretch. Deterministic per route. */
   /**
    * @param isWater tells the layout which positions are standing water. A
@@ -310,6 +380,10 @@ export class Raiders {
     this.impacts = [];
     this.pendingDamage = 0;
     this.pendingHits = 0;
+    this.pendingFlak = [];
+    this.flak = [];
+    this.lastTargetX = null;
+    this.targetVx = 0;
     this.altMean = 0;
     this.altVar = 4000;
     this.observed = 0;
@@ -326,8 +400,12 @@ export class Raiders {
       // emplacement had a 22% chance of being one, so a typical zone fielded
       // two batteries whose 4.4 km reach overlapped the entire stretch. That
       // is what made it feel like AA was everywhere.
+      //
+      // Rarer early in a career, but never absent: gating it to zero below a
+      // threat of 0.25 meant the first several contracts had nothing that
+      // reached above a heavy MG, and the sky was simply safe.
       const limit = (only ?? zoneOnly[z] ?? null) as ReadonlyArray<EmplacementKind> | null;
-      const aaZone = !limit && rnd(seed * 53 + z * 17) < 0.45 * Math.max(0, (threat - 0.25) / 0.75);
+      const aaZone = !limit && rnd(seed * 53 + z * 17) < 0.45 * (0.3 + 0.7 * threat);
       const aaSlot = aaZone ? 1 + Math.floor(rnd(seed * 71 + z) * Math.max(1, n - 2)) : -1;
 
       for (let i = 0; i < n; i++) {
@@ -409,23 +487,36 @@ export class Raiders {
       tr.vy += 90 * dt;               // they do drop off at the top of the arc
       tr.life -= dt;
 
-      if (target && this.strikes(px, py, tr.wx, tr.y, target)) {
-        this.pendingDamage += tr.damage;
-        this.pendingHits++;
-        this.impacts.push({ x: target.worldX, y: target.screenY, age: 0 });
-        for (let k = 0; k < 7; k++) {
-          const a = Math.random() * Math.PI * 2;
-          const sp = 50 + Math.random() * 170;
-          this.sparks.push({
-            x: target.worldX, y: target.screenY,
-            vx: Math.cos(a) * sp - 120, vy: Math.sin(a) * sp - 40,
-            life: 0.2 + Math.random() * 0.25,
-          });
-        }
+      // A flak tracer only marks the shell's path; the burst does the damage
+      if (tr.damage > 0 && target && this.strikes(px, py, tr.wx, tr.y, target)) {
+        this.strike(target, tr.damage);
         this.tracers.splice(i, 1);
         continue;
       }
       if (tr.life <= 0) this.tracers.splice(i, 1);
+    }
+
+    /*
+     * Shells reaching their fuse height. Flak is settled where it BURSTS:
+     * a fused shell going off a wingspan away still holes the skin, which is
+     * what makes a battery dangerous at height, where no round fired at you
+     * would ever thread the airframe itself. The closer, the worse.
+     */
+    for (let i = this.pendingFlak.length - 1; i >= 0; i--) {
+      const f = this.pendingFlak[i];
+      f.in -= dt;
+      if (f.in > 0) continue;
+      this.pendingFlak.splice(i, 1);
+      this.flak.push({ wx: f.wx, y: f.y, age: 0, big: f.big });
+      if (this.flak.length > 22) this.flak.shift();
+      if (!target) continue;
+      const d = Math.hypot(f.wx - target.worldX, f.y - target.screenY);
+      const k = Phaser.Math.Clamp((FLAK_OUTER_PX - d) / (FLAK_OUTER_PX - FLAK_CORE_PX), 0, 1);
+      if (k > 0) this.strike(target, f.damage * k);
+    }
+    for (let i = this.flak.length - 1; i >= 0; i--) {
+      this.flak[i].age += dt;
+      if (this.flak[i].age > 2.4) this.flak.splice(i, 1);
     }
     for (let i = this.impacts.length - 1; i >= 0; i--) {
       this.impacts[i].age += dt;
@@ -469,11 +560,19 @@ export class Raiders {
     let firedDist = 1;
     let hit = false;
 
+    // The aircraft's ground track, for the AA's lead. Smoothed, and clamped so
+    // the shove off a collision does not send a volley a kilometre ahead.
+    if (this.lastTargetX !== null && dt > 0) {
+      const vx = Phaser.Math.Clamp((target.worldX - this.lastTargetX) / dt, -1500, 1500);
+      this.targetVx += (vx - this.targetVx) * Math.min(1, dt / 0.4);
+    }
+    this.lastTargetX = target.worldX;
+
     // Only the nearest few weapons that can actually bear get to shoot; the
     // rest of the zone keeps tracking but holds fire.
     const inPlay: Array<{ e: Emplacement; w: WeaponProfile; d: number }> = [];
     for (const e of this.list) {
-      const w = WEAPONS[e.kind];
+      const w = this.weapon(e.kind);
       if (!w) continue;
       const d = Math.abs(e.x - target.worldX);
       if (d > w.rangePx) continue;
@@ -560,7 +659,15 @@ export class Raiders {
     e.recoil = 1;
 
     for (let k = 0; k < w.rounds; k++) {
-      const dxw = target.worldX - mx;
+      // A fused shell is laid where the aircraft WILL be when it arrives;
+      // rifles and MGs fire where it is, and the round has to find it.
+      let aimX = target.worldX;
+      if (w.flak) {
+        for (let it = 0; it < 2; it++) {
+          aimX = target.worldX + this.targetVx * Math.hypot(aimX - mx, target.screenY - my) / TRACER_SPEED;
+        }
+      }
+      const dxw = aimX - mx;
       const dys = target.screenY - my;
       const len = Math.max(1, Math.hypot(dxw, dys));
       // Aim error is all there is: some of these will pass through the
@@ -579,16 +686,17 @@ export class Raiders {
         this.pendingFlak.push({
           wx: mx + ux * TRACER_SPEED * tof,
           y: my + uy * TRACER_SPEED * tof,
-          in: tof, big: k === 0,
+          in: tof, big: k === 0, damage: w.damage,
         });
       }
 
       this.tracers.push({
         wx: mx, y: my,
         vx: ux * TRACER_SPEED, vy: uy * TRACER_SPEED,
-        life: tof * (1.35 + Math.random() * 0.5),
+        // A shell's tracer ends at its burst, and it is the burst that hurts
+        life: w.flak ? tof : tof * (1.35 + Math.random() * 0.5),
         hot: tof * 1.8,
-        damage: w.damage,
+        damage: w.flak ? 0 : w.damage,
       });
     }
     if (this.tracers.length > MAX_TRACERS) {
@@ -605,7 +713,7 @@ export class Raiders {
   ): { label: string; ceilingM: number; distancePx: number } | null {
     let best: { label: string; ceilingM: number; distancePx: number } | null = null;
     for (const e of this.list) {
-      const w = WEAPONS[e.kind];
+      const w = this.weapon(e.kind);
       if (!w) continue;
       const d = (e.x - worldX) * dir;
       if (d <= 0 || d > rangePx) continue;
@@ -627,7 +735,7 @@ export class Raiders {
     const a = Math.min(x0, x1), b = Math.max(x0, x1);
     let top = 0;
     for (const e of this.list) {
-      const w = WEAPONS[e.kind];
+      const w = this.weapon(e.kind);
       if (!w) continue;
       const d = e.x < a ? a - e.x : e.x > b ? e.x - b : 0;
       if (d <= w.rangePx) top = Math.max(top, w.ceilingM);
@@ -635,24 +743,8 @@ export class Raiders {
     return top;
   }
 
-  private pendingFlak: Array<{ wx: number; y: number; in: number; big: boolean }> = [];
+  private pendingFlak: FlakShell[] = [];
   private flak: Flak[] = [];
-
-  /** Called at draw time — detonates shells whose fuse has run out. */
-  private tickImpact(dt: number): void {
-    for (let i = this.pendingFlak.length - 1; i >= 0; i--) {
-      const f = this.pendingFlak[i];
-      f.in -= dt;
-      if (f.in > 0) continue;
-      this.pendingFlak.splice(i, 1);
-      this.flak.push({ wx: f.wx, y: f.y, age: 0, big: f.big });
-      if (this.flak.length > 22) this.flak.shift();
-    }
-    for (let i = this.flak.length - 1; i >= 0; i--) {
-      this.flak[i].age += dt;
-      if (this.flak[i].age > 2.4) this.flak.splice(i, 1);
-    }
-  }
 
   /**
    * Flak bursts. Drawn with the tracers because at an AA ceiling the gun that
@@ -704,9 +796,7 @@ export class Raiders {
     t: number,
     dl: number,
     style: CrowdStyle,
-    dt: number,
   ): void {
-    this.tickImpact(dt);
     this.centreX = width / 2;
 
     for (const e of this.list) {

@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { isTouchDevice } from '../utils/device';
 import type { ApproachKind, WeatherCondition } from '../../types';
 import { Hazards } from './Hazards';
-import { Raiders, MAX_ENGAGEMENT_M, type RaiderFireReport } from './Raiders';
+import { Raiders, type RaiderFireReport } from './Raiders';
 import { AirTraffic } from './AirTraffic';
 import { AirMass } from './AirMass';
 import { WeatherField, type WeatherCell } from './WeatherField';
@@ -492,7 +492,7 @@ export class ParallaxWorld {
     // Guns only bother tracking something they could plausibly reach; above
     // that they sit at rest rather than pointing uselessly at the stratosphere.
     const inReach = f.planeWorldX !== undefined && f.planeScreenY !== undefined
-      && f.altitude < MAX_ENGAGEMENT_M + 60;
+      && f.altitude < this.raiders.maxCeilingM + 60;
     this.raiders.update(
       dt, gy,
       inReach ? { worldX: f.planeWorldX!, screenY: f.planeScreenY! } : null,
@@ -505,7 +505,7 @@ export class ParallaxWorld {
       this.hazards.draw(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, {
         rim: this.pal.skyBot, daylight: this.dl,
       });
-      this.raiders.draw(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl, this.crowdStyle, dt);
+      this.raiders.draw(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl, this.crowdStyle);
       this.drops.drawSites(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl, this.crowdStyle);
     }
 

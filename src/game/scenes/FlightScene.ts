@@ -212,6 +212,8 @@ export class FlightScene extends Phaser.Scene {
   private dropArmed: DropSite | null = null;
   /** The airbrake switch. */
   private airbrakeOn = false;
+  /** Throttle lever last frame — the go-around stow fires on the push, not the position. */
+  private lastThrottle = 0;
   /** The site the last crate went to, and when — so a good release is not called late. */
   private dropAwayFor: DropSite | null = null;
   private dropAwayAt = -99;
@@ -501,12 +503,15 @@ export class FlightScene extends Phaser.Scene {
     if (this.training) {
       this.world.setTrainingRoute(this.routeKm, 'Millbrook');
     } else {
-      // The country gets more dangerous as the career goes on: rifles and the
-      // odd heavy MG for the first contracts, the full arsenal by the tenth
+      // The country gets more dangerous as the career goes on: mostly rifles
+      // and heavy MGs at first, the full arsenal by the sixth contract. It
+      // started at 0.15, which left the first contracts all but unguarded.
       const done = SaveService.get().player.completedContractIds?.length ?? 0;
-      const threat = clamp(0.15 + done * 0.09, 0.15, 1);
+      const threat = clamp(0.4 + done * 0.1, 0.4, 1);
       this.world.setRoute(this.routeKm, this.hashRoute(this.contractId), this.originRunwayM, this.destRunwayM, threat);
     }
+    // The batteries reach most of the way to THIS aeroplane's ceiling
+    this.world.raiders.setAircraftCeiling(definition.stats.maxAltitude);
     // Survivors along the route — something to do in the cruise. See SupplyDrops.
     // They live in the towns the route was just laid out with, so they go second.
     {
@@ -538,6 +543,7 @@ export class FlightScene extends Phaser.Scene {
     this.dropWindowToned = false;
     this.dropArmed = null;
     this.airbrakeOn = false;
+    this.lastThrottle = 0;
     this.dropAwayFor = null;
     this.dropAwayAt = -99;
     // Weather becomes a set of places on this route rather than a global mood,
@@ -903,16 +909,21 @@ export class FlightScene extends Phaser.Scene {
      * alone — that just makes it a glider — and every approach in a transport
      * was a fight to get below flap speed. B puts the panels up and leaves
      * them up; pushing the power to full stows them, as on a go-around.
+     *
+     * The stow is the PUSH through 85%, not the lever sitting above it. As a
+     * position test it undid B in the same frame whenever the power was
+     * already high — which is most of the flight — so the key did nothing.
      */
     if (Phaser.Input.Keyboard.JustDown(this.keys.B) || TouchInput.consume('airbrake')) {
       this.airbrakeOn = !this.airbrakeOn;
       SoundEngine.flapMove();
     }
-    if (this.airbrakeOn && this.state.throttle > 0.85) {
+    if (this.airbrakeOn && this.lastThrottle <= 0.85 && this.state.throttle > 0.85) {
       this.airbrakeOn = false;
       SoundEngine.flapMove();
       EventBus.emit('ui:show-notification', { message: 'Airbrakes stowed — full power.', type: 'info' });
     }
+    this.lastThrottle = this.state.throttle;
     if ((Phaser.Input.Keyboard.JustDown(this.keys.M) || TouchInput.consume('mute'))) {
       const muted = SoundEngine.toggleMute();
       EventBus.emit('ui:show-notification', { message: muted ? 'Sound muted.' : 'Sound on.', type: 'info' });
