@@ -150,12 +150,12 @@ const MOMENTS: Lesson[] = [
   {
     id: 'drop-release', title: 'Release', priority: 100,
     text: c => (c.touch
-      ? 'Under the card: the dot is them, the line is where a crate lands now. Tap DROP when the dot reaches the green.'
-      : 'Under the card: the dot is them, the line is where a crate lands now. Press SPACE when the dot reaches the green.')
+      ? 'Under the card: the dot is them, the line is where a crate lands now. Tap DROP as the dot comes in — the crate goes out by itself on the mark.'
+      : 'Under the card: the dot is them, the line is where a crate lands now. Press SPACE as the dot comes in — the crate goes out by itself on the mark.')
       + ' The ticks count you in.',
     keys: ['SPACE'], touchKeys: ['📦 DROP'],
     when: (_s, c) => !!c.drop && c.drop.gapM !== null && (c.drop.cue === 'window' || c.drop.cue === 'release'),
-    done: (_s, c, t) => !c.drop || c.drop.gapM === null || c.drop.got > 0 || c.drop.cue === 'late' || t > 20,
+    done: (_s, c, t) => !c.drop || c.drop.gapM === null || c.drop.got > 0 || c.drop.cue === 'late' || c.drop.cue === 'away' || t > 20,
   },
   {
     id: 'obstacle', title: 'Obstacle ahead', priority: 90,

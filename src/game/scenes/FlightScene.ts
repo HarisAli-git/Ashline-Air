@@ -22,7 +22,7 @@ import { CameraRig } from './CameraRig';
 import { routeKmBetween } from '../../services/RouteService';
 import { Director } from '../ai/Director';
 import { FlightCoach, type CoachView } from './FlightCoach';
-import { DROP_REWARD, cratesFor, siteReply, type DropSite } from '../world/SupplyDrops';
+import { DROP_REWARD, cratesFor, siteReply, type DropSite, dropMethodFor } from '../world/SupplyDrops';
 import { STRUCTURE_NAME, DROP_RUN_BEFORE_PX, DROP_BAND_RUN_PX } from '../world/Towns';
 import { routeSeed, originStripPx, destStripPx } from '../world/RoutePreview';
 import { press } from '../utils/controls';
@@ -204,6 +204,15 @@ export class FlightScene extends Phaser.Scene {
   /** Last whole second of the run-in countdown that ticked. */
   private dropTickAt = 99;
   private dropWindowToned = false;
+  /**
+   * The site a crate is armed for: SPACE pressed on the run-in, and the crate
+   * goes by itself the moment the aim point reaches them. A transport crosses
+   * a roof in a fifth of a second; nobody times that by hand.
+   */
+  private dropArmed: DropSite | null = null;
+  /** The site the last crate went to, and when — so a good release is not called late. */
+  private dropAwayFor: DropSite | null = null;
+  private dropAwayAt = -99;
   /** Departure settlement id — drop reputation is credited to its faction. */
   private originId = '';
   /**
@@ -500,6 +509,9 @@ export class FlightScene extends Phaser.Scene {
     // They live in the towns the route was just laid out with, so they go second.
     {
       const hz = this.world.hazards;
+      // Transports drop pallets from a few hundred feet; light aircraft push
+      // bundles out of the door low down. It decides every window and target.
+      this.world.drops.method = dropMethodFor(SaveService.getActiveAircraft().def);
       this.world.drops.layout(
         this.routeKm * 1000 * WORLD_PX_PER_M, this.hashRoute(this.contractId),
         cratesFor(SaveService.getActiveAircraft().def.stats.cargoCapacity),
@@ -522,6 +534,9 @@ export class FlightScene extends Phaser.Scene {
     this.dropSlow = 1;
     this.dropTickAt = 99;
     this.dropWindowToned = false;
+    this.dropArmed = null;
+    this.dropAwayFor = null;
+    this.dropAwayAt = -99;
     // Weather becomes a set of places on this route rather than a global mood,
     // and each place gets the weather of the country it is in.
     {
@@ -1896,11 +1911,14 @@ export class FlightScene extends Phaser.Scene {
     if (ev.inbound && drops.cratesLeft > 0) {
       const site = ev.inbound;
       const km = Math.abs(site.x - worldX) / (WORLD_PX_PER_M * 1000);
-      const where = site.kind === 'rooftop' ? `on a rooftop in ${site.place}`
+      const pallet = drops.method === 'pallet';
+      const where = site.kind === 'rooftop'
+        ? (pallet ? `holed up in a block in ${site.place}` : `on a rooftop in ${site.place}`)
         : site.kind === 'square' ? `in ${site.place} square` : `at ${site.place}`;
       const crates = `${site.need} crate${site.need > 1 ? 's' : ''}`;
       SoundEngine.radio(
         `Any aircraft, ${site.people} of us ${where}. We need ${crates}.`
+          + (pallet ? ' Drop zone is marked with orange panels.' : '')
           + (site.besieged ? ' Raiders all round us — watch the rifles.' : ''),
         { kind: 'traffic', station: site.place.toUpperCase() },
       );
@@ -1918,7 +1936,7 @@ export class FlightScene extends Phaser.Scene {
       const site = ev.signalled;
       EventBus.emit('ui:show-notification', {
         message: seen < 3
-          ? `📦 Flare up over ${site.place} — ${touch ? 'tap DROP' : 'SPACE'} when the pin is on them`
+          ? `📦 Flare up over ${site.place} — ${touch ? 'tap DROP' : 'press SPACE'} on the run-in and the crate goes on the mark`
           : `📦 Flare up over ${site.place}`,
         type: 'info',
       });
@@ -1929,13 +1947,14 @@ export class FlightScene extends Phaser.Scene {
     let meter: { gapM: number; windowM: number; releaseIn: number } | null = null;
     if (site && drops.cratesLeft > 0) {
       const imp = drops.predictImpact(worldX, alt, this.state.groundSpeed, dir);
-      const windowM = site.kind === 'rooftop' && site.roof ? site.roof.halfWidth / WORLD_PX_PER_M : 30;
+      const windowM = drops.targetHalfM(site);
       const gapM = dir * (site.x - imp.x) / WORLD_PX_PER_M;
-      const onTarget = site.kind === 'rooftop' && site.roof
-        ? Math.abs(imp.x - site.roof.x) <= site.roof.halfWidth && imp.altM > 1
+      const roof = site.kind === 'rooftop' && drops.method === 'bundle' ? site.roof : null;
+      const onTarget = roof
+        ? Math.abs(imp.x - roof.x) <= roof.halfWidth && imp.altM > 1
         : Math.abs(gapM) <= windowM;
       this.world.dropReticle = {
-        x: imp.x, altM: imp.altM, onTarget, spreadM: drops.spreadM(alt),
+        x: imp.x, altM: imp.altM, onTarget, spreadM: drops.spreadM(alt, imp.fallS),
       };
       meter = { gapM, windowM, releaseIn: (gapM - windowM * 0.4) / gs };
     } else {
@@ -2005,7 +2024,9 @@ export class FlightScene extends Phaser.Scene {
       const aimPast = this.world.dropReticle !== null && next.state === 'signalled'
         && dir * (this.world.dropReticle.x - next.x) / WORLD_PX_PER_M > 30;
       if (!inCorridor) cue = 'hold';
-      else if (aimPast) cue = 'late';
+      // Just let one go: the aim point is past them because the crate is on
+      // its way, not because the pass was late
+      else if (aimPast) cue = this.dropAwayFor === next && this.state.elapsedSeconds - this.dropAwayAt < 8 ? 'away' : 'late';
       else if (alt < next.bandLo - 2) cue = 'low';
       else if (alt <= next.bandHi + 3) cue = this.world.dropReticle?.onTarget ? 'release' : 'window';
       else cue = 'descend';
@@ -2031,6 +2052,8 @@ export class FlightScene extends Phaser.Scene {
         gapM: meter && site === next ? meter.gapM : null,
         windowM: meter?.windowM ?? 30,
         releaseIn: meter && site === next ? meter.releaseIn : null,
+        armed: this.dropArmed === next,
+        method: drops.method,
       };
       // The band only once it is safe to use; the path only while getting to it
       const path = cue === 'descend' && dir * (bandStartX - worldX) > 0
@@ -2070,6 +2093,7 @@ export class FlightScene extends Phaser.Scene {
           need: behind.site.need, got: behind.site.got, lo: behind.site.bandLo, hi: behind.site.bandHi,
           besieged: behind.site.besieged, cue: 'behind', descendInKm: 0, descentRate: 0,
           aboard: drops.cratesLeft, gapM: null, windowM: 30, releaseIn: null,
+          method: drops.method,
         };
       }
     }
@@ -2080,12 +2104,44 @@ export class FlightScene extends Phaser.Scene {
 
     // Release
     const pressed = Phaser.Input.Keyboard.JustDown(this.keys.SPACE) || TouchInput.consume('drop');
+    const letGo = (): void => {
+      if (drops.release(worldX, alt, this.state.groundSpeed, dir)) {
+        this.dropAwayFor = site;
+        this.dropAwayAt = this.state.elapsedSeconds;
+        this.dropStats.dropped++;
+        SoundEngine.gearMove(false);    // the door and the thump of it going
+      }
+    };
     if (pressed && airborne) {
       if (drops.cratesLeft <= 0) {
         EventBus.emit('ui:show-notification', { message: 'No crates left aboard.', type: 'info' });
-      } else if (drops.release(worldX, alt, this.state.groundSpeed, dir)) {
-        this.dropStats.dropped++;
-        SoundEngine.gearMove(false);    // the door and the thump of it going
+      } else if (this.dropArmed) {
+        // A second press is "now", whatever the sight says
+        this.dropArmed = null;
+        letGo();
+      } else if (meter && site && meter.gapM > meter.windowM * 0.5 && meter.releaseIn < 12) {
+        /*
+         * Pressed on the run-in: arm it, and the crate goes on the mark.
+         *
+         * This is how a transport actually drops — the release point is
+         * computed and the load goes on the green light — and it is what
+         * makes a rooftop thirteen metres wide, crossed in a fifth of a
+         * second, a drop rather than a coin toss. Flying it there is still
+         * the pilot's job: the height decides the spread, and a pass that is
+         * too high puts the crate somewhere round them, not on them.
+         */
+        this.dropArmed = site;
+        SoundEngine.dropTick(false);
+      } else {
+        letGo();
+      }
+    }
+    if (this.dropArmed) {
+      if (!meter || site !== this.dropArmed || drops.cratesLeft <= 0 || !airborne) {
+        this.dropArmed = null;
+      } else if (meter.gapM <= 0) {
+        this.dropArmed = null;
+        letGo();
       }
     }
 

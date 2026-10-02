@@ -340,8 +340,11 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
       : u < 0.70 ? 1 : Math.sqrt(Math.max(0, 1 - Math.pow((u - 0.70) / 0.315, 2) * kNose));
     return Math.max(0.5, (H / 2) * s0);
   };
+  const droop = f.noseDroop ?? 0;
   const camber = (u: number): number =>
-    -H * f.upsweep * Math.max(0, (f.taperStart + 0.08 - u) / (f.taperStart + 0.08));
+    -H * f.upsweep * Math.max(0, (f.taperStart + 0.08 - u) / (f.taperStart + 0.08))
+    // The nose drops: the roof slopes into the windscreen, the floor stays low
+    + H * droop * Math.pow(Math.max(0, (u - 0.66) / 0.34), 1.6);
   const noseEngine = spec.engines.some(e => e.nose);
   const widthAt = (u: number): number => {
     const base = 0.74 + f.bellyFlat * 0.12;
@@ -399,14 +402,33 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
     const c = B.v(add(noseC, [0.2, 0, 0]));
     for (let k = 0; k < RING; k++) B.tri(c, ii[k], ii[(k + 1) % RING], MAT.intake, 1, add(noseC, [-6, 0, 0]));
   } else {
-    const tip = B.v([L / 2, camber(1), 0]);
-    const li = lastRing.map(p => B.v(p));
-    for (let k = 0; k < RING; k++) B.tri(tip, li[k], li[(k + 1) % RING], MAT.belly, 1, add(noseC, [-6, 0, 0]));
+    /*
+     * A radome, domed over — not a cut-off.
+     *
+     * The hull stopped at its last section and closed with a two-unit cone,
+     * so every transport ended in a flat disc like the front of a bus. A few
+     * rings shrinking on a quarter-circle round the nose off the way a real
+     * radome is.
+     */
+    const r0 = halfH(uEnd);
+    const depth = r0 * 0.85;
+    let prev = lastRing.map(p => B.v(p));
+    for (const c of [0.36, 0.66, 0.88]) {
+      const phi = (c * Math.PI) / 2;
+      const ring = lastRing.map(p => add(add(scl(sub(p, noseC), Math.cos(phi)), noseC), [depth * Math.sin(phi), 0, 0]));
+      const ri = ring.map(p => B.v(p));
+      for (let k = 0; k < RING; k++) {
+        B.quad(prev[k], prev[(k + 1) % RING], ri[(k + 1) % RING], ri[k], c < 0.5 ? MAT.hull : MAT.belly, 1, add(noseC, [-6, 0, 0]));
+      }
+      prev = ri;
+    }
+    const tip = B.v(add(noseC, [depth, 0, 0]));
+    for (let k = 0; k < RING; k++) B.tri(tip, prev[k], prev[(k + 1) % RING], MAT.belly, 1, add(noseC, [-6, 0, 0]));
   }
 
   // ── Decals on the skin: windows, panel lines, soot ──────────────────────
-  const decal = (u0: number, u1: number, a0: number, a1: number, mat: number, out = 0.35): void => {
-    const p = [surf(u0, a0, out), surf(u1, a0, out), surf(u1, a1, out), surf(u0, a1, out)].map(q => B.v(q));
+  const decal = (u0: number, u1: number, a0: number, a1: number, mat: number, out = 0.35, rake = 0): void => {
+    const p = [surf(u0, a0, out), surf(u1, a0, out), surf(u1 + rake, a1, out), surf(u0 + rake, a1, out)].map(q => B.v(q));
     const c = surf((u0 + u1) / 2, (a0 + a1) / 2, -2);
     B.quad(p[0], p[1], p[2], p[3], mat, 3, c);
   };
@@ -414,8 +436,31 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
     const A = (a: number): number => (side > 0 ? a : Math.PI - a);
     // Flight deck glazing
     if (spec.canopy.style === 'windows') {
-      decal(0.8, 0.9, A(-0.95), A(-0.42), MAT.glass, 0.4);
-      decal(0.905, 0.94, A(-0.85), A(-0.45), MAT.glass, 0.4);
+      if (spec.canopy.deck) {
+        /*
+         * Each pane in strips that follow the skin. One flat quad across
+         * thirty degrees of a curved nose sagged inside the hull in the
+         * middle, and the panes came out as ragged black glyphs.
+         */
+        for (const [u0, u1, a0, a1, rake = 0] of spec.canopy.deck) {
+          const na = Math.max(1, Math.ceil(Math.abs(a1 - a0) / 0.1));
+          const nu = 2;
+          for (let i = 0; i < na; i++) {
+            const t0 = i / na, t1 = (i + 1) / na;
+            const b0 = A(a0 + (a1 - a0) * t0), b1 = A(a0 + (a1 - a0) * t1);
+            for (let j = 0; j < nu; j++) {
+              const v0 = u0 + (u1 - u0) * (j / nu), v1 = u0 + (u1 - u0) * ((j + 1) / nu);
+              const p = [surf(v0 + rake * t0, b0, 0.45), surf(v1 + rake * t0, b0, 0.45),
+                surf(v1 + rake * t1, b1, 0.45), surf(v0 + rake * t1, b1, 0.45)].map(q => B.v(q));
+              const c = surf((v0 + v1) / 2 + rake * (t0 + t1) / 2, (b0 + b1) / 2, -2);
+              B.quad(p[0], p[1], p[2], p[3], MAT.glass, 3, c);
+            }
+          }
+        }
+      } else {
+        decal(0.8, 0.9, A(-0.95), A(-0.42), MAT.glass, 0.4);
+        decal(0.905, 0.94, A(-0.85), A(-0.45), MAT.glass, 0.4);
+      }
       // A row of cabin windows down the side
       const n = Math.round(L / 22);
       for (let i = 0; i < n; i++) {
@@ -688,7 +733,11 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
   }
   if (g.noseX !== null) {
     const nr = g.noseWheelR ?? g.wheelR * 0.7;
-    const hinge: V3 = [g.noseX, g.hingeY - 2, 0];
+    // Hung from the belly where it actually is at the nose — the main gear's
+    // hinge height is deep inside a nose that has already curved up, and it
+    // stood the nose wheel on a stilt
+    const uN = (g.noseX + L / 2) / L;
+    const hinge: V3 = [g.noseX, Math.min(g.hingeY - 2, camber(uN) + halfH(uN) - 1.5), 0];
     const axle: V3 = [g.noseX + 2, contactY - nr, 0];
     const pi = retract ? B.newPart({ pivot: hinge, axis: [0, 0, 1], sign: 1, offset: [0, -(axle[1] - hinge[1]) - nr * 0.5, 0], kind: sponson ? 'gearSlide' : 'gear' }) : 0;
     if (retract) name('gear', pi);

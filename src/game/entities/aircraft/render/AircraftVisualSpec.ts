@@ -90,6 +90,13 @@ export interface AircraftVisualSpec {
     noseFull: number;
     /** 0 = a round belly, 1 = a squared-off freight floor. */
     bellyFlat: number;
+    /**
+     * How far the nose drops below the cabin's centreline, as a fraction of
+     * height. A transport's nose is not a cone on the axis: the roof slopes
+     * down into the windscreen and the floor runs nearly straight to the
+     * radome, which is where the flight deck gets its shape.
+     */
+    noseDroop?: number;
   };
   tail: {
     finHeight: number;
@@ -108,6 +115,14 @@ export interface AircraftVisualSpec {
      */
     x: number;
     w: number;
+    /**
+     * Flight-deck glazing, pane by pane: [u0, u1, a0, a1, rake?] in the
+     * hull's own coordinates — u along the length (0 tail, 1 nose), a round
+     * the section (-π/2 the roof, 0 the side, +π/2 the belly). `rake` moves
+     * the lower edge forward, so a windscreen leans back like one. The gaps
+     * between panes are the frames. Without it a transport got two slots.
+     */
+    deck?: Array<[number, number, number, number, number?]>;
   };
   engineStyle: EngineStyle;
   engines: EngineSpec[];
@@ -300,9 +315,15 @@ const RAW_SPECS: Record<string, RawSpec> = {
     wing:  { layout: 'high', rootX: 6, y: -16, chord: 46, span: 84, sweep: 10, drop: -4 },
     // Slab-sided freight tube: a flat cabin floor low to the ground, a blunt
     // weather-radar nose and a tail cone swept up to clear the loading door.
-    fuselage: { taperStart: 0.15, tailDepth: 0.20, upsweep: 0.24, noseFull: 0.42, bellyFlat: 0.55 },
+    fuselage: { taperStart: 0.15, tailDepth: 0.20, upsweep: 0.24, noseFull: 0.4, bellyFlat: 0.55, noseDroop: 0.25 },
     tail:  { finHeight: 46, finSweep: 24, stabLen: 30, tTail: true },
-    canopy: { style: 'windows', x: -54, w: 40 },
+    // The ATR flight deck: a two-pane windscreen raked down the nose, the
+    // side screens, the sliding direct-vision window and a small one behind
+    canopy: { style: 'windows', x: -54, w: 40, deck: [
+      [0.900, 0.940, -1.50, -0.95, 0.030],
+      [0.872, 0.905, -1.35, -0.62, 0.020],
+      [0.846, 0.868, -1.22, -0.60, 0.008],
+    ] },
     engineStyle: 'turboprop',
     engines: [
       { frac: 0.30, dy: 4, cowlLen: 40, cowlH: 19 },
@@ -314,8 +335,14 @@ const RAW_SPECS: Record<string, RawSpec> = {
     // for truck-bed loading.
     // Short trailing-arm legs out of the fairings: the ATR sits LOW, which is
     // the point of it — the cabin floor is at truck-bed height.
-    gear:  { fixed: false, style: 'trailing', rake: -5, mainX: 2, noseX: 82, tailWheelX: null, strutLen: 12, wheelR: 8,
-             hingeY: 13, mainDual: true, noseDual: true, noseWheelR: 6,
+    //
+    // It did not. Main tyres half the height of the fuselage and nose wheels
+    // nearly as big, on a leg that stood the nose up like a stilt: the real
+    // mains are about a third of the fuselage's height, the nose pair a
+    // sixth, and the belly clears the ground by about a third. Re-drawn to
+    // those proportions.
+    gear:  { fixed: false, style: 'trailing', rake: -4, mainX: 2, noseX: 84, tailWheelX: null, strutLen: 6, wheelR: 5.4,
+             hingeY: 13, mainDual: true, noseDual: true, noseWheelR: 3.5,
              sponson: { x: 2, w: 46, h: 13 } },
     flap:  { maxDeflectDeg: 38 },
     beacon: { x: -94, y: -62 },
@@ -337,9 +364,18 @@ const RAW_SPECS: Record<string, RawSpec> = {
     // The ramp-door heavy. Its silhouette is the whole point: a deep
     // flat-floored cargo hold that runs full-section almost to the tail, then
     // swings up hard into the ramp, under a blunt radome nose.
-    fuselage: { taperStart: 0.30, tailDepth: 0.56, upsweep: 0.36, noseFull: 0.40, bellyFlat: 0.85 },
+    fuselage: { taperStart: 0.30, tailDepth: 0.56, upsweep: 0.36, noseFull: 0.5, bellyFlat: 0.85, noseDroop: 0.21 },
     tail:  { finHeight: 52, finSweep: 22, stabLen: 46 },
-    canopy: { style: 'windows', x: 8, w: 44 },
+    // The Hercules flight deck is a glasshouse: windscreen, eyebrow windows
+    // over it, two side windows, and the chin windows low down by the nose
+    // gear that let the crew see the ground on a drop
+    canopy: { style: 'windows', x: 8, w: 44, deck: [
+      [0.898, 0.936, -1.52, -1.00, 0.030],
+      [0.870, 0.902, -1.36, -0.64, 0.020],
+      [0.862, 0.893, -1.57, -1.42],
+      [0.842, 0.864, -1.25, -0.62, 0.008],
+      [0.906, 0.936, -0.36, 0.04],
+    ] },
     engineStyle: 'turboprop',
     // Four turboprops on the leading edge: inboard and outboard on each side.
     // In a side view the outboard pair sits further aft (wing sweep) and lower
@@ -360,8 +396,11 @@ const RAW_SPECS: Record<string, RawSpec> = {
     // shows more than one main wheel from the side.
     // Stubby legs with the tandem pair tucked half up inside the sponson,
     // the way a C-130 actually squats on the ramp.
-    gear:  { fixed: false, style: 'sponson', rake: 0, mainX: 6, noseX: 90, tailWheelX: null, strutLen: 9, wheelR: 10,
-             hingeY: 15, mainWheels: 2, noseDual: true, noseWheelR: 7,
+    // Re-proportioned like the ATR: a C-130's tyres are about a third of the
+    // fuselage's height, mostly hidden in the sponsons, and the belly sits
+    // about a metre off the ramp.
+    gear:  { fixed: false, style: 'sponson', rake: 0, mainX: 6, noseX: 92, tailWheelX: null, strutLen: 4, wheelR: 6.6,
+             hingeY: 15, mainWheels: 2, noseDual: true, noseWheelR: 4.2,
              sponson: { x: 6, w: 62, h: 15 } },
     flap:  { maxDeflectDeg: 40 },
     beacon: { x: -98, y: -78 },
