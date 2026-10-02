@@ -585,6 +585,7 @@ export class AircraftSprite {
       roll: this.roll + bank + (airborne ? wander : 0),
       pitch: -this.body.rotation,
       flapDeg: st?.flapAngle ?? 0,
+      spoiler: st?.airbrake ?? 0,
       aileron: Phaser.Math.Clamp(-this.rollRate * 0.35, -0.35, 0.35),
       elevator: this.elevatorCmd,
       rudder: Phaser.Math.Clamp(this.rollRate * 0.12, -0.2, 0.2),

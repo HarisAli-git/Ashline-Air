@@ -210,6 +210,8 @@ export class FlightScene extends Phaser.Scene {
    * a roof in a fifth of a second; nobody times that by hand.
    */
   private dropArmed: DropSite | null = null;
+  /** The airbrake switch. */
+  private airbrakeOn = false;
   /** The site the last crate went to, and when — so a good release is not called late. */
   private dropAwayFor: DropSite | null = null;
   private dropAwayAt = -99;
@@ -535,6 +537,7 @@ export class FlightScene extends Phaser.Scene {
     this.dropTickAt = 99;
     this.dropWindowToned = false;
     this.dropArmed = null;
+    this.airbrakeOn = false;
     this.dropAwayFor = null;
     this.dropAwayAt = -99;
     // Weather becomes a set of places on this route rather than a global mood,
@@ -670,8 +673,8 @@ export class FlightScene extends Phaser.Scene {
     // it can get.
     // G only appears for an aeroplane that actually has a retractable one.
     const keyLegend = this.aircraft.hasRetractableGear
-      ? 'W/S: Throttle   A/D: Pitch   F/V: Flaps down/up   G: Gear   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort'
-      : 'W/S: Throttle   A/D: Pitch   F/V: Flaps down/up   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort';
+      ? 'W/S: Throttle   A/D: Pitch   F/V: Flaps   B: Airbrake   G: Gear   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort'
+      : 'W/S: Throttle   A/D: Pitch   F/V: Flaps   B: Airbrake   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort';
     this.keyHintText = this.add.text(width / 2, height - 4, keyLegend,
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
@@ -690,6 +693,7 @@ export class FlightScene extends Phaser.Scene {
       D:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.D),
       E:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E),
       G:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
+      B:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.B),
       F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
       V:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.V),
       T:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.T),
@@ -833,6 +837,7 @@ export class FlightScene extends Phaser.Scene {
       pitchUp:      this.keys.A.isDown || TouchInput.isHeld('pitchUp'),
       pitchDown:    this.keys.D.isDown || TouchInput.isHeld('pitchDown'),
       engineOn:     this.engineRunning,
+      airbrake:     this.airbrakeOn,
     };
 
     // The touch throttle is a LEVER: it gives an absolute demand, which is
@@ -892,6 +897,21 @@ export class FlightScene extends Phaser.Scene {
         SoundEngine.gearMove(this.state.gearDown);
         EventBus.emit('flight:gear-toggled', { down: this.state.gearDown });
       }
+    }
+    /*
+     * Airbrakes. A fast aeroplane cannot be slowed by taking the power off
+     * alone — that just makes it a glider — and every approach in a transport
+     * was a fight to get below flap speed. B puts the panels up and leaves
+     * them up; pushing the power to full stows them, as on a go-around.
+     */
+    if (Phaser.Input.Keyboard.JustDown(this.keys.B) || TouchInput.consume('airbrake')) {
+      this.airbrakeOn = !this.airbrakeOn;
+      SoundEngine.flapMove();
+    }
+    if (this.airbrakeOn && this.state.throttle > 0.85) {
+      this.airbrakeOn = false;
+      SoundEngine.flapMove();
+      EventBus.emit('ui:show-notification', { message: 'Airbrakes stowed — full power.', type: 'info' });
     }
     if ((Phaser.Input.Keyboard.JustDown(this.keys.M) || TouchInput.consume('mute'))) {
       const muted = SoundEngine.toggleMute();
@@ -1365,6 +1385,11 @@ export class FlightScene extends Phaser.Scene {
     let bestBack = Infinity;
     for (const s of this.world.drops.sites) {
       if (s.state === 'served' || s.state === 'waiting' || s.got >= s.need) continue;
+      // A crate still coming down to them is not a miss — a pallet hangs
+      // under its canopy for ten seconds and more, and calling "you went
+      // straight over us" while it did, then "delivered" when it landed,
+      // was the game contradicting itself
+      if (this.world.drops.inFlightFor(s)) continue;
       const back = -dir * (s.x - worldX);
       if (back > 1400 && back < 5000 * WORLD_PX_PER_M && back < bestBack) { best = s; bestBack = back; }
     }
@@ -2026,7 +2051,10 @@ export class FlightScene extends Phaser.Scene {
       if (!inCorridor) cue = 'hold';
       // Just let one go: the aim point is past them because the crate is on
       // its way, not because the pass was late
-      else if (aimPast) cue = this.dropAwayFor === next && this.state.elapsedSeconds - this.dropAwayAt < 8 ? 'away' : 'late';
+      else if (aimPast) {
+        cue = this.dropAwayFor === next && (drops.inFlightFor(next) || this.state.elapsedSeconds - this.dropAwayAt < 3)
+          ? 'away' : 'late';
+      }
       else if (alt < next.bandLo - 2) cue = 'low';
       else if (alt <= next.bandHi + 3) cue = this.world.dropReticle?.onTarget ? 'release' : 'window';
       else cue = 'descend';
@@ -2081,11 +2109,19 @@ export class FlightScene extends Phaser.Scene {
         if (!this.missedCalled.has(behind.site)) {
           this.missedCalled.add(behind.site);
           const want = behind.site.need - behind.site.got;
-          SoundEngine.radio(`${behind.site.place} here — you went straight over us! Come round again.`,
-            { kind: 'traffic', station: behind.site.place.toUpperCase() });
+          // A site that has had crates from this pass was not missed — it
+          // just wants more, and saying "missed" next to "right on them"
+          // read as the game contradicting itself
+          const had = behind.site.got > 0;
+          SoundEngine.radio(had
+            ? `${behind.site.place} here — got that one, thank you! We need ${want} more — come round again.`
+            : `${behind.site.place} here — you went straight over us! Come round again.`,
+          { kind: 'traffic', station: behind.site.place.toUpperCase() });
           EventBus.emit('ui:show-notification', {
-            message: `↺ Missed ${titleOf(behind.site)} — ${press('turn')} to go back · they still need ${want}`,
-            type: 'warning',
+            message: had
+              ? `↺ ${titleOf(behind.site)} needs ${want} more — ${press('turn')} to go back`
+              : `↺ Missed ${titleOf(behind.site)} — ${press('turn')} to go back · they still need ${want}`,
+            type: had ? 'info' : 'warning',
           });
         }
         this.dropZone = {
@@ -2105,7 +2141,7 @@ export class FlightScene extends Phaser.Scene {
     // Release
     const pressed = Phaser.Input.Keyboard.JustDown(this.keys.SPACE) || TouchInput.consume('drop');
     const letGo = (): void => {
-      if (drops.release(worldX, alt, this.state.groundSpeed, dir)) {
+      if (drops.release(worldX, alt, this.state.groundSpeed, dir, site)) {
         this.dropAwayFor = site;
         this.dropAwayAt = this.state.elapsedSeconds;
         this.dropStats.dropped++;

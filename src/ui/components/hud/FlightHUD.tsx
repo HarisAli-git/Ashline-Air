@@ -220,6 +220,12 @@ export function FlightHUD(): React.ReactElement | null {
           {status?.retractableGear !== false && (
             <span style={{ color: gearDown ? '#9fe8b0' : '#5a5040' }}>GEAR</span>
           )}
+          {(state.airbrake ?? 0) > 0.05 && (
+            <span style={{
+              color: '#ffd080', marginLeft: 8,
+              animation: (state.airbrake ?? 0) < 0.95 ? 'aa-pulse 0.6s ease-in-out infinite' : 'none',
+            }}>AIRBRAKE</span>
+          )}
         </div>
         <FlapGauge scale={vp.uiScale} compact={compact} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)}
           angle={state.flapAngle ?? 0} stops={status?.flaps?.stops ?? [0, 10, 20, 35]}
@@ -520,7 +526,7 @@ function FlapGauge({ scale, compact, stage, angle, stops, limitKmh, nextLimitKmh
       </div>
       {blownBack && (
         <div style={{ fontSize: n(8), color: '#ffd080', marginTop: n(1) }}>
-          held back — slow down
+          held back — slow down · {touch ? 'AIRBRAKE' : 'B'} airbrake
         </div>
       )}
       {!blownBack && nextTooFast && stage < 3 && angle > -1 && (

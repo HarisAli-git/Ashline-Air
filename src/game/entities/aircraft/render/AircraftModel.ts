@@ -65,6 +65,8 @@ export interface ModelPose {
   landingLight: boolean;
   /** After a crash: the props are gone. */
   shed: boolean;
+  /** Airbrake panels, 0 flush … 1 standing up. */
+  spoiler?: number;
 }
 
 interface Material {
@@ -550,6 +552,32 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
       };
       if (withFlaps) hinged(0.14, 0.58, 'flap');
       hinged(0.62, 0.96, 'ail');
+      /*
+       * Airbrake panels: plates on top of the wing just ahead of the flap,
+       * hinged on their front edge, standing up into the airflow. Flush and
+       * all but invisible until they are used — then the most obvious thing
+       * on the wing, which is the point.
+       */
+      if (withFlaps) {
+        const up = (f: number, x: number): V3 => {
+          const a = at(f);
+          return add(section(a.le, [-1, 0, 0], [0, -1, 0], a.c, a.t, x, x + 0.01)[1], [0, -0.3, 0]);
+        };
+        const p00 = up(0.2, 0.5), p01 = up(0.52, 0.5), p10 = up(0.2, 0.69), p11 = up(0.52, 0.69);
+        const axis = norm(sub(p01, p00));
+        const pi = B.newPart({ pivot: p00, axis, sign: 1, offset: [0, 0, 0], kind: 'spoiler' });
+        name(`spoiler${side > 0 ? 'R' : 'L'}${tag}`, pi);
+        const mid = scl(add(add(p00, p01), add(p10, p11)), 0.25);
+        const top = [p00, p01, p11, p10].map(q => B.v(q));
+        B.quad(top[0], top[1], top[2], top[3], MAT.wingTop, 1, add(mid, [0, 3, 0]));
+        const bot = [p00, p01, p11, p10].map(q => B.v(add(q, [0, 0.35, 0])));
+        B.quad(bot[0], bot[3], bot[2], bot[1], MAT.wingBot, 1, add(mid, [0, -3, 0]));
+        // Which way is trailing edge UP?
+        const te = scl(add(p10, p11), 0.5);
+        const rot = add(rotAxis(sub(te, p00), axis, Math.cos(0.3), Math.sin(0.3)), p00);
+        B.parts[pi].sign = rot[1] < te[1] ? 1 : -1;
+        B.part = 0;
+      }
     }
   };
   if (w.layout === 'biplane') {
@@ -879,6 +907,7 @@ export class AircraftModel {
       p.slide = 0;
       switch (p.kind) {
         case 'flap': p.angle = flapRad; break;
+        case 'spoiler': p.angle = (pose.spoiler ?? 0) * 0.95; break;
         case 'ail': p.angle = 0; break;
         case 'elevator': p.angle = -pose.elevator * 0.4; break;
         case 'rudder': p.angle = pose.rudder; break;

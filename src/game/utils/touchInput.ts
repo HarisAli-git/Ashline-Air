@@ -9,7 +9,7 @@
  */
 
 export type HeldControl = 'pitchUp' | 'pitchDown' | 'throttleUp' | 'throttleDown';
-export type PulseControl = 'engine' | 'gear' | 'flaps' | 'flapsUp' | 'time' | 'mute' | 'abort' | 'drop' | 'turn';
+export type PulseControl = 'engine' | 'gear' | 'flaps' | 'flapsUp' | 'airbrake' | 'time' | 'mute' | 'abort' | 'drop' | 'turn';
 
 const held: Record<HeldControl, boolean> = {
   pitchUp: false, pitchDown: false, throttleUp: false, throttleDown: false,

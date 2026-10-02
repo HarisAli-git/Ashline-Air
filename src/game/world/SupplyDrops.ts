@@ -100,6 +100,8 @@ export interface Crate {
   method: DropMethod;
   /** Seconds since a pallet's main canopy opened; -1 while it is on the drogue. */
   canopyT: number;
+  /** The site it was let go for, if there was one in the sight. */
+  target?: DropSite | null;
 }
 
 /** Somebody running out to a crate and carrying it back. */
@@ -412,7 +414,7 @@ export class SupplyDrops {
    * It leaves with the aircraft's ground speed and no vertical speed — which is
    * the whole trick of a supply drop, and why the reticle leads the aircraft.
    */
-  release(planeWorldX: number, planeAlt: number, groundSpeedMs: number, dir: 1 | -1 = 1): boolean {
+  release(planeWorldX: number, planeAlt: number, groundSpeedMs: number, dir: 1 | -1 = 1, target: DropSite | null = null): boolean {
     if (this.cratesLeft <= 0 || planeAlt < 4) return false;
     this.cratesLeft--;
     // Box-Muller: a gust you cannot predict, larger the higher you let go
@@ -425,9 +427,14 @@ export class SupplyDrops {
       drift: gauss * sigma * WORLD_PX_PER_M,
       spin: (Math.random() - 0.5) * (this.method === 'pallet' ? 1.5 : 6),
       age: 0, landed: false, landedT: 0, onRoofX: null,
-      method: this.method, canopyT: -1,
+      method: this.method, canopyT: -1, target,
     });
     return true;
+  }
+
+  /** A crate let go for this site is still in the air. */
+  inFlightFor(s: DropSite): boolean {
+    return this.crates.some(c => !c.landed && c.target === s);
   }
 
   /**

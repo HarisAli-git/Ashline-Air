@@ -78,8 +78,25 @@ export const TUNING = {
   powerExp: 1.35,
   /** Normally aspirated: power drops faster than the air does. */
   thrustLapse: 1.3,
-  /** Drag of a windmilling propeller at idle, as CD, falling off with power. */
-  idleDragCD: 0.022,
+  /**
+   * Drag of the propeller at idle (or windmilling with the engine off), as
+   * CD, falling off with power.
+   *
+   * 0.022 for everything meant a power cut barely registered: from cruise,
+   * holding height, an ATR took a full minute to come down to 1.7 × stall,
+   * and the engine could be shut down and the aeroplane flown on its stored
+   * speed for most of a kilometre a minute. A propeller at flight idle is a
+   * disc of fine-pitch blades — on a turboprop it is the brake pilots slow
+   * down with — so it is several times that, and a turboprop's much more.
+   */
+  idleDragPiston: 0.035,
+  idleDragTurboprop: 0.065,
+  /** Airbrake panels fully up: drag, lift spoiled in the air, lift dumped on the ground. */
+  airbrakeCD: 0.055,
+  airbrakeLift: 0.08,
+  airbrakeGroundDump: 0.55,
+  /** Seconds for the panels to travel all the way. */
+  airbrakeTime: 0.8,
   /**
    * Fraction of the data-sheet climb rate the aeroplane actually achieves.
    *
@@ -173,6 +190,8 @@ export interface FlightInput {
   pitchUp: boolean;
   pitchDown: boolean;
   engineOn: boolean;
+  /** The airbrake switch: out while true. */
+  airbrake?: boolean;
 }
 
 export class AircraftController {
@@ -189,6 +208,8 @@ export class AircraftController {
   private readonly K: number;
   /** Parasitic drag, solved so the aeroplane climbs at its quoted rate. */
   private readonly CD0: number;
+  /** Propeller drag at idle for this engine type — see TUNING. */
+  private readonly idleDrag: number;
   /** Shaft power per kilogram at full throttle, sea level — solved from vTop. */
   private readonly pMax: number;
   /** Speed scale of the propeller's low-speed inefficiency. */
@@ -262,6 +283,7 @@ export class AircraftController {
     this.takeoffFlap = geo.takeoffFlap;
     // A nose engine blows straight over the tail; wing engines mostly miss it
     this.propwash = spec.engines.some(e => e.nose) ? 0.3 : 0.1;
+    this.idleDrag = spec.engineStyle === 'turboprop' ? TUNING.idleDragTurboprop : TUNING.idleDragPiston;
     this.flapMax = spec.flap.maxDeflectDeg;
     this.flapStops = [0, Math.round(this.flapMax * 0.33), Math.round(this.flapMax * 0.6), this.flapMax];
 
@@ -331,6 +353,17 @@ export class AircraftController {
     return best;
   }
 
+  /**
+   * How much of the idle propeller drag is there at this power: all of it at
+   * idle, none above half power. A propeller only turns into a brake once
+   * the power is nearly off; letting it linger into cruise power just made
+   * every aeroplane slower and thirstier in level flight.
+   */
+  private idleShare(power: number): number {
+    const k = Math.max(0, 1 - power / 0.5);
+    return k * k;
+  }
+
   /** Density ratio at a gameplay altitude, for this aircraft. */
   sigmaAt(altitudeM: number): number {
     return isaSigma(Math.max(0, altitudeM) * this.altScale);
@@ -384,6 +417,7 @@ export class AircraftController {
       distanceTravelled: 0,
       elapsedSeconds: 0,
       modifiers: { fuelBurnMult: 1, dragMult: 1, liftMult: 1, stabilityMult: 1 },
+      airbrake: 0,
     };
   }
 
@@ -426,6 +460,14 @@ export class AircraftController {
     const tau = lever > s.enginePower ? TUNING.spoolUp : TUNING.spoolDown;
     s.enginePower += (lever - s.enginePower) * (1 - Math.exp(-dt / tau));
     const effThrottle = s.enginePower;
+
+    // ── Airbrakes: the panels follow the switch on their own motor ────────
+    {
+      const want = input.airbrake ? 1 : 0;
+      const now = s.airbrake ?? 0;
+      s.airbrake = now + clamp(want - now, -dt / TUNING.airbrakeTime, dt / TUNING.airbrakeTime);
+    }
+    const brakeF = s.airbrake;
 
     const sigma = this.sigmaAt(s.altitude);
     this.sigma = sigma;
@@ -507,12 +549,15 @@ export class AircraftController {
     // the wing's lift onto the wheels — otherwise full flap at touchdown speed
     // still carries the aeroplane and the brakes have nothing to bite with.
     if (onGround && this.braking) CL *= 0.45;
+    // Airbrakes on the ground are lift dumpers: weight onto the wheels
+    if (onGround) CL *= 1 - TUNING.airbrakeGroundDump * brakeF;
     this.stallIntensity = stallT;
     this.stallMargin = clamp((alphaPeak - alpha) / Math.max(0.01, alphaPeak), 0, 1);
 
     const dmgDrag = 1 + dmg * 1.3;
     const dmgLift = 1 - dmg * 0.35;
-    const liftK = dmgLift * s.modifiers.liftMult;
+    // Up in the air the panels spoil a little of the wing as well
+    const liftK = dmgLift * s.modifiers.liftMult * (onGround ? 1 : 1 - TUNING.airbrakeLift * brakeF);
 
     // 1g stall speed in this configuration, for the HUD
     this.stallSpeedNow = Math.sqrt(GRAVITY / (this.K * clMax * Math.max(0.2, liftK))) / sqrtSigma;
@@ -523,7 +568,8 @@ export class AircraftController {
     if (s.gearDown && !this.gearFixed) CD += 0.014;
     CD += stallT * TUNING.stallCD;
     // A windmilling prop at idle is a disc of drag; under power it makes thrust.
-    CD += TUNING.idleDragCD * Math.pow(1 - effThrottle, 2);
+    CD += this.idleDrag * this.idleShare(effThrottle);
+    CD += TUNING.airbrakeCD * brakeF;
 
     const aL = qK * CL * liftK;
     s.loadFactor = onGround ? 1 : clamp(aL / GRAVITY, -1.5, 6);
@@ -544,8 +590,8 @@ export class AircraftController {
     // The speed the CURRENT POWER can actually hold level, near enough
     let vSus = this.vCruise;
     {
-      const cdT = this.CD0 + TUNING.inducedK * 0.3 + TUNING.idleDragCD * Math.pow(1 - effThrottle, 2)
-        + (s.gearDown && !this.gearFixed ? 0.014 : 0);
+      const cdT = this.CD0 + TUNING.inducedK * 0.3 + this.idleDrag * this.idleShare(effThrottle)
+        + (s.gearDown && !this.gearFixed ? 0.014 : 0) + TUNING.airbrakeCD * brakeF;
       for (let i = 0; i < 4; i++) {
         const t = this.thrust(power, Math.max(1, vSus / sqrtSigma));
         vSus = Math.sqrt(Math.max(0, t) / Math.max(1e-5, this.K * cdT));
