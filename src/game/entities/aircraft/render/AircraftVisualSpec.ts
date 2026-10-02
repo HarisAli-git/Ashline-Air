@@ -289,9 +289,14 @@ const RAW_SPECS: Record<string, RawSpec> = {
      * bush machine (a Super Cub, a Helio Courier) is not enormous tyres but
      * LONG LEGS: deep prop clearance and a lot of travel to soak up a gravel
      * bar. So the tyre comes down and the strut goes up.
+     *
+     * Too far up: at 23 the gear hung 1.2 fuselage-heights below the belly —
+     * stilts, not legs. A Super Cub's wheels sit about 0.8 of the cabin's
+     * depth below it, which is what the crop duster already does; 15 matches
+     * that and still clears the prop by two-thirds of its radius, tail up.
      */
     gear:  { fixed: true, style: 'bungee', rake: 4, tyre: 'tundra', mainX: 22, noseX: null,
-             tailWheelX: -60, strutLen: 23, wheelR: 9.5, hingeY: 11 },
+             tailWheelX: -60, strutLen: 15, wheelR: 9, hingeY: 11 },
     flap:  { maxDeflectDeg: 35 },
     beacon: { x: -62, y: -38 },
     exhaust: { x: 44, y: 12 },

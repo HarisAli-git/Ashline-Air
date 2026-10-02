@@ -1,4 +1,4 @@
-import type { FlightState, LandingResult, Contract, FlightEventDefinition, WeatherState, FlightAction } from '../../types';
+import type { FlightState, LandingResult, Contract, FlightEventDefinition, WeatherState } from '../../types';
 
 /**
  * Typed event map for all cross-system communication.
@@ -67,10 +67,6 @@ export interface GameEvents {
   // Flight runtime
   'flight:state-update': FlightState;
   'flight:event-triggered': { event: FlightEventDefinition };
-  'flight:event-choice': { eventId: string; choiceId: string };
-  'flight:apply-event-choice': { choiceId: string };
-  /** A choice that DOES something; FlightScene carries it out. */
-  'flight:event-action': { action: FlightAction; value: number };
   'flight:fuel-critical': { fuelRemaining: number };
   'flight:gear-toggled': { down: boolean };
   'flight:flaps-toggled': { deployed: boolean; stage?: number };
@@ -188,6 +184,10 @@ export interface GameEvents {
     stallKmh: number;
     /** Climb left at this height as a fraction of sea level — 0 at the ceiling. */
     climbReserve: number;
+    /** The last flight event's caution — BIRD STRIKE, FUEL LEAK — while it stands. */
+    eventCaution: string | null;
+    /** Emergency coolant charges left this flight (C / COOLANT). */
+    coolantLeft: number;
     /** Icing / sand / avionics caution from the weather, or null. */
     weatherCaution: string | null;
     /** 0–1 ice on the airframe, for the gauge. */
@@ -225,8 +225,6 @@ export interface GameEvents {
 
   // UI
   'ui:show-notification': { message: string; type: 'info' | 'warning' | 'danger' | 'success' };
-  'ui:show-event-modal': { event: FlightEventDefinition };
-  'ui:close-event-modal': void;
 }
 
 type EventHandler<T> = T extends void ? () => void : (payload: T) => void;

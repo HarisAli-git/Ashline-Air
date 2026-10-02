@@ -1,11 +1,12 @@
 import React from 'react';
-import { useFlightState, useEventModal, useGearFlaps, useCargo, useRouteInfo, useFlightStatus, useTutorial } from '../../store/gameStore';
-import { EventBus, type DropZoneStatus } from '../../../game/utils/EventBus';
+import { useFlightState, useGearFlaps, useCargo, useRouteInfo, useFlightStatus, useTutorial } from '../../store/gameStore';
+import type { DropZoneStatus } from '../../../game/utils/EventBus';
 import { press } from '../../../game/utils/controls';
 import { SaveService } from '../../../services/SaveService';
 import { useViewport } from '../../viewport';
 import { hudStyles, type HudStyles } from './hudStyles';
 import { TrainingPanel, TrainingDebrief } from './TrainingPanel';
+import { COOLANT_HOT } from '../../../game/entities/aircraft/Coolant';
 
 /**
  * The instrument panel was a slab.
@@ -30,7 +31,6 @@ import { TrainingPanel, TrainingDebrief } from './TrainingPanel';
 export function FlightHUD(): React.ReactElement | null {
   const vp = useViewport();
   const state = useFlightState();
-  const event = useEventModal();
   const tutorial = useTutorial();
   const { gearDown, flapsDeployed } = useGearFlaps();
   const cargo = useCargo();
@@ -41,8 +41,7 @@ export function FlightHUD(): React.ReactElement | null {
 
   const compact = vp.isCompact;
   const styles = hudStyles(
-    vp.uiScale, compact, vp.isTouch, event ? event.choices.length : 0,
-    compact && !!(tutorial?.training || tutorial?.coach),
+    vp.uiScale, compact, vp.isTouch, compact && !!(tutorial?.training || tutorial?.coach),
   );
 
   const { def } = SaveService.getActiveAircraft();
@@ -58,7 +57,7 @@ export function FlightHUD(): React.ReactElement | null {
   // ── Progressive disclosure ────────────────────────────────────────────
   // These earn screen space only once they are a problem. Everything that is
   // fine stays invisible, which is most of what the old panel was showing.
-  const warnTemp = state.engineTemp > 0.72;
+  const warnTemp = state.engineTemp > COOLANT_HOT;
   const warnFuel = fuelFrac < 0.28;
   const warnHull = integrity < 70;
   const warnCargo = cargo !== null && cargo.average < 80;
@@ -86,6 +85,7 @@ export function FlightHUD(): React.ReactElement | null {
           {status.engineFailed && (
             <Chip s={styles} tone="#ff4a3a" text={compact ? 'ENGINE OUT' : `ENGINE OUT — ${press('engine').toUpperCase()}`} />
           )}
+          {status.eventCaution && <Chip s={styles} tone="#ff8844" text={status.eventCaution} />}
           {status.stall && <Chip s={styles} tone="#ff4a3a" text="STALL" />}
           {status.weatherCaution && (
             <Chip s={styles} text={status.weatherCaution}
@@ -124,8 +124,7 @@ export function FlightHUD(): React.ReactElement | null {
       )}
 
       {/* ── The next drop site, while somebody is calling ────────────────── */}
-      {/* On a phone a radio call spans the top, so the card steps aside for it */}
-      {status?.dropZone && !(compact && event) && (
+      {status?.dropZone && (
         <DropCard s={styles} zone={status.dropZone} compact={compact} touch={vp.isTouch} />
       )}
 
@@ -206,6 +205,11 @@ export function FlightHUD(): React.ReactElement | null {
           <Mini s={styles} label="CRATES" value={`${status.cratesLeft}`} tone="#9fe8b0" />
         )}
         {warnTemp && <Mini s={styles} label="ENG" value={`${tempPct}%`} tone="#ff8844" />}
+        {/* The charge, beside the reading it fixes — only while it could be used */}
+        {warnTemp && status && (
+          <Mini s={styles} label="COOL" value={status.coolantLeft > 0 ? (vp.isTouch ? 'READY' : 'C') : 'USED'}
+            tone={status.coolantLeft > 0 ? '#88ccff' : '#5a5040'} />
+        )}
         {warnHull && (
           <Mini s={styles} label="HULL" value={`${integrity.toFixed(0)}%`}
             tone={integrity < 40 ? '#ff4a3a' : '#ff8844'} />
@@ -233,8 +237,6 @@ export function FlightHUD(): React.ReactElement | null {
           overspeed={!!status?.flaps?.overspeed} blownBack={!!status?.flaps?.blownBack} speedKmh={speedKmh} touch={vp.isTouch} />
       </div>
 
-      {/* ── The radio call ──────────────────────────────────────────────── */}
-      {event && <RadioStrip s={styles} event={event} compact={compact} touch={vp.isTouch} />}
       {/*
         * One line of teaching at the bottom centre — the only part of the
         * screen the HUD redesign left completely clear, and the same place
@@ -379,65 +381,6 @@ const WEATHER_LABEL: Record<string, string> = {
   strong_winds: '💨 ROUGH AIR',
   cloudy: '☁ CLOUD',
 };
-
-interface EventLike {
-  title: string;
-  description: string;
-  choices: Array<{
-    id: string;
-    label: string;
-    consequences?: Array<{ description?: string }>;
-  }>;
-}
-
-/**
- * An incoming call, docked under the route rail.
- *
- * The old version was a centred box — on a phone, a sheet taking well over
- * half the screen to ask a one-line question. Events arrive over the RADIO, so
- * this is shaped like a transmission: who is calling, what they said, and the
- * replies as numbered chips on the row beneath. Roughly three lines instead of
- * half a screen, and the aeroplane you are deciding about stays visible while
- * you decide.
- *
- * The cost of each choice is kept — knowing what a switch does before you
- * throw it is what made these decisions real rather than a coin toss — but it
- * is demoted to one quiet line under the label, and dropped entirely on a
- * phone where the room is not there.
- */
-function RadioStrip({ s, event, compact, touch }: {
-  s: HudStyles; event: EventLike; compact: boolean; touch: boolean;
-}): React.ReactElement {
-  return (
-    <div style={s.radioStrip}>
-      <div style={s.radioHead}>
-        <span style={s.radioLive} />
-        <span style={s.radioFrom}>{event.title}</span>
-      </div>
-      <p style={s.radioBody}>{event.description}</p>
-      <div style={s.radioChoices}>
-        {event.choices.map((choice, i) => {
-          const cost = (choice.consequences ?? [])
-            .map(c => c.description).filter(Boolean).join(' · ');
-          return (
-            <button
-              key={choice.id}
-              style={s.radioChip}
-              onClick={() => EventBus.emit('flight:apply-event-choice', { choiceId: choice.id })}
-            >
-              {/* A number key means nothing to a finger */}
-              {!touch && <span style={s.radioChipKey}>{i + 1}</span>}
-              <span style={s.radioChipText}>
-                <span>{choice.label}</span>
-                {cost && !compact && <span style={s.radioChipCost}>{cost}</span>}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
 
 /** Vertical air movement as a ribbon growing from a centre line. */
 function VarioRibbon({ s, air, inThermal }: {

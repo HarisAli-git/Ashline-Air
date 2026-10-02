@@ -8,10 +8,10 @@ import {
   type BuildingKind, type Span, type Town,
 } from './Towns';
 
-/** Clear air after the departure strip, world px (3 km). */
-const CLIMB_OUT_PX = 3000 * 9;
-/** Clear air before the destination's approach starts, world px (2.5 km). */
-const APPROACH_PX = 2500 * 9;
+/** Clear air after the departure strip, world px (1.2 km). */
+const CLIMB_OUT_PX = 1200 * 9;
+/** Clear air before the destination's approach starts, world px (1.2 km). */
+const APPROACH_PX = 1200 * 9;
 
 /*
  * The surfaces nothing solid may stand above, rising from each runway.
@@ -275,9 +275,11 @@ export class Hazards {
      * Furniture could start 350 m past the end of the strip, and a raider
      * zone with it — so a new pilot, still at forty metres with the flaps out
      * and no speed, was inside the reach of every gun on the route. That is
-     * not a decision, it is a tax on taking off. Three kilometres to climb in
-     * and two and a half to set up the approach are kept clear of anything
-     * that shoots, guns' reach included.
+     * not a decision, it is a tax on taking off. The first and last 1.2 km
+     * are kept clear of anything that shoots, guns' reach included.
+     *
+     * It was three and two and a half: on a twelve-kilometre hop that left
+     * room for half a zone, and the short routes went quiet altogether.
      */
     keepOut.push([startPx - GUN_REACH_PX, startPx + CLIMB_OUT_PX + GUN_REACH_PX]);
     keepOut.push([endPx - APPROACH_PX - GUN_REACH_PX, endPx + GUN_REACH_PX]);

@@ -16,7 +16,7 @@ import { fadeIn, fadeToScene } from '../utils/transitions';
 import { SoundEngine } from '../audio/SoundEngine';
 import type { FlightState, FlightEventDefinition, LandingQuality, LandingResult, WeatherCondition } from '../../types';
 import { clamp, distance, pixelsToKm } from '../utils/math';
-import type { ApproachKind, FlightAction } from '../../types';
+import type { ApproachKind } from '../../types';
 import { isTouchDevice } from '../utils/device';
 import { CameraRig } from './CameraRig';
 import { routeKmBetween } from '../../services/RouteService';
@@ -26,6 +26,7 @@ import { DROP_REWARD, cratesFor, siteReply, type DropSite, dropMethodFor } from 
 import { STRUCTURE_NAME, DROP_RUN_BEFORE_PX, DROP_BAND_RUN_PX } from '../world/Towns';
 import { routeSeed, originStripPx, destStripPx } from '../world/RoutePreview';
 import { press } from '../utils/controls';
+import { tryDumpCoolant } from '../entities/aircraft/Coolant';
 import { destStripPx as destStripOf } from '../world/RoutePreview';
 
 /** The approach angle the landing guide draws and the call reads against. */
@@ -126,7 +127,6 @@ export class FlightScene extends Phaser.Scene {
   private hasBeenAirborne = false;
   private gearToggleCooldown  = 0;
   private flapsToggleCooldown = 0;
-  private eventModalOpen   = false;
   private lastEventCheckAt = 0;
   private eventUnsubs: Array<() => void> = [];
 
@@ -212,6 +212,8 @@ export class FlightScene extends Phaser.Scene {
   private dropArmed: DropSite | null = null;
   /** The airbrake switch. */
   private airbrakeOn = false;
+  /** Throttle lever last frame — the go-around stow fires on the push, not the position. */
+  private lastThrottle = 0;
   /** The site the last crate went to, and when — so a good release is not called late. */
   private dropAwayFor: DropSite | null = null;
   private dropAwayAt = -99;
@@ -235,6 +237,8 @@ export class FlightScene extends Phaser.Scene {
   private threatHold = 0;         // keeps the caution readable between bursts
   /** Current weather caution text, or null. */
   private weatherCaution: string | null = null;
+  /** The last flight event's chip and when it comes down (Infinity = stays). */
+  private eventCaution: { text: string; until: number } | null = null;
   private iceLoad = 0;
   private avionicsOut = false;
   private trafficAdvisory: number | null = null; // their height minus ours, m
@@ -246,6 +250,8 @@ export class FlightScene extends Phaser.Scene {
   private ceilingWarnAt2 = -99;
   private flapWarnAt = -99;
   private restartHoldFor = 0;     // seconds of cranking left
+  /** Emergency coolant charges left — one a flight. See Coolant. */
+  private coolantLeft = 1;
 
   // -- Pacing --------------------------------------------------------------
   /**
@@ -316,7 +322,6 @@ export class FlightScene extends Phaser.Scene {
     this.gearToggleCooldown  = 0;
     this.flapsToggleCooldown = 0;
     this.engineRunning       = true;
-    this.eventModalOpen      = false;
     this.lastEventCheckAt    = 0;
     this.pendingTouchdown    = null;
     this.rollout             = false;
@@ -334,6 +339,7 @@ export class FlightScene extends Phaser.Scene {
     this.groundThreat        = null;
     this.threatHold          = 0;
     this.weatherCaution      = null;
+    this.eventCaution        = null;
     this.iceLoad             = 0;
     this.avionicsOut         = false;
     this.trafficAdvisory     = null;
@@ -344,6 +350,7 @@ export class FlightScene extends Phaser.Scene {
     this.ceilingWarnAt2      = -99;
     this.flapWarnAt          = -99;
     this.restartHoldFor      = 0;
+    this.coolantLeft         = 1;
   }
 
   /** Kept so it can be repositioned on resize and hidden on touch devices. */
@@ -501,12 +508,15 @@ export class FlightScene extends Phaser.Scene {
     if (this.training) {
       this.world.setTrainingRoute(this.routeKm, 'Millbrook');
     } else {
-      // The country gets more dangerous as the career goes on: rifles and the
-      // odd heavy MG for the first contracts, the full arsenal by the tenth
+      // The country gets more dangerous as the career goes on: mostly rifles
+      // and heavy MGs at first, the full arsenal by the sixth contract. It
+      // started at 0.15, which left the first contracts all but unguarded.
       const done = SaveService.get().player.completedContractIds?.length ?? 0;
-      const threat = clamp(0.15 + done * 0.09, 0.15, 1);
+      const threat = clamp(0.4 + done * 0.1, 0.4, 1);
       this.world.setRoute(this.routeKm, this.hashRoute(this.contractId), this.originRunwayM, this.destRunwayM, threat);
     }
+    // The batteries reach most of the way to THIS aeroplane's ceiling
+    this.world.raiders.setAircraftCeiling(definition.stats.maxAltitude);
     // Survivors along the route — something to do in the cruise. See SupplyDrops.
     // They live in the towns the route was just laid out with, so they go second.
     {
@@ -538,6 +548,7 @@ export class FlightScene extends Phaser.Scene {
     this.dropWindowToned = false;
     this.dropArmed = null;
     this.airbrakeOn = false;
+    this.lastThrottle = 0;
     this.dropAwayFor = null;
     this.dropAwayAt = -99;
     // Weather becomes a set of places on this route rather than a global mood,
@@ -673,8 +684,8 @@ export class FlightScene extends Phaser.Scene {
     // it can get.
     // G only appears for an aeroplane that actually has a retractable one.
     const keyLegend = this.aircraft.hasRetractableGear
-      ? 'W/S: Throttle   A/D: Pitch   F/V: Flaps   B: Airbrake   G: Gear   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort'
-      : 'W/S: Throttle   A/D: Pitch   F/V: Flaps   B: Airbrake   E: Engine   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort';
+      ? 'W/S: Throttle   A/D: Pitch   F/V: Flaps   B: Airbrake   G: Gear   E: Engine   C: Coolant   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort'
+      : 'W/S: Throttle   A/D: Pitch   F/V: Flaps   B: Airbrake   E: Engine   C: Coolant   SPACE: Drop   R: Turn   T: Time   M: Mute   ESC: Abort';
     this.keyHintText = this.add.text(width / 2, height - 4, keyLegend,
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
@@ -694,6 +705,7 @@ export class FlightScene extends Phaser.Scene {
       E:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E),
       G:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.G),
       B:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.B),
+      C:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.C),
       F:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.F),
       V:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.V),
       T:   this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.T),
@@ -704,37 +716,42 @@ export class FlightScene extends Phaser.Scene {
     };
 
     // DEV: number keys force weather conditions, 0 pulls the next traffic
-    // encounter forward so conflicts can be exercised without waiting them out
+    // encounter forward so conflicts can be exercised without waiting them
+    // out; 8 and 9 force a fuel leak and a bird strike.
     if (import.meta.env.DEV) {
       this.input.keyboard!.on('keydown', (ev: KeyboardEvent) => {
         const condition = DEV_WEATHER_KEYS[ev.key];
         if (condition) this.weather.forceCondition(condition);
         if (ev.key === '0') this.world.traffic.provoke();
+        // 8 / 9 force the two flight events, which are otherwise rare rolls
+        if (ev.key === '8') FlightEventService.force('fuel_leak');
+        if (ev.key === '9') FlightEventService.force('bird_strike');
       });
     }
 
     // ── Event wiring ──────────────────────────────────────────────────────
-    // Physics pauses while a flight-event modal is up; the chosen consequence
-    // is applied to the authoritative state here (React only reports the choice).
+    // Nothing in here pauses the flight: events play out and apply themselves.
     this.eventUnsubs = [
-      EventBus.on('ui:show-event-modal',  () => { this.eventModalOpen = true; }),
-      EventBus.on('ui:close-event-modal', () => { this.eventModalOpen = false; }),
-      EventBus.on('flight:apply-event-choice', ({ choiceId }) => {
-        this.state = FlightEventService.applyChoice(choiceId, this.state);
-      }),
-      // A choice that names a manoeuvre has to FLY it. Stat pokes alone are
-      // why "Divert to the nearest settlement" read as doing nothing at all.
-      EventBus.on('flight:event-action', ({ action, value }) => this.runEventAction(action, value)),
       EventBus.on('weather:changed', ({ state: weather }) => {
         this.world.setWeather(weather.condition);
         this.fx.setCondition(weather.condition);
         this.disengageWarp('weather changing');
         FlightEventService.checkWeatherEvents(this.state);
       }),
-      // Events play their visual cinematic first, then the modal opens
+      // An event plays its cinematic, then simply happens — no question, no
+      // pause. Its chip says what it cost.
       EventBus.on('flight:event-triggered', ({ event }) => {
         this.disengageWarp(event.title.toLowerCase());
-        this.playEventCinematic(event, () => EventBus.emit('ui:show-event-modal', { event }));
+        this.playEventCinematic(event, () => {
+          // The flight can end while the birds are still in the air
+          if (this.landed || this.crashing) return;
+          this.state = FlightEventService.applyOutcome(event, this.state);
+          const { caution, cautionSeconds } = event.outcome;
+          this.eventCaution = {
+            text: caution,
+            until: cautionSeconds > 0 ? this.state.elapsedSeconds + cautionSeconds : Infinity,
+          };
+        });
       }),
       // Flight school's two exits: go again, or on to the map
       EventBus.on('flight:training-exit', ({ again }) => {
@@ -809,7 +826,7 @@ export class FlightScene extends Phaser.Scene {
     }
 
     if (this.crashing) { this.updateCrashSlide(delta / 1000); return; }
-    if (this.landed || this.eventModalOpen) return;
+    if (this.landed) return;
 
     // Browsers hand out jittery frame deltas — ±2 ms is normal even on a
     // locked 60 Hz display, and a tab hiccup gives one 40 ms frame followed by
@@ -903,16 +920,22 @@ export class FlightScene extends Phaser.Scene {
      * alone — that just makes it a glider — and every approach in a transport
      * was a fight to get below flap speed. B puts the panels up and leaves
      * them up; pushing the power to full stows them, as on a go-around.
+     *
+     * The stow is the PUSH through 85%, not the lever sitting above it. As a
+     * position test it undid B in the same frame whenever the power was
+     * already high — which is most of the flight — so the key did nothing.
      */
     if (Phaser.Input.Keyboard.JustDown(this.keys.B) || TouchInput.consume('airbrake')) {
       this.airbrakeOn = !this.airbrakeOn;
       SoundEngine.flapMove();
     }
-    if (this.airbrakeOn && this.state.throttle > 0.85) {
+    if (this.airbrakeOn && this.lastThrottle <= 0.85 && this.state.throttle > 0.85) {
       this.airbrakeOn = false;
       SoundEngine.flapMove();
       EventBus.emit('ui:show-notification', { message: 'Airbrakes stowed — full power.', type: 'info' });
     }
+    this.lastThrottle = this.state.throttle;
+    if (Phaser.Input.Keyboard.JustDown(this.keys.C) || TouchInput.consume('coolant')) this.dumpCoolant();
     if ((Phaser.Input.Keyboard.JustDown(this.keys.M) || TouchInput.consume('mute'))) {
       const muted = SoundEngine.toggleMute();
       EventBus.emit('ui:show-notification', { message: muted ? 'Sound muted.' : 'Sound on.', type: 'info' });
@@ -1108,7 +1131,9 @@ export class FlightScene extends Phaser.Scene {
     if (this.state.engineTemp > 0.9 && this.nagHeat.due(this.state.elapsedSeconds)) {
       SoundEngine.warn();
       EventBus.emit('ui:show-notification', {
-        message: 'ENGINE HOT — ease the power, or lower the nose so the air cools it',
+        message: this.coolantLeft > 0
+          ? `ENGINE HOT — ease the power, or ${press('coolant')} to dump coolant (once)`
+          : 'ENGINE HOT — ease the power, or lower the nose so the air cools it',
         type: 'warning',
       });
     }
@@ -1830,6 +1855,9 @@ export class FlightScene extends Phaser.Scene {
       },
       stallKmh: Math.round(this.controller.stallSpeedNow * 3.6),
       climbReserve: this.controller.climbReserve,
+      eventCaution: this.eventCaution && this.state.elapsedSeconds < this.eventCaution.until
+        ? this.eventCaution.text : null,
+      coolantLeft: this.coolantLeft,
     });
   }
 
@@ -2465,6 +2493,35 @@ export class FlightScene extends Phaser.Scene {
     this.approachText.setText(label).setStyle({ color }).setAlpha(1);
   }
 
+  /** Fire the emergency coolant charge, if there is one and the engine needs it. */
+  private dumpCoolant(): void {
+    const r = tryDumpCoolant(this.state, this.coolantLeft);
+    this.coolantLeft = r.left;
+    if (r.result === 'empty') {
+      EventBus.emit('ui:show-notification', { message: 'No coolant left this flight.', type: 'info' });
+      return;
+    }
+    if (r.result === 'not-hot') {
+      EventBus.emit('ui:show-notification', { message: 'Engine is not hot — coolant saved for when it is.', type: 'info' });
+      return;
+    }
+    this.state = r.state;
+    SoundEngine.steamVent();
+    const eng = this.aircraft.enginePoint();
+    const steam = this.add.particles(eng.x, eng.y, 'px_soft', {
+      lifespan: { min: 500, max: 1200 },
+      speedX: { min: -140, max: -40 },
+      speedY: { min: -60, max: 10 },
+      scale: { start: 0.35, end: 1.1 },
+      alpha: { start: 0.65, end: 0 },
+      tint: [0xe8f0f2, 0xcfd8dc],
+      emitting: false,
+    }).setDepth(7);
+    steam.explode(18);
+    this.time.delayedCall(1300, () => steam.destroy());
+    EventBus.emit('ui:show-notification', { message: 'Coolant dumped — engine back to 40%.', type: 'success' });
+  }
+
   /** Drop out of time warp with a reason the player can act on. */
   private disengageWarp(reason: string): void {
     if (this.timeScale === 1) return;
@@ -2481,7 +2538,6 @@ export class FlightScene extends Phaser.Scene {
     switch (event.id) {
       case 'bird_strike':        this.cinematicBirdStrike(done); return;
       case 'fuel_leak':          this.cinematicFuelLeak(done); return;
-      case 'engine_overheating': this.cinematicOverheat(done); return;
       default:                   this.time.delayedCall(350, done); return;
     }
   }
@@ -2544,82 +2600,7 @@ export class FlightScene extends Phaser.Scene {
     this.time.delayedCall(700, done);
   }
 
-  /** Dark smoke coughs out of the cowl with a shudder. */
-  private cinematicOverheat(done: () => void): void {
-    const eng = this.aircraft.enginePoint();
-    const smoke = this.add.particles(eng.x, eng.y, 'px_soft', {
-      lifespan: { min: 500, max: 1100 },
-      speedX: { min: -120, max: -40 },
-      speedY: { min: -50, max: 10 },
-      scale: { start: 0.4, end: 1.0 },
-      alpha: { start: 0.6, end: 0 },
-      tint: [0x2a2622, 0x413a30],
-      emitting: false,
-    }).setDepth(7);
-    smoke.explode(14);
-    this.cameras.main.shake(180, 0.004);
-    this.time.delayedCall(1100, () => smoke.destroy());
-    this.time.delayedCall(650, done);
-  }
-
   // ── Landing ───────────────────────────────────────────────────────────────
-
-  /**
-   * Carry out what a flight-event choice actually promised.
-   *
-   * Every one of these is visible from the cockpit within a second or two —
-   * that is the whole point. A choice whose only effect is a number in the
-   * save file is indistinguishable from closing the box.
-   */
-  private runEventAction(action: FlightAction, value: number): void {
-    switch (action) {
-      case 'divert': {
-        // Break off and put it down. `reachedDestination` is false this far
-        // out, so the report reads DIVERTED and the contract stays live.
-        EventBus.emit('ui:show-notification', {
-          message: 'Breaking off — putting her down short of the destination.',
-          type: 'warning',
-        });
-        this.finishFlight({
-          verticalSpeed: -1.4,
-          horizontalSpeed: this.state.speed,
-          gearDown: this.state.gearDown,
-          quality: 'good',
-          integrityDamage: 0,
-          cargoDamagePercent: 0,
-        });
-        break;
-      }
-      case 'clear_weather':
-        // You got above it / around it — so the weather genuinely stops.
-        this.weather.forceCondition('clear');
-        this.iceLoad = 0;
-        EventBus.emit('ui:show-notification', {
-          message: 'Clear air — you are above the worst of it.', type: 'success',
-        });
-        break;
-      case 'extend_route': {
-        // Going around is longer. The route strip and the distance readout
-        // both move, so the cost is on screen for the rest of the flight.
-        this.routeKm += value;
-        EventBus.emit('flight:route-info', {
-          routeKm: this.routeKm, destinationName: this.destinationName,
-        });
-        EventBus.emit('ui:show-notification', {
-          message: `Routing around it — ${value.toFixed(1)} km added to the leg.`,
-          type: 'warning',
-        });
-        break;
-      }
-      case 'full_power':
-        this.state.throttle = Math.min(1, this.state.throttle + value);
-        break;
-      case 'descend':
-        this.state.altitude = Math.max(12, this.state.altitude + value);
-        this.state.flightPathAngle = Math.min(this.state.flightPathAngle, -0.05);
-        break;
-    }
-  }
 
   /**
    * The coach, each frame: tell it what is going on, draw any height band it
@@ -2787,7 +2768,7 @@ export class FlightScene extends Phaser.Scene {
       overspeed: false, obstacleAheadM: null, obstacleLabel: null, trafficDeltaM: null, trafficAvoid: null,
       weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true,
       dropReady: false, cratesLeft: 0, dropZone: null, overshot: false, canTurn: false,
-      flaps: null, stallKmh: 0, climbReserve: 1,
+      flaps: null, stallKmh: 0, climbReserve: 1, eventCaution: null, coolantLeft: 0,
     });
     this.state.speed = 0;
     this.state.verticalSpeed = 0;

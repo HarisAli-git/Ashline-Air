@@ -1,222 +1,36 @@
 [
   {
-    "id": "engine_overheating",
-    "title": "Engine Overheating",
-    "description": "Warning lights flash on the instrument panel. Engine temperature is climbing into the red.",
-    "trigger": "on_engine_temp_high",
-    "triggerThreshold": 0.85,
-    "probability": 0.3,
-    "cooldownSeconds": 120,
-    "tags": [
-      "engine",
-      "critical"
-    ],
-    "choices": [
-      {
-        "id": "reduce_throttle",
-        "label": "Reduce throttle to cool down",
-        "consequences": [
-          {
-            "type": "delta",
-            "target": "throttle",
-            "value": -0.3,
-            "description": "Throttle reduced"
-          },
-          {
-            "type": "delta",
-            "target": "engineTemp",
-            "value": -0.2,
-            "description": "Engine begins cooling"
-          }
-        ]
-      },
-      {
-        "id": "push_through",
-        "label": "Push through — stay on schedule",
-        "consequences": [
-          {
-            "type": "delta",
-            "target": "engineTemp",
-            "value": 0.15,
-            "description": "Engine temp spikes further"
-          },
-          {
-            "type": "delta",
-            "target": "integrity",
-            "value": -8,
-            "description": "Engine stress damages airframe"
-          }
-        ]
-      },
-      {
-        "id": "emergency_coolant",
-        "label": "Dump emergency coolant",
-        "consequences": [
-          {
-            "type": "set",
-            "target": "engineTemp",
-            "value": 0.4,
-            "description": "Engine temp drops sharply"
-          },
-          {
-            "type": "delta",
-            "target": "integrity",
-            "value": -2,
-            "description": "Minor coolant system stress"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "id": "fuel_leak",
-    "title": "Fuel Leak Detected",
-    "description": "The fuel gauge is dropping faster than expected. You spot a thin mist trailing from the wing.",
-    "trigger": "on_fuel_low",
-    "triggerThreshold": 0.4,
-    "probability": 0.03,
-    "cooldownSeconds": 999,
-    "tags": [
-      "fuel",
-      "critical"
-    ],
-    "choices": [
-      {
-        "id": "seal_leak",
-        "label": "Seal it from the cabin and press on",
-        "consequences": [
-          {
-            "type": "multiply",
-            "target": "fuelBurnRate",
-            "value": 1.15,
-            "description": "Leak slowed, not stopped — burn up 15%"
-          },
-          {
-            "type": "delta",
-            "target": "integrity",
-            "value": -3,
-            "description": "Structural stress from the patch"
-          }
-        ]
-      },
-      {
-        "id": "divert_immediately",
-        "label": "Shut it down and put her on the deck now",
-        "consequences": [
-          {
-            "type": "action",
-            "target": "divert",
-            "value": 0,
-            "description": "Diverting — contract stays open"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "id": "bird_strike",
     "title": "Bird Strike",
     "description": "A flock of large birds appears from nowhere. A dull thud shakes the cockpit.",
     "trigger": "random",
     "probability": 0.01,
     "cooldownSeconds": 300,
-    "tags": [
-      "random",
-      "damage"
-    ],
-    "choices": [
-      {
-        "id": "assess_damage",
-        "label": "Assess the damage and press on",
-        "consequences": [
-          {
-            "type": "delta",
-            "target": "integrity",
-            "value": -10,
-            "description": "Leading edge caved in"
-          },
-          {
-            "type": "delta",
-            "target": "engineTemp",
-            "value": 0.1,
-            "description": "Debris through the engine"
-          }
-        ]
-      },
-      {
-        "id": "emergency_land",
-        "label": "Declare an emergency and land short",
-        "consequences": [
-          {
-            "type": "delta",
-            "target": "integrity",
-            "value": -5,
-            "description": "Controlled descent, light damage"
-          },
-          {
-            "type": "action",
-            "target": "divert",
-            "value": 0,
-            "description": "Diverting — contract stays open"
-          }
-        ]
-      }
-    ]
+    "tags": ["random", "damage"],
+    "outcome": {
+      "caution": "BIRD STRIKE −10%",
+      "cautionSeconds": 5,
+      "consequences": [
+        { "type": "delta", "target": "integrity", "value": -10, "description": "Leading edge caved in" },
+        { "type": "delta", "target": "engineTemp", "value": 0.1, "description": "Debris through the engine" }
+      ]
+    }
   },
   {
-    "id": "distress_signal",
-    "title": "Distress Signal",
-    "description": "Your radio crackles with a weak distress call. Someone is stranded not far from your current position.",
-    "trigger": "random",
-    "probability": 0.014,
-    "cooldownSeconds": 900,
-    "tags": [
-      "random",
-      "reputation"
-    ],
-    "choices": [
-      {
-        "id": "investigate",
-        "label": "Divert, find them, then carry on",
-        "consequences": [
-          {
-            "type": "delta",
-            "target": "fuel",
-            "value": -12,
-            "description": "The detour costs fuel"
-          },
-          {
-            "type": "action",
-            "target": "extend_route",
-            "value": 0.6,
-            "description": "0.6 km added to the leg"
-          },
-          {
-            "type": "add_reputation",
-            "target": "republic",
-            "value": 20,
-            "description": "The Republic hears about it"
-          },
-          {
-            "type": "add_money",
-            "target": "player",
-            "value": 500,
-            "description": "The survivors pay what they have"
-          }
-        ]
-      },
-      {
-        "id": "ignore",
-        "label": "Log the position and keep going",
-        "consequences": [
-          {
-            "type": "add_reputation",
-            "target": "republic",
-            "value": -10,
-            "description": "Republic pilots talk. Word gets around."
-          }
-        ]
-      }
-    ]
+    "id": "fuel_leak",
+    "title": "Fuel Leak",
+    "description": "The fuel gauge is dropping faster than expected. A thin mist is trailing from the wing.",
+    "trigger": "on_fuel_low",
+    "triggerThreshold": 0.4,
+    "probability": 0.03,
+    "cooldownSeconds": 999,
+    "tags": ["fuel", "critical"],
+    "outcome": {
+      "caution": "FUEL LEAK",
+      "cautionSeconds": 0,
+      "consequences": [
+        { "type": "multiply", "target": "fuelBurnRate", "value": 1.15, "description": "Fuel burning 15% faster" }
+      ]
+    }
   }
 ]
