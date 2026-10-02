@@ -668,6 +668,12 @@ class SoundEngineClass {
     this.blip(230, 0.55, 0.035, 'sawtooth', 300);
   }
 
+  /** Coolant venting: a valve thunk and a long hiss of steam off the cowl. */
+  steamVent(): void {
+    this.blip(140, 0.08, 0.08, 'square');
+    this.noiseBurst(1.2, 4200, 0.16, 'highpass', 0.7, 2400);
+  }
+
   /** Airframe buffet as the wing lets go. */
   stallBuffet(): void {
     this.noiseBurst(0.16, 110, 0.17);

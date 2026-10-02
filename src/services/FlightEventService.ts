@@ -1,4 +1,4 @@
-import type { FlightEventDefinition, FlightState, EventConsequence, AircraftDefinition, FlightAction } from '../types';
+import type { FlightEventDefinition, FlightState, EventConsequence, AircraftDefinition } from '../types';
 import { EventBus } from '../game/utils/EventBus';
 import { SaveService } from './SaveService';
 import { clamp } from '../game/utils/math';
@@ -14,7 +14,6 @@ interface ActiveEvent {
 class FlightEventServiceClass {
   private definitions: FlightEventDefinition[] = [];
   private activeEvents: ActiveEvent[] = [];
-  private pendingChoice: FlightEventDefinition | null = null;
   private lastAnyEventAt = -999;
 
   // Active aircraft stats so triggers scale to the airframe being flown
@@ -31,7 +30,6 @@ class FlightEventServiceClass {
 
   reset(def?: AircraftDefinition): void {
     this.activeEvents = [];
-    this.pendingChoice = null;
     this.lastAnyEventAt = -999;
     this.onCargoDamage = null;
     if (def) {
@@ -42,8 +40,6 @@ class FlightEventServiceClass {
   }
 
   checkEvents(state: FlightState): FlightEventDefinition | null {
-    if (this.pendingChoice) return null; // one event at a time
-
     for (const def of this.definitions) {
       if (def.trigger === 'on_weather_change') continue; // fired via checkWeatherEvents
       if (!this.shouldTrigger(def, state)) continue;
@@ -56,8 +52,6 @@ class FlightEventServiceClass {
 
   /** Called when the WeatherSystem announces a condition change. */
   checkWeatherEvents(state: FlightState): FlightEventDefinition | null {
-    if (this.pendingChoice) return null;
-
     for (const def of this.definitions) {
       if (def.trigger !== 'on_weather_change') continue;
       if (Math.random() > def.probability) continue;
@@ -81,47 +75,29 @@ class FlightEventServiceClass {
       this.activeEvents.push({ event: def, lastFiredAt: elapsed });
     }
 
-    this.pendingChoice = def;
     this.lastAnyEventAt = elapsed;
-    // FlightScene listens for this, plays the event's visual cinematic
-    // (bird flock, fuel mist, …), then opens the modal itself.
+    // FlightScene listens for this, plays the event's cinematic (bird flock,
+    // fuel mist, …) and then applies its outcome. Nothing waits on the player.
     EventBus.emit('flight:event-triggered', { event: def });
     return true;
   }
 
-  applyChoice(choiceId: string, state: FlightState): FlightState {
-    if (!this.pendingChoice) return state;
-
-    const choice = this.pendingChoice.choices.find(c => c.id === choiceId);
-    if (!choice) return state;
-
-    const eventId = this.pendingChoice.id;
-    this.pendingChoice = null;
-
-    let next = { ...state };
-    for (const consequence of choice.consequences) {
-      next = this.applyConsequence(next, consequence);
-    }
-
-    // Tell the player what their choice actually cost them — without this the
-    // modal reads as a pointless interruption.
-    const outcome = choice.consequences
-      .map(c => c.description)
-      .filter(Boolean)
-      .join(' · ');
-    const harmful = choice.consequences.some(
-      c => (c.type === 'delta' && c.value < 0) || c.type === 'add_cargo_damage',
-    );
-    if (outcome) {
-      EventBus.emit('ui:show-notification', {
-        message: outcome,
-        type: harmful ? 'warning' : 'success',
-      });
-    }
-
-    EventBus.emit('flight:event-choice', { eventId, choiceId });
-    EventBus.emit('ui:close-event-modal');
+  /**
+   * What the event does to the aeroplane. The state passed in is not touched;
+   * the scene swaps in what comes back.
+   */
+  applyOutcome(event: FlightEventDefinition, state: FlightState): FlightState {
+    let next: FlightState = { ...state, modifiers: { ...state.modifiers } };
+    for (const c of event.outcome.consequences) next = this.applyConsequence(next, c);
     return next;
+  }
+
+  /** DEV: fire one event now, whatever its trigger, odds and cooldown. */
+  force(id: string): boolean {
+    const def = this.definitions.find(d => d.id === id);
+    if (!def) return false;
+    EventBus.emit('flight:event-triggered', { event: def });
+    return true;
   }
 
   private shouldTrigger(def: FlightEventDefinition, state: FlightState): boolean {
@@ -171,14 +147,6 @@ class FlightEventServiceClass {
           factionId: c.target, delta: c.value, total: rep.points,
         });
       }
-      return next;
-    }
-    if (c.type === 'action') {
-      // Handed to FlightScene, which is the only thing that can actually fly
-      // the aeroplane somewhere.
-      EventBus.emit('flight:event-action', {
-        action: c.target as FlightAction, value: c.value,
-      });
       return next;
     }
     if (c.type === 'add_cargo_damage') {

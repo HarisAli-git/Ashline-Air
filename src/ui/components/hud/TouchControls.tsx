@@ -3,6 +3,7 @@ import { TouchInput, type HeldControl, type PulseControl } from '../../../game/u
 import { useFlightState, useGearFlaps, useFlightStatus } from '../../store/gameStore';
 import { useViewport } from '../../viewport';
 import { hudPanelHeight } from './hudStyles';
+import { COOLANT_HOT } from '../../../game/entities/aircraft/Coolant';
 
 /**
  * On-screen flight controls.
@@ -106,6 +107,11 @@ export function TouchControls(): React.ReactElement | null {
         {/* The engine being out overrides everything — nothing else matters */}
         {engineOut && (
           <PulseButton label="▶ START" scale={s} control="engine" wide danger />
+        )}
+
+        {/* A cooking engine with the charge still aboard — the one time it is worth a button */}
+        {!engineOut && state.engineTemp > COOLANT_HOT && (status?.coolantLeft ?? 0) > 0 && (
+          <PulseButton label="❄ COOLANT" scale={s} control="coolant" wide />
         )}
 
         {/* Survivors signalling: the drop is the only thing that matters now */}

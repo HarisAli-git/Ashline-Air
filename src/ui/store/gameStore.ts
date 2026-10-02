@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { EventBus, type DropZoneStatus } from '../../game/utils/EventBus';
 import { SaveService } from '../../services/SaveService';
-import type { FlightState, FlightEventDefinition } from '../../types';
+import type { FlightState } from '../../types';
 import type { TutorialPayload } from '../components/hud/TrainingPanel';
 
 /**
@@ -97,6 +97,10 @@ export interface FlightStatus {
   weatherCaution: string | null;
   iceLoad: number;
   avionicsOut: boolean;
+  /** The last flight event's caution — BIRD STRIKE, FUEL LEAK — while it stands. */
+  eventCaution: string | null;
+  /** Emergency coolant charges left this flight. */
+  coolantLeft: number;
 }
 
 export function useFlightStatus(): FlightStatus | null {
@@ -182,16 +186,6 @@ export function useNotifications(max: number): Note[] {
     return () => { off(); clearInterval(timer); };
   }, [max]);
   return notes;
-}
-
-export function useEventModal(): FlightEventDefinition | null {
-  const [event, setEvent] = useState<FlightEventDefinition | null>(null);
-  useEffect(() => {
-    const unsub1 = EventBus.on('ui:show-event-modal', ({ event }) => setEvent(event));
-    const unsub2 = EventBus.on('ui:close-event-modal', () => setEvent(null));
-    return () => { unsub1(); unsub2(); };
-  }, []);
-  return event;
 }
 
 export function useGearFlaps(): { gearDown: boolean; flapsDeployed: boolean } {
