@@ -310,6 +310,25 @@ class SoundEngineClass {
     return { src, filter, gain };
   }
 
+  /** The last target written to each continuously driven param. See `ramp`. */
+  private readonly lastTarget = new WeakMap<AudioParam, number>();
+
+  /**
+   * setTargetAtTime, skipped when the target has not really moved.
+   *
+   * The flight loop rewrote some thirty params every frame — about a thousand
+   * automation events a second, most of them the value already there
+   * (profiled 2026-10-02). A change of 0.3% is far below anything audible.
+   * Every write to these params goes through here, the stops included, so the
+   * remembered target is never stale.
+   */
+  private ramp(p: AudioParam, v: number, t: number, tc: number): void {
+    const last = this.lastTarget.get(p);
+    if (last !== undefined && Math.abs(v - last) <= Math.max(1e-4, Math.abs(last) * 0.003)) return;
+    this.lastTarget.set(p, v);
+    p.setTargetAtTime(v, t, tc);
+  }
+
   /** Filtered noise burst — thumps, chirps, impacts, gunfire. */
   private noiseBurst(
     durationS: number, freq: number, gain: number,
@@ -460,33 +479,33 @@ class SoundEngineClass {
       // smoother. `pitch` carries that straight from the airframe's spec.
       const f = (30 + s.rpm * 88) * warp * P.pitch;
       // Roughness detunes the second oscillator — a sick engine sounds sick
-      this.engineOsc.frequency.setTargetAtTime(f, t, 0.07);
+      this.ramp(this.engineOsc.frequency, f, t, 0.07);
       const h = P.kind === 'radial' ? 1.5 : 2.02;
-      this.engineOsc2.frequency.setTargetAtTime(f * (h + s.roughness * 0.22), t, 0.07);
+      this.ramp(this.engineOsc2.frequency, f * (h + s.roughness * 0.22), t, 0.07);
       // Quieter, and quieter still inside a storm that ought to drown it
       const mask = 1 - this.wxMask * 0.45;
-      this.engineGain.gain.setTargetAtTime(s.rpm > 0.01 ? (0.05 + s.throttle * 0.06) * mask : 0, t, 0.12);
-      this.engineFilter.frequency.setTargetAtTime(200 + s.throttle * 480 + s.rpm * 260, t, 0.1);
+      this.ramp(this.engineGain.gain, s.rpm > 0.01 ? (0.05 + s.throttle * 0.06) * mask : 0, t, 0.12);
+      this.ramp(this.engineFilter.frequency, 200 + s.throttle * 480 + s.rpm * 260, t, 0.1);
     }
     if (this.chopLfo && this.chopDepth) {
       // Blade-pass rate = rpm × blades × engines. A four-engine three-blade
       // heavy chops far faster than a single two-blade duster, and that ratio
       // is most of what tells the two apart by ear.
       const chop = (8 + s.rpm * 24) * P.blades * Math.min(2, P.count) * warp * P.pitch;
-      this.chopLfo.frequency.setTargetAtTime(chop, t, 0.07);
+      this.ramp(this.chopLfo.frequency, chop, t, 0.07);
       // A turboprop's blades are much less lumpy than a radial's
       const depth = (P.kind === 'radial' ? 0.30 : 0.14) + s.roughness * 0.3;
-      this.chopDepth.gain.setTargetAtTime(depth, t, 0.15);
+      this.ramp(this.chopDepth.gain, depth, t, 0.15);
     }
     if (this.turbineOsc && this.turbineFilter) {
       // The whine climbs with rpm — the sound of a turboprop spooling
-      this.turbineOsc.frequency.setTargetAtTime((420 + s.rpm * 900) * warp, t, 0.12);
-      this.turbineFilter.frequency.setTargetAtTime(1800 + s.rpm * 2200, t, 0.12);
+      this.ramp(this.turbineOsc.frequency, (420 + s.rpm * 900) * warp, t, 0.12);
+      this.ramp(this.turbineFilter.frequency, 1800 + s.rpm * 2200, t, 0.12);
     }
     if (this.exhaustGain && this.exhaustFilter) {
       // Relative to the tone (it shares the engine's gain stage now)
-      this.exhaustGain.gain.setTargetAtTime(s.rpm * (0.25 + s.throttle * 0.35), t, 0.12);
-      this.exhaustFilter.frequency.setTargetAtTime(420 + s.throttle * 600, t, 0.12);
+      this.ramp(this.exhaustGain.gain, s.rpm * (0.25 + s.throttle * 0.35), t, 0.12);
+      this.ramp(this.exhaustFilter.frequency, 420 + s.throttle * 600, t, 0.12);
     }
     if (this.windGain && this.windFilter) {
       // The air going past is the sound of SPEED — with the engine pulled back
@@ -494,15 +513,15 @@ class SoundEngineClass {
       // out add buffet.
       const drag = 1 + (s.gearDown ? 0.35 : 0) + (s.flapsDeployed ? 0.4 : 0);
       const gust = 1 + s.turbulence * 0.6 * (0.6 + 0.4 * Math.sin(t * 3.1));
-      this.windGain.gain.setTargetAtTime(s.speedFrac * s.speedFrac * 0.17 * drag * gust, t, 0.14);
-      this.windFilter.frequency.setTargetAtTime(420 + s.speedFrac * 1400, t, 0.14);
+      this.ramp(this.windGain.gain, s.speedFrac * s.speedFrac * 0.17 * drag * gust, t, 0.14);
+      this.ramp(this.windFilter.frequency, 420 + s.speedFrac * 1400, t, 0.14);
     }
     if (this.rumbleGain && this.rumbleFilter) {
       // Tyres on a patched strip: loud, and lumpy rather than a smooth hum
       const rolling = s.onGround ? Math.min(1, s.speedFrac * 3) : 0;
       const bumps = 0.8 + 0.2 * Math.sin(t * 19) * Math.sin(t * 7.3);
-      this.rumbleGain.gain.setTargetAtTime(rolling * 0.30 * bumps, t, 0.05);
-      this.rumbleFilter.frequency.setTargetAtTime(140 + rolling * 320, t, 0.1);
+      this.ramp(this.rumbleGain.gain, rolling * 0.30 * bumps, t, 0.05);
+      this.ramp(this.rumbleFilter.frequency, 140 + rolling * 320, t, 0.1);
     }
   }
 
@@ -510,7 +529,7 @@ class SoundEngineClass {
   setStallWarning(on: boolean): void {
     if (!this.ctx || !this.hornGain || on === this.hornOn) return;
     this.hornOn = on;
-    this.hornGain.gain.setTargetAtTime(on ? 0.05 : 0, this.ctx.currentTime, 0.05);
+    this.ramp(this.hornGain.gain, on ? 0.05 : 0, this.ctx.currentTime, 0.05);
   }
 
   stopFlightLoop(): void {
@@ -519,7 +538,7 @@ class SoundEngineClass {
     this.hornOn = false;
     const t = this.ctx.currentTime;
     for (const g of [this.engineGain, this.exhaustGain, this.windGain, this.rumbleGain, this.hornGain]) {
-      g?.gain.setTargetAtTime(0, t, 0.08);
+      if (g) this.ramp(g.gain, 0, t, 0.08);
     }
     const nodes = [
       this.engineOsc, this.engineOsc2, this.chopLfo, this.hornOsc, this.hornOsc2,
@@ -1149,14 +1168,14 @@ class SoundEngineClass {
     const gust = gusty
       ? 0.72 + 0.2 * Math.sin(t * 0.9) + 0.12 * Math.sin(t * 2.3 + 1.1) + 0.06 * Math.sin(t * 5.7)
       : 1;
-    this.wxHissGain.gain.setTargetAtTime(row[0] * i * gust, t, 0.25);
-    this.wxHissFilter.frequency.setTargetAtTime(row[1] * (0.9 + gust * 0.15), t, 0.5);
-    this.wxRoarGain.gain.setTargetAtTime(row[2] * i * gust, t, 0.3);
-    this.wxRoarFilter.frequency.setTargetAtTime(row[3], t, 0.5);
+    this.ramp(this.wxHissGain.gain, row[0] * i * gust, t, 0.25);
+    this.ramp(this.wxHissFilter.frequency, row[1] * (0.9 + gust * 0.15), t, 0.5);
+    this.ramp(this.wxRoarGain.gain, row[2] * i * gust, t, 0.3);
+    this.ramp(this.wxRoarFilter.frequency, row[3], t, 0.5);
     if (this.wxHowlGain && this.wxHowlFilter) {
       // A narrow band that wanders up and down: the wind moaning in the rigging
-      this.wxHowlGain.gain.setTargetAtTime(row[4] * i * gust, t, 0.3);
-      this.wxHowlFilter.frequency.setTargetAtTime(420 + 380 * (0.5 + 0.5 * Math.sin(t * 0.6)) * gust, t, 0.4);
+      this.ramp(this.wxHowlGain.gain, row[4] * i * gust, t, 0.3);
+      this.ramp(this.wxHowlFilter.frequency, 420 + 380 * (0.5 + 0.5 * Math.sin(t * 0.6)) * gust, t, 0.4);
     }
     // The storm drowns the engine, the way it does in a real cockpit
     const drowns = condition === 'dust_storm' || condition === 'thunderstorm' || condition === 'blizzard' ? 1 : 0.4;
@@ -1208,9 +1227,9 @@ class SoundEngineClass {
   stopWeatherBed(): void {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    this.wxHissGain?.gain.setTargetAtTime(0, t, 0.2);
-    this.wxRoarGain?.gain.setTargetAtTime(0, t, 0.2);
-    this.wxHowlGain?.gain.setTargetAtTime(0, t, 0.2);
+    for (const g of [this.wxHissGain, this.wxRoarGain, this.wxHowlGain]) {
+      if (g) this.ramp(g.gain, 0, t, 0.2);
+    }
     this.wxMask = 0;
     const nodes = [this.wxHissSrc, this.wxRoarSrc, this.wxHowlSrc];
     setTimeout(() => {
@@ -1350,17 +1369,17 @@ class SoundEngineClass {
      * traffic mechanic is about noticing them. Raised, and eased to p^1.5 so
      * it carries further out before fading.
      */
-    this.trafGain.gain.setTargetAtTime(Math.pow(p, 1.3) * 0.25, t, 0.18);
-    this.trafOsc.frequency.setTargetAtTime(62 * shift, t, 0.12);
-    this.trafOsc2.frequency.setTargetAtTime(93 * shift, t, 0.12);
-    this.trafChop.frequency.setTargetAtTime(44 * shift, t, 0.12);
+    this.ramp(this.trafGain.gain, Math.pow(p, 1.3) * 0.25, t, 0.18);
+    this.ramp(this.trafOsc.frequency, 62 * shift, t, 0.12);
+    this.ramp(this.trafOsc2.frequency, 93 * shift, t, 0.12);
+    this.ramp(this.trafChop.frequency, 44 * shift, t, 0.12);
     // Distance eats the top end here too
-    this.trafFilter.frequency.setTargetAtTime(300 + p * 900, t, 0.2);
+    this.ramp(this.trafFilter.frequency, 300 + p * 900, t, 0.2);
   }
 
   stopTraffic(): void {
     if (!this.ctx) return;
-    this.trafGain?.gain.setTargetAtTime(0, this.ctx.currentTime, 0.15);
+    if (this.trafGain) this.ramp(this.trafGain.gain, 0, this.ctx.currentTime, 0.15);
     const nodes = [this.trafOsc, this.trafOsc2, this.trafChop];
     setTimeout(() => {
       for (const n of nodes) { try { n?.stop(); n?.disconnect(); } catch { /* gone */ } }
@@ -1414,8 +1433,8 @@ class SoundEngineClass {
     const d = this.duckLeft > 0 ? this.duckDepth : 0;
     // The engine ducks hardest; the world bed only steps back a little, so the
     // aeroplane never goes eerily silent underneath a transmission.
-    this.busEngine.gain.setTargetAtTime(BUS_ENGINE * (1 - d * 0.86), t, timeConstant);
-    this.busWorld.gain.setTargetAtTime(BUS_WORLD * (1 - d * 0.60), t, timeConstant);
+    this.ramp(this.busEngine.gain, BUS_ENGINE * (1 - d * 0.86), t, timeConstant);
+    this.ramp(this.busWorld.gain, BUS_WORLD * (1 - d * 0.60), t, timeConstant);
   }
 
   /** Drive the duck envelope. Called once per frame from the flight loop. */

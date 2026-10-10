@@ -125,7 +125,8 @@ export function TouchControls(): React.ReactElement | null {
             {retractable && (
               <PulseButton label={gearDown ? 'GEAR ▼' : 'GEAR ▲'} scale={s} control="gear" wide />
             )}
-            <FlapRocker scale={s} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)} />
+            {/* On automatic the flaps need no button; the drawer still has one */}
+            {!status?.flaps?.auto && <FlapRocker scale={s} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)} />}
           </>
         )}
 

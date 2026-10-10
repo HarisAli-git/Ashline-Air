@@ -325,15 +325,21 @@ export class Hazards {
    */
   generateTraining(
     routeKm: number, townName: string, biomeAt?: (x: number) => BiomeId,
+    /** What stands on the circuit — each lesson asks only for what it teaches. */
+    features: { mast?: boolean; town?: boolean; guns?: boolean } = {},
   ): { mastX: number; lineEndX: number; zone: [number, number] } {
     const M = 9;
     const km = (k: number): number => k * 1000 * M;
+    const { mast = true, town = true, guns = true } = features;
     this.list = [];
     this.hostile = [];
+    this.hostileOnly = [];
     const mastX = km(Math.min(3.1, routeKm * 0.24));
-    this.list.push({ x: mastX, kind: 'mast', heightM: 46, halfWidth: HALF_WIDTH.mast, seed: 77, warn: true });
+    if (mast) this.list.push({ x: mastX, kind: 'mast', heightM: 46, halfWidth: HALF_WIDTH.mast, seed: 77, warn: true });
     const t0 = km(routeKm * 0.44), t1 = t0 + km(0.5);
-    const built = layoutTrainingSettlements(t0, t1, 4242, townName);
+    const built = town
+      ? layoutTrainingSettlements(t0, t1, 4242, townName)
+      : { towns: [], pylons: [], spans: [], substations: [], reserved: [] };
     this.townList = built.towns;
     this.spanList = built.spans;
     for (const t of built.towns) this.list.push(...t.buildings);
@@ -351,10 +357,12 @@ export class Hazards {
     // taught does NOT keep you out of it: machine guns reach 165 m, so the
     // lesson is the real one — climb above them or get shot at.
     const zone: [number, number] = [km(routeKm * 0.62), km(routeKm * 0.62 + 1.1)];
-    this.hostile.push(zone);
-    this.hostileOnly = [['nest', 'technical']];
+    if (guns) {
+      this.hostile.push(zone);
+      this.hostileOnly = [['nest', 'technical']];
+    }
     this.camps = [];
-    const lineEndX = built.towns[0].poles[0].x;
+    const lineEndX = built.towns[0]?.poles[0]?.x ?? 0;
     return { mastX, lineEndX, zone };
   }
 

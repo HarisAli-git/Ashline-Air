@@ -386,12 +386,14 @@ export class ParallaxWorld {
    * The training circuit: the same world, with its furniture placed by hand.
    * See Hazards.generateTraining.
    */
-  setTrainingRoute(routeKm: number, townName: string): { mastX: number; lineEndX: number; zone: [number, number] } {
+  setTrainingRoute(
+    routeKm: number, townName: string, features?: { mast?: boolean; town?: boolean; guns?: boolean },
+  ): { mastX: number; lineEndX: number; zone: [number, number] } {
     const seed = 4242;
     this.routeSeed = seed;
     this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
     const home = this.biomeFrom;
-    const marks = this.hazards.generateTraining(routeKm, townName, () => home);
+    const marks = this.hazards.generateTraining(routeKm, townName, () => home, features);
     this.raiders.layout(this.hazards.zones, seed, () => false, ['nest', 'technical']);
     this.air.reset(seed);
     this.air.setObstacles(this.hazards.all

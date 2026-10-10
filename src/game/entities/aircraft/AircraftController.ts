@@ -92,11 +92,26 @@ export const TUNING = {
   idleDragPiston: 0.035,
   idleDragTurboprop: 0.065,
   /** Airbrake panels fully up: drag, lift spoiled in the air, lift dumped on the ground. */
-  airbrakeCD: 0.055,
+  airbrakeCD: 0.1,
   airbrakeLift: 0.08,
   airbrakeGroundDump: 0.55,
   /** Seconds for the panels to travel all the way. */
   airbrakeTime: 0.8,
+  /**
+   * Propeller braking: pull the power back and the speed comes off.
+   *
+   * Drag alone took a minute to bleed a cruise down to what a third of the
+   * power holds — realistic, and it read as the throttle doing nothing. When
+   * the aeroplane is going faster than its power can hold, the windmilling
+   * propeller adds this much again of the drag-over-thrust it is carrying.
+   * At a steady throttle there is nothing to shed, so cruise is untouched.
+   * It fades in from propBrakeFrom × the stall speed over propBrakeFade, and
+   * out with the flaps and below 60 m, so approaches, flares and glides are
+   * flown exactly as before.
+   */
+  propBrake: 2,
+  propBrakeFrom: 1.6,
+  propBrakeFade: 0.4,
   /**
    * Fraction of the data-sheet climb rate the aeroplane actually achieves.
    *
@@ -143,6 +158,8 @@ export const TUNING = {
   pathMaxDive: 10 * DEG,
   pathGain: 3,
   pathShedMax: 0.35,
+  /** Spare thrust, m/s², at which speeding up no longer costs any height. */
+  spareForLevel: 0.4,
   pitchDamping: 2.8,
   stallPitchDamp: 3.0,
   stallNoseDown: 54,        // deg/s² nose-down once fully stalled
@@ -279,6 +296,8 @@ export class AircraftController {
   flapOverspeed = false;
   /** True while the airload is holding the flaps short of the selected notch. */
   flapBlownBack = false;
+  /** True while retractable gear is down above the speed it may be out at. */
+  gearOverspeed = false;
   /** Density ratio at the current altitude. */
   sigma = 1;
   /** Best climb rate available at this height, as a fraction of sea level. */
@@ -662,7 +681,19 @@ export class AircraftController {
     // first, so the nose goes down; then easing, so the speed comes back to
     // a glide. Held fast all the way down, a heavy arrived at 300 km/h with
     // nothing left to flare with.
-    const excessDrag = (aT * Math.cos(alpha) - aD) / GRAVITY;
+    // The airbrake's share is left out: the panels are a request to SLOW
+    // DOWN, and counted as missing power they tipped the nose over instead —
+    // half the braking came out as a dive and the speed barely moved.
+    const aBrake = qK * TUNING.airbrakeCD * brakeF * s.modifiers.dragMult * dmgDrag;
+    const excessDrag = (aT * Math.cos(alpha) - (aD - aBrake)) / GRAVITY;
+    // Propeller braking (see TUNING.propBrake): kept out of the descent path
+    // above like the airbrake — it is the throttle asking to slow down.
+    const overSpeed = clamp(
+      (s.speed / Math.max(1, this.stallSpeedNow) - TUNING.propBrakeFrom) / TUNING.propBrakeFade, 0, 1,
+    );
+    const aPropBrake = onGround ? 0
+      : TUNING.propBrake * Math.max(0, -excessDrag * GRAVITY) * overSpeed
+        * (1 - flapBlend) * clamp((s.altitude - 15) / 45, 0, 1);
     this.deficitT = excessDrag < -0.02 && !onGround
       ? this.deficitT + dt : Math.max(0, this.deficitT - 2 * dt);
     const decelCap = TUNING.pathDecelMax
@@ -694,7 +725,22 @@ export class AircraftController {
     const clLevelNow = (GRAVITY * Math.cos(gamma)) / (this.K * Math.max(1, vEAS) ** 2);
     const pushOver = gammaPath < 0
       ? clamp(TUNING.pathGain * (gamma - gammaPath), 0, TUNING.pathShedMax) : 0;
-    const clForLevel = Math.min(clTrim, clLevelNow * (1 + 2.6 * Math.max(0, gammaPath - gamma)))
+    /*
+     * Speeding up is paid for with thrust before height. The trim used to
+     * dive for every km/h it wanted even at full power with thrust to spare:
+     * level off after a climb, let go, and she went down seventy metres while
+     * the engine could have done the work. With spare thrust it now flies
+     * LEVEL and accelerates — a climb is eased over, a dive rounded out; only
+     * without it (the engine off, a glide too slow) does it still put the
+     * nose down to find the speed.
+     */
+    const spareThrust = aT * Math.cos(alpha) - (aD - aBrake);
+    const wantsSpeed = vTrimNow / sqrtSigma > s.speed;
+    const paid = wantsSpeed ? clamp(spareThrust / TUNING.spareForLevel, 0, 1) : 0;
+    const clLevelOff = clLevelNow
+      * (1 + 2.6 * Math.max(0, -gamma) - Math.min(TUNING.pathShedMax, TUNING.pathGain * Math.max(0, gamma)));
+    const clSeek = clTrim + (Math.max(clTrim, clLevelOff) - clTrim) * paid;
+    const clForLevel = Math.min(clSeek, clLevelNow * (1 + 2.6 * Math.max(0, gammaPath - gamma)))
       * (1 - pushOver);
     // Down to -12°: a big slotted flap at speed needs a nose-down wing to make
     // only the lift it needs, and at -3° the trim fought that and ballooned.
@@ -767,7 +813,7 @@ export class AircraftController {
         s.verticalSpeed = 0;
       }
     } else {
-      s.speed = clamp(s.speed + (aT * Math.cos(alpha) - aD - GRAVITY * Math.sin(gamma)) * dt, 0, vne);
+      s.speed = clamp(s.speed + (aT * Math.cos(alpha) - aD - aPropBrake - GRAVITY * Math.sin(gamma)) * dt, 0, vne);
       const vSafe = Math.max(6, s.speed);
       const gammaDot = (aL + aT * Math.sin(alpha) - GRAVITY * Math.cos(gamma)) / vSafe;
       const newGamma = clamp(gamma + gammaDot * dt, -1.45, 1.45);
@@ -811,7 +857,8 @@ export class AircraftController {
     if (this.flapOverspeed) {
       s.integrity = clamp(s.integrity - TUNING.flapOverspeedDamage * dt, 0, 100);
     }
-    if (!this.gearFixed && s.gearDown && !onGround && s.speed > this.vStall * 1.8) {
+    this.gearOverspeed = !this.gearFixed && s.gearDown && !onGround && s.speed > this.vStall * 1.8;
+    if (this.gearOverspeed) {
       s.integrity = clamp(s.integrity - TUNING.gearDragDamage * dt, 0, 100);
     }
     this.climbReserve = clamp(this.bestClimbQuick(sigma), 0, 1);

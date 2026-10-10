@@ -13,6 +13,8 @@ import { FlightHUD }       from './ui/components/hud/FlightHUD';
 import { PreFlightOverlay }from './ui/components/screens/PreFlightOverlay';
 import { HangarScreen }   from './ui/components/screens/HangarScreen';
 import { ProfilesScreen } from './ui/components/screens/ProfilesScreen';
+import { FlightSchoolScreen } from './ui/components/screens/FlightSchoolScreen';
+import { fadeToScene } from './game/utils/transitions';
 import { GlobalNotification } from './ui/components/menus/Notification';
 import { TouchControls } from './ui/components/hud/TouchControls';
 import { OrientationGate } from './ui/components/OrientationGate';
@@ -21,6 +23,7 @@ import { attachResponsiveScale } from './game/utils/responsive';
 import { bindViewportCanvas, refreshViewport, useViewport } from './ui/viewport';
 import { armFullscreenOnGesture } from './ui/fullscreen';
 import { isTouchDevice } from './game/utils/device';
+import { installAdaptiveTessellation } from './game/utils/tessellation';
 
 type UILayer = 'none' | 'flight' | 'preflight';
 
@@ -34,6 +37,7 @@ export default function App(): React.ReactElement {
   const [uiLayer, setUiLayer] = useState<UILayer>('none');
   const [hangarOpen, setHangarOpen] = useState(false);
   const [profilesOpen, setProfilesOpen] = useState(false);
+  const [schoolOpen, setSchoolOpen] = useState(false);
   const [preflightState, setPreflightState] = useState<PreflightState | null>(null);
   const vp = useViewport();
 
@@ -59,6 +63,10 @@ export default function App(): React.ReactElement {
 
   useEffect(() => {
     if (!containerRef.current || gameRef.current) return;
+
+    // Before anything draws: circles and ellipses traced as finely as the eye
+    // resolves, not a hundred vertices each (see tessellation.ts)
+    installAdaptiveTessellation();
 
     // The design canvas is shaped like the device (see GameSize.ts) and then
     // FIT-scaled onto it: the art and the flight model are authored at a fixed
@@ -111,9 +119,21 @@ export default function App(): React.ReactElement {
     const u6 = EventBus.on('ui:close-hangar', () => setHangarOpen(false));
     const u7 = EventBus.on('ui:open-profiles', () => setProfilesOpen(true));
     const u8 = EventBus.on('ui:close-profiles', () => setProfilesOpen(false));
+    // Flight school sits over the menu or the map like the hangar does, and
+    // starts a lesson from whichever scene is showing underneath it
+    const u9 = EventBus.on('ui:open-flight-school', () => setSchoolOpen(true));
+    const u10 = EventBus.on('ui:close-flight-school', () => setSchoolOpen(false));
+    const u11 = EventBus.on('flight:start-lesson', ({ lessonId }) => {
+      setSchoolOpen(false);
+      setHangarOpen(false);
+      const scene = game.scene.getScenes(true)[0];
+      if (!scene) return;
+      EventBus.emit('scene:start-flight', { contractId: '' });
+      fadeToScene(scene, 'FlightScene', { contractId: '', lessonId });
+    });
 
     return () => {
-      u1(); u2(); u3(); u4(); u5(); u6(); u7(); u8();
+      u1(); u2(); u3(); u4(); u5(); u6(); u7(); u8(); u9(); u10(); u11();
       detachScale();
       bindViewportCanvas(null);
       gameRef.current?.destroy(true);
@@ -148,6 +168,7 @@ export default function App(): React.ReactElement {
 
         {hangarOpen && <HangarScreen />}
         {profilesOpen && <ProfilesScreen />}
+        {schoolOpen && <FlightSchoolScreen />}
 
         {/* On-screen flight controls, touch devices only */}
         {uiLayer === 'flight' && <TouchControls />}
