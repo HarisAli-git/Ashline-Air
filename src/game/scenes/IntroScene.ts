@@ -82,12 +82,15 @@ export class IntroScene extends Phaser.Scene {
   private nextScene = 'MapScene';
   /** Straight into flight school afterwards — a new game's first flight. */
   private training = false;
+  /** Straight into this flight-school lesson afterwards (a new game). */
+  private lessonId: string | null = null;
 
   constructor() { super({ key: 'IntroScene' }); }
 
-  init(data: { next?: string; training?: boolean }): void {
+  init(data: { next?: string; training?: boolean; lessonId?: string }): void {
     this.nextScene = data?.next ?? 'MapScene';
     this.training = !!data?.training;
+    this.lessonId = data?.lessonId ?? null;
     this.index = 0;
     this.t = 0;
     this.total = 0;
@@ -176,6 +179,11 @@ export class IntroScene extends Phaser.Scene {
     if (this.advancing) return;
     this.advancing = true;
     this.hintText.setAlpha(0);
+    if (this.lessonId) {
+      EventBus.emit('scene:start-flight', { contractId: '' });
+      fadeToScene(this, 'FlightScene', { contractId: '', lessonId: this.lessonId });
+      return;
+    }
     if (this.training) {
       // The HUD has to be up before the flight's first frame reports in
       EventBus.emit('scene:start-flight', { contractId: '' });

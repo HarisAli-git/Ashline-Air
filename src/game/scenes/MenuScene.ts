@@ -111,17 +111,16 @@ export class MenuScene extends Phaser.Scene {
       // The backstory runs before the first flight — it is the setup for the
       // walls, the gun trucks and why anyone pays a pilot at all — and then
       // flight school, so the first contract is not also the first lesson.
-      fadeToScene(this, 'IntroScene', { next: 'FlightScene', training: true });
+      fadeToScene(this, 'IntroScene', { next: 'FlightScene', lessonId: 'takeoff' });
     });
 
     if (SaveService.hasSave()) {
       this.makeButton(cx, height * 0.54, 'CONTINUE', () => {
         fadeToScene(this, 'MapScene');
       });
-      // Replayable any time: the lesson is worth having again after a break
+      // Replayable any time: the lessons are worth having again after a break
       this.makeButton(cx, height * 0.63, 'FLIGHT SCHOOL', () => {
-        EventBus.emit('scene:start-flight', { contractId: '' });
-        fadeToScene(this, 'FlightScene', { contractId: '', training: true });
+        EventBus.emit('ui:open-flight-school');
       });
     } else {
       for (const [y, label] of [[0.54, 'CONTINUE'], [0.63, 'FLIGHT SCHOOL']] as const) {

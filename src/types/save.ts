@@ -48,6 +48,8 @@ export interface PlayerStats {
   trainingDone?: boolean;
   /** Moments the coach has already taught on this save. See FlightCoach. */
   lessons?: string[];
+  /** Flight school: best stars per lesson (0–3). See training/lessons.ts. */
+  lessonStars?: Record<string, number>;
 }
 
 export interface WorldState {

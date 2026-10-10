@@ -1,5 +1,5 @@
 import React from 'react';
-import { useFlightState, useGearFlaps, useCargo, useRouteInfo, useFlightStatus, useTutorial } from '../../store/gameStore';
+import { useFlightState, useGearFlaps, useCargo, useRouteInfo, useFlightStatus, useTutorial, useLesson, useLessonHud } from '../../store/gameStore';
 import type { DropZoneStatus } from '../../../game/utils/EventBus';
 import { press } from '../../../game/utils/controls';
 import { SaveService } from '../../../services/SaveService';
@@ -7,6 +7,20 @@ import { useViewport } from '../../viewport';
 import { hudStyles, type HudStyles } from './hudStyles';
 import { TrainingPanel, TrainingDebrief } from './TrainingPanel';
 import { COOLANT_HOT } from '../../../game/entities/aircraft/Coolant';
+import type { HudPart } from '../../../game/training/lessons';
+import { LessonCard } from './LessonCard';
+import { LessonDebrief } from './LessonDebrief';
+
+/** What a lesson's goal is about glows — a number… */
+const GLOW_TEXT: React.CSSProperties = {
+  color: '#ffd080', textShadow: '0 0 12px rgba(255,208,128,0.85), 0 1px 0 #000',
+  animation: 'aa-pulse 1.1s ease-in-out infinite',
+};
+/** …or a block. */
+const GLOW_BOX: React.CSSProperties = {
+  boxShadow: '0 0 0 1px rgba(255,208,128,0.85), 0 0 14px rgba(255,208,128,0.45)',
+  borderRadius: 3, animation: 'aa-pulse 1.1s ease-in-out infinite',
+};
 
 /**
  * The instrument panel was a slab.
@@ -36,13 +50,19 @@ export function FlightHUD(): React.ReactElement | null {
   const cargo = useCargo();
   const route = useRouteInfo();
   const status = useFlightStatus();
+  const lesson = useLesson();
+  const lessonHud = useLessonHud();
 
   if (!state) return null;
 
   const compact = vp.isCompact;
   const styles = hudStyles(
-    vp.uiScale, compact, vp.isTouch, compact && !!(tutorial?.training || tutorial?.coach),
+    vp.uiScale, compact, vp.isTouch, compact && (!!lesson || !!(tutorial?.training || tutorial?.coach)),
   );
+  // A lesson shows only the readouts it teaches; the cautions always show
+  const show = (p: HudPart): boolean => !lessonHud || lessonHud.includes(p);
+  const focus = (p: HudPart, box = false): React.CSSProperties =>
+    lesson?.focus === p ? (box ? GLOW_BOX : GLOW_TEXT) : {};
 
   const { def } = SaveService.getActiveAircraft();
   const speedKmh = Math.round(state.speed * 3.6);
@@ -65,7 +85,7 @@ export function FlightHUD(): React.ReactElement | null {
   return (
     <>
       {/* ── Route: a hairline along the very top edge, not a box ────────── */}
-      {route && (
+      {route && show('route') && (
         <div style={styles.routeRail}>
           <div style={{ ...styles.routeRailFill, width: `${progress * 100}%` }} />
           <div style={{ ...styles.routeRailPip, left: `${progress * 100}%` }} />
@@ -124,7 +144,7 @@ export function FlightHUD(): React.ReactElement | null {
       )}
 
       {/* ── The next drop site, while somebody is calling ────────────────── */}
-      {status?.dropZone && (
+      {status?.dropZone && show('drop') && (
         <DropCard s={styles} zone={status.dropZone} compact={compact} touch={vp.isTouch} />
       )}
 
@@ -136,19 +156,30 @@ export function FlightHUD(): React.ReactElement | null {
           aeroplane is flying through is readable in peripheral vision. No
           numbers — the point is that it is read without looking at it.
         */}
-        {status && <VarioRibbon s={styles} air={status.airVertical} inThermal={status.inThermal} />}
+        {status && !lessonHud && <VarioRibbon s={styles} air={status.airVertical} inThermal={status.inThermal} />}
         <div style={styles.primaryStack}>
-          <div style={styles.bigRow}>
-            <span style={styles.bigNum}>{speedKmh}</span>
-            <span style={styles.unit}>km/h</span>
-          </div>
+          {show('speed') && (
+            <div style={styles.bigRow}>
+              <span style={{ ...styles.bigNum, ...focus('speed') }}>{speedKmh}</span>
+              <span style={styles.unit}>km/h</span>
+            </div>
+          )}
+          {/* The speed a lesson asks for, green once you are in it */}
+          {lesson?.speedBand && (
+            <div style={{
+              ...styles.vs, fontWeight: 'bold',
+              color: speedKmh >= lesson.speedBand.lo && speedKmh <= lesson.speedBand.hi ? '#9fe8b0' : '#ffd080',
+            }}>
+              TARGET {lesson.speedBand.lo}–{lesson.speedBand.hi}
+            </div>
+          )}
           {/*
             * The stall speed for the flaps you have out, in the air you are in.
             * Shown when it is close enough to matter — near the ground, with
             * flap out, or slowing toward it — because that is the number an
             * approach is flown against, and it MOVES with every notch of flap.
             */}
-          {status && status.stallKmh > 0 && (state.altitude < 60 || state.flapsDeployed || speedKmh < status.stallKmh * 1.6) && (
+          {show('speed') && status && status.stallKmh > 0 && (state.altitude < 60 || state.flapsDeployed || speedKmh < status.stallKmh * 1.6) && (
             <div style={{
               ...styles.vs,
               color: speedKmh < status.stallKmh * 1.15 ? '#ff6a4a'
@@ -157,26 +188,36 @@ export function FlightHUD(): React.ReactElement | null {
               STALL {status.stallKmh}
             </div>
           )}
-          <div style={styles.bigRow}>
-            <span style={{ ...styles.bigNum, ...styles.bigNumAlt }}>{state.altitude.toFixed(0)}</span>
-            <span style={styles.unit}>m</span>
-          </div>
-          <div style={{
-            ...styles.vs,
-            color: state.verticalSpeed < -4 ? '#ff8844'
-              : state.verticalSpeed > 0.5 ? '#9fe8b0' : '#8a7a5a',
-          }}>
-            {state.verticalSpeed >= 0 ? '▲' : '▼'} {Math.abs(state.verticalSpeed).toFixed(1)}
-          </div>
+          {show('alt') && (
+            <>
+              <div style={styles.bigRow}>
+                <span style={{ ...styles.bigNum, ...styles.bigNumAlt, ...focus('alt') }}>{state.altitude.toFixed(0)}</span>
+                <span style={styles.unit}>m</span>
+              </div>
+              <div style={{
+                ...styles.vs,
+                color: state.verticalSpeed < -4 ? '#ff8844'
+                  : state.verticalSpeed > 0.5 ? '#9fe8b0' : '#8a7a5a',
+              }}>
+                {state.verticalSpeed >= 0 ? '▲' : '▼'} {Math.abs(state.verticalSpeed).toFixed(1)}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
       {/* ── Right cluster: what the aircraft has left ───────────────────── */}
       <div style={styles.rightCluster}>
-        <Bar s={styles} label="THR" frac={state.throttle} tone="#ffd080"
-          text={`${Math.round(state.throttle * 100)}`} />
-        <Bar s={styles} label="FUEL" frac={fuelFrac} tone={warnFuel ? '#ff4a3a' : '#c8b888'}
-          text={`${state.fuel.toFixed(0)}`} alert={warnFuel} />
+        {show('thr') && (
+          <div style={focus('thr', true)}>
+            <Bar s={styles} label="THR" frac={state.throttle} tone="#ffd080"
+              text={`${Math.round(state.throttle * 100)}`} />
+          </div>
+        )}
+        {show('fuel') && (
+          <Bar s={styles} label="FUEL" frac={fuelFrac} tone={warnFuel ? '#ff4a3a' : '#c8b888'}
+            text={`${state.fuel.toFixed(0)}`} alert={warnFuel} />
+        )}
         {/*
           * What you will land with, not what you have.
           *
@@ -191,7 +232,7 @@ export function FlightHUD(): React.ReactElement | null {
           * is true and completely useless — an alarming red bar before you
           * have even started.
           */}
-        {status && state.altitude > 2 && (
+        {status && state.altitude > 2 && show('arr') && (
           <Bar s={styles} label="ARR" frac={status.fuelAtArrival}
             tone={status.fuelAtArrival < 0.08 ? '#ff4a3a'
               : status.fuelAtArrival < 0.2 ? '#ff8844' : '#9fe8b0'}
@@ -201,7 +242,7 @@ export function FlightHUD(): React.ReactElement | null {
 
         {/* Only when they matter — see the note at the top of this file */}
         {/* Crates aboard — only while there is someone to drop them on */}
-        {status?.dropReady && (
+        {status?.dropReady && show('drop') && (
           <Mini s={styles} label="CRATES" value={`${status.cratesLeft}`} tone="#9fe8b0" />
         )}
         {warnTemp && <Mini s={styles} label="ENG" value={`${tempPct}%`} tone="#ff8844" />}
@@ -221,8 +262,12 @@ export function FlightHUD(): React.ReactElement | null {
         <div style={styles.configRow}>
           {/* Two of the four aircraft are on fixed legs — no chip for a
               control they do not have. */}
-          {status?.retractableGear !== false && (
-            <span style={{ color: gearDown ? '#9fe8b0' : '#5a5040' }}>GEAR</span>
+          {/* A caution shows whatever the lesson hides */}
+          {status?.retractableGear !== false && (show('gear') || !!status?.gearOverspeed) && (
+            // Red and pulsing while it is down too fast and being damaged
+            status?.gearOverspeed
+              ? <span style={{ color: '#ff4a3a', fontWeight: 'bold', animation: 'aa-pulse 0.6s ease-in-out infinite', ...focus('gear') }}>GEAR ▲</span>
+              : <span style={{ color: gearDown ? '#9fe8b0' : '#5a5040', ...focus('gear') }}>GEAR</span>
           )}
           {(state.airbrake ?? 0) > 0.05 && (
             <span style={{
@@ -231,10 +276,22 @@ export function FlightHUD(): React.ReactElement | null {
             }}>AIRBRAKE</span>
           )}
         </div>
-        <FlapGauge scale={vp.uiScale} compact={compact} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)}
-          angle={state.flapAngle ?? 0} stops={status?.flaps?.stops ?? [0, 10, 20, 35]}
-          limitKmh={status?.flaps?.limitKmh ?? null} nextLimitKmh={status?.flaps?.nextLimitKmh ?? null}
-          overspeed={!!status?.flaps?.overspeed} blownBack={!!status?.flaps?.blownBack} speedKmh={speedKmh} touch={vp.isTouch} />
+        {/* On automatic the flaps need no gauge — a word says where they are */}
+        {!show('flaps') ? null : status?.flaps?.auto ? (
+          <div style={{
+            ...styles.configRow, marginTop: Math.round(4 * vp.uiScale),
+            color: (state.flapAngle ?? 0) > 0.5 ? '#ffd080' : '#8a7a5a',
+          }}>
+            FLAPS AUTO · {['UP', '1', '2', 'FULL'][Math.max(0, Math.min(3, state.flapStage ?? 0))]}
+          </div>
+        ) : (
+          <div style={focus('flaps', true)}>
+            <FlapGauge scale={vp.uiScale} compact={compact} stage={state.flapStage ?? (flapsDeployed ? 2 : 0)}
+              angle={state.flapAngle ?? 0} stops={status?.flaps?.stops ?? [0, 10, 20, 35]}
+              limitKmh={status?.flaps?.limitKmh ?? null} nextLimitKmh={status?.flaps?.nextLimitKmh ?? null}
+              overspeed={!!status?.flaps?.overspeed} blownBack={!!status?.flaps?.blownBack} speedKmh={speedKmh} touch={vp.isTouch} />
+          </div>
+        )}
       </div>
 
       {/*
@@ -243,10 +300,13 @@ export function FlightHUD(): React.ReactElement | null {
         * the keyboard legend sits (FlightScene hides that while this shows,
         * so they can never overlap).
         */}
-      {tutorial && (tutorial.training || tutorial.coach
-        ? <TrainingPanel lesson={tutorial} scale={vp.uiScale} compact={compact} touch={vp.isTouch} />
-        : <div style={styles.tutorial}>{tutorial.text}</div>)}
+      {lesson
+        ? <LessonCard view={lesson} scale={vp.uiScale} compact={compact} touch={vp.isTouch} />
+        : tutorial && (tutorial.training || tutorial.coach
+          ? <TrainingPanel lesson={tutorial} scale={vp.uiScale} compact={compact} touch={vp.isTouch} />
+          : <div style={styles.tutorial}>{tutorial.text}</div>)}
       <TrainingDebrief scale={vp.uiScale} compact={compact} />
+      <LessonDebrief scale={vp.uiScale} compact={compact} />
     </>
   );
 }

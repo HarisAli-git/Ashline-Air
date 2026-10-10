@@ -614,10 +614,22 @@ export class MapScene extends Phaser.Scene {
       EventBus.emit('ui:open-hangar');
     });
 
+    // ── Flight school: the lessons, and the way to the contract board ──────
+    const schoolBtn = this.add.text(width - 16, 82, '✈  FLIGHT SCHOOL', {
+      fontSize: '13px', color: '#ffd080', fontFamily: 'monospace',
+      backgroundColor: '#1a1409', padding: { x: 10, y: 5 },
+    }).setOrigin(1, 0.5).setInteractive({ useHandCursor: true });
+    schoolBtn.on('pointerover', () => schoolBtn.setStyle({ color: '#fff0c0' }));
+    schoolBtn.on('pointerout',  () => schoolBtn.setStyle({ color: '#ffd080' }));
+    schoolBtn.on('pointerdown', () => {
+      SoundEngine.click();
+      EventBus.emit('ui:open-flight-school');
+    });
+
     // DEV: grant everything, so the later content can be inspected without
     // playing thirty contracts to reach it.
     if (DevService.enabled) {
-      const devBtn = this.add.text(width - 16, 78, 'DEV: UNLOCK ALL', {
+      const devBtn = this.add.text(width - 16, 112, 'DEV: UNLOCK ALL', {
         fontSize: '11px', color: '#88ccff', fontFamily: 'monospace',
         backgroundColor: '#0d1420', padding: { x: 8, y: 4 },
       }).setOrigin(1, 0.5).setInteractive({ useHandCursor: true });

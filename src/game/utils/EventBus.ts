@@ -1,4 +1,5 @@
 import type { FlightState, LandingResult, Contract, FlightEventDefinition, WeatherState } from '../../types';
+import type { LessonView } from '../training/LessonRunner';
 
 /**
  * Typed event map for all cross-system communication.
@@ -109,6 +110,20 @@ export interface GameEvents {
   'flight:skip-training': void;
   /** Stop the coach on a real flight — the player knows what they are doing. */
   'flight:hide-tips': void;
+  /** Flight school: the goal in hand, or null when no lesson is running. */
+  'flight:lesson': LessonView | null;
+  /** Flight school: how the lesson went, for the debrief. */
+  'flight:lesson-complete': {
+    id: string; n: number; title: string; passed: boolean; stars: number;
+    criteria: Array<{ text: string; met: boolean }>;
+    reason?: string; reward: number; takeaway?: string; nextId: string | null;
+  };
+  /** The lesson debrief's buttons (and Quit on the card). */
+  'flight:lesson-exit': { action: 'next' | 'retry' | 'school' | 'map' };
+  /** Start a lesson from the Flight School screen. */
+  'flight:start-lesson': { lessonId: string };
+  'ui:open-flight-school': void;
+  'ui:close-flight-school': void;
   'flight:status': {
     engineFailed: boolean;
     underFire: boolean;
@@ -161,6 +176,8 @@ export interface GameEvents {
     fuelAtArrival: number;
     /** False for the two fixed-gear aircraft — no GEAR control should appear. */
     retractableGear: boolean;
+    /** The gear is down faster than it may be — it is being damaged. */
+    gearOverspeed: boolean;
     /** A survivor camp is signalling and a crate could be dropped on it. */
     dropReady: boolean;
     cratesLeft: number;
@@ -179,7 +196,7 @@ export interface GameEvents {
      * flaps are now and for the next notch down, and whether they are out
      * too fast right now.
      */
-    flaps: { stops: number[]; limitKmh: number | null; nextLimitKmh: number | null; overspeed: boolean; blownBack?: boolean } | null;
+    flaps: { stops: number[]; limitKmh: number | null; nextLimitKmh: number | null; overspeed: boolean; blownBack?: boolean; auto: boolean } | null;
     /** 1g stall speed in the current configuration and air. */
     stallKmh: number;
     /** Climb left at this height as a fraction of sea level — 0 at the ceiling. */

@@ -33,6 +33,8 @@ export interface CoachContext {
   remainingKm: number;
   /** Rotation speed for this airframe, km/h. */
   vrKmh: number;
+  /** The flaps are setting themselves (see AutoFlaps). */
+  autoFlaps: boolean;
   /** A structure ahead that you are not clear of, if any. */
   obstacle: { label: string; heightM: number; pylon: boolean } | null;
   /** Raider guns ahead that out-reach your height, if any. */
@@ -74,6 +76,8 @@ interface Lesson {
 }
 
 const CRUISE = { lo: 90, hi: 140 };
+/** The flap keycaps, dropped from a lesson while the flaps are automatic. */
+const FLAP_KEYS = ['F', 'V', 'FLAP ▼', 'FLAP ▲'];
 
 const BASICS: Lesson[] = [
   {
@@ -105,8 +109,10 @@ const BASICS: Lesson[] = [
   },
   {
     id: 'clean', title: 'Clean up',
-    text: c => (c.retractableGear ? 'Gear up, then flaps up a notch at a time. ' : 'Flaps up, a notch at a time. ')
-      + 'They got you off the ground; now they are only drag. Watch the gauge swing them in.',
+    text: c => c.autoFlaps
+      ? (c.retractableGear ? 'Gear up. ' : '') + 'The flaps come up by themselves once you are flying — they got you off the ground; now they are only drag.'
+      : (c.retractableGear ? 'Gear up, then flaps up a notch at a time. ' : 'Flaps up, a notch at a time. ')
+        + 'They got you off the ground; now they are only drag. Watch the gauge swing them in.',
     keys: ['V'], touchKeys: ['FLAP ▲'],
     done: (s, c, t) => (!s.flapsDeployed && (!c.retractableGear || !s.gearDown)) || t > 25,
   },
@@ -198,9 +204,13 @@ const MOMENTS: Lesson[] = [
   },
   {
     id: 'approach', title: 'Approach', priority: 60,
-    text: c => c.touch
-      ? 'Home stretch. Lever back to about a third and FLAP ▼ a notch at a time as you slow — too fast for flap, tap AIRBRAKE. Sit on the dotted green path down to the strip: two white, two red lights when you are on it.'
-      : 'Home stretch. Throttle back to about a third with S and F for flap a notch at a time as you slow — too fast for flap, B for airbrakes. Sit on the dotted green path down to the strip: two white, two red lights when you are on it.',
+    text: c => c.autoFlaps
+      ? (c.touch
+        ? 'Home stretch. Lever back to about a third — the flaps come down by themselves as you slow; too fast, tap AIRBRAKE. Sit on the dotted green path down to the strip: two white, two red lights when you are on it.'
+        : 'Home stretch. Throttle back to about a third with S — the flaps come down by themselves as you slow; too fast, B for airbrakes. Sit on the dotted green path down to the strip: two white, two red lights when you are on it.')
+      : c.touch
+        ? 'Home stretch. Lever back to about a third and FLAP ▼ a notch at a time as you slow — too fast for flap, tap AIRBRAKE. Sit on the dotted green path down to the strip: two white, two red lights when you are on it.'
+        : 'Home stretch. Throttle back to about a third with S and F for flap a notch at a time as you slow — too fast for flap, B for airbrakes. Sit on the dotted green path down to the strip: two white, two red lights when you are on it.',
     keys: ['S', 'F'], touchKeys: ['LEVER ▼', 'FLAP ▼'],
     when: (_s, c) => c.remainingKm < 2.8 && !c.landed,
     done: (s, c) => ((s.flapStage ?? 0) >= 2 && s.altitude < 45 && s.throttle < 0.6) || c.landed,
@@ -312,10 +322,12 @@ export class FlightCoach {
   }
 
   private view(l: Lesson, c: CoachContext, step?: number, total?: number): CoachView {
+    const keys = (c.touch ? l.touchKeys : l.keys) ?? [];
     return {
       title: l.title,
       text: l.text(c),
-      keys: (c.touch ? l.touchKeys : l.keys) ?? [],
+      // On automatic there is no flap key to press — do not show one
+      keys: c.autoFlaps ? keys.filter(k => !FLAP_KEYS.includes(k)) : keys,
       guide: l.guide?.(c) ?? null,
       step, total,
     };

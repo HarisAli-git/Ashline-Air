@@ -281,12 +281,14 @@ export class SupplyDrops {
    */
   layout(
     routeEndPx: number, seed: number, crates: number, world: DropWorld | null = null,
-    opts: { squaresOnly?: boolean; camps?: boolean } = {},
+    opts: { squaresOnly?: boolean; camps?: boolean; none?: boolean } = {},
   ): void {
     this.sites = [];
     this.crates = [];
     this.cratesLeft = crates;
     this.world = world;
+    // A lesson that is not about drops has nobody waiting on the ground
+    if (opts.none) return;
     const M = WORLD_PX_PER_M;
     const towns = world?.towns ?? [];
 

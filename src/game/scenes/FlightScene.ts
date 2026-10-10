@@ -25,8 +25,11 @@ import { FlightCoach, type CoachView } from './FlightCoach';
 import { DROP_REWARD, cratesFor, siteReply, type DropSite, dropMethodFor } from '../world/SupplyDrops';
 import { STRUCTURE_NAME, DROP_RUN_BEFORE_PX, DROP_BAND_RUN_PX } from '../world/Towns';
 import { routeSeed, originStripPx, destStripPx } from '../world/RoutePreview';
-import { press } from '../utils/controls';
+import { press, ctl } from '../utils/controls';
 import { tryDumpCoolant } from '../entities/aircraft/Coolant';
+import { autoFlapStage } from '../entities/aircraft/AutoFlaps';
+import { LESSONS, nextLessonId, recordLesson, type LessonCtx, type LessonDef, type LessonId } from '../training/lessons';
+import { LessonRunner } from '../training/LessonRunner';
 import { destStripPx as destStripOf } from '../world/RoutePreview';
 
 /** The approach angle the landing guide draws and the call reads against. */
@@ -50,7 +53,12 @@ interface FlightSceneData {
   contractId: string;
   /** Flight school: the hand-laid circuit from home and back. See FlightCoach. */
   training?: boolean;
+  /** Flight school: one lesson. See training/lessons.ts. */
+  lessonId?: LessonId;
 }
+
+/** Paid the first time each lesson is passed. */
+const LESSON_REWARD = 300;
 
 /** Gameplay length of the training circuit, km. */
 const TRAINING_KM = 13;
@@ -258,9 +266,22 @@ export class FlightScene extends Phaser.Scene {
   private redlineSeconds = 0;
   private ceilingWarnAt2 = -99;
   private flapWarnAt = -99;
+  private gearWarnAt = -99;
   private restartHoldFor = 0;     // seconds of cranking left
   /** Emergency coolant charges left — one a flight. See Coolant. */
   private coolantLeft = 1;
+  /** The flaps set themselves until the pilot touches them. See AutoFlaps. */
+  private autoFlaps = true;
+  /** The flight-school lesson being flown, and the runner walking its goals. */
+  private lesson: LessonDef | null = null;
+  private lessonRunner: LessonRunner | null = null;
+  private lessonViewKey = '';
+  private lessonSpokenStep = 0;
+  private lessonDone = false;
+  private lessonIntegrity0 = 100;
+  /** Set when the lesson's landing rolls to a stop, with its grade. */
+  private lessonStopped = false;
+  private lessonLanding: LandingQuality | null = null;
 
   // -- Pacing --------------------------------------------------------------
   /**
@@ -311,7 +332,14 @@ export class FlightScene extends Phaser.Scene {
 
   init(data: FlightSceneData): void {
     this.contractId          = data.contractId;
-    this.training            = !!data.training;
+    this.lesson              = data.lessonId ? LESSONS[data.lessonId] ?? null : null;
+    this.training            = !!data.training || this.lesson !== null;
+    this.lessonRunner        = null;
+    this.lessonViewKey       = '';
+    this.lessonSpokenStep    = 0;
+    this.lessonDone          = false;
+    this.lessonStopped       = false;
+    this.lessonLanding       = null;
     this.coach               = null;
     this.coachViewKey        = '';
     this.coachGuideFade      = 0;
@@ -360,8 +388,10 @@ export class FlightScene extends Phaser.Scene {
     this.redlineSeconds      = 0;
     this.ceilingWarnAt2      = -99;
     this.flapWarnAt          = -99;
+    this.gearWarnAt          = -99;
     this.restartHoldFor      = 0;
     this.coolantLeft         = 1;
+    this.autoFlaps           = this.lesson ? this.lesson.autoFlaps : true;
   }
 
   /** Kept so it can be repositioned on resize and hidden on touch devices. */
@@ -487,7 +517,7 @@ export class FlightScene extends Phaser.Scene {
     if (this.training) {
       homeId = save.player.currentLocationId;
       const home = window.gameData.settlements.find(s => s.id === homeId);
-      this.routeKm = TRAINING_KM;
+      this.routeKm = this.lesson?.routeKm ?? TRAINING_KM;
       destinationName = home ? `${home.name} (home)` : 'home';
       this.originRunwayM = this.destRunwayM = home?.field?.runwayM ?? 600;
       this.originSurface = this.destSurface = home?.field?.approach ?? 'open';
@@ -517,7 +547,7 @@ export class FlightScene extends Phaser.Scene {
      */
     this.world.setBiomes(this.originBiome, this.destBiome);
     if (this.training) {
-      this.world.setTrainingRoute(this.routeKm, 'Millbrook');
+      this.world.setTrainingRoute(this.routeKm, 'Millbrook', this.lesson?.world);
     } else {
       // The country gets more dangerous as the career goes on: mostly rifles
       // and heavy MGs at first, the full arsenal by the sixth contract. It
@@ -545,8 +575,9 @@ export class FlightScene extends Phaser.Scene {
           surfaceAt: x => hz.surfaceAt(x),
           camps: hz.campAnchors,
         },
-        // The lesson is one crowd in one square — rooftops come later
-        this.training ? { squaresOnly: true, camps: false } : {},
+        // The lesson is one crowd in one square — rooftops come later — and
+        // a lesson about something else has nobody to drop to at all
+        this.training ? { squaresOnly: true, camps: false, none: !!this.lesson && !this.lesson.world.drop } : {},
       );
     }
     this.dropStats = { dropped: 0, hits: 0, earned: 0 };
@@ -637,7 +668,8 @@ export class FlightScene extends Phaser.Scene {
      * who never chose flight school still gets taught the whole game.
      */
     const stats = SaveService.get().player.stats;
-    this.coach = new FlightCoach({
+    // A lesson does its own teaching; the coach is for real flights
+    this.coach = this.lesson ? null : new FlightCoach({
       basics: this.training || (stats.totalFlights === 0 && !stats.trainingDone),
       forceAll: this.training,
       seen: stats.lessons ?? [],
@@ -653,10 +685,16 @@ export class FlightScene extends Phaser.Scene {
     // The HUD comes up on this event; a real flight gets it from the board
     if (this.training) EventBus.emit('scene:start-flight', { contractId: '' });
     this.aircraft.stopEngine();
-    EventBus.emit('ui:show-notification', {
-      message: '📦 Loading cargo — flaps and gear are set for departure',
-      type: 'info',
-    });
+    if (this.lesson) {
+      // No cargo to wait for on a lesson
+      this.world.loading = false;
+      this.loadingLeft = 0;
+    } else {
+      EventBus.emit('ui:show-notification', {
+        message: '📦 Loading cargo — flaps and gear are set for departure',
+        type: 'info',
+      });
+    }
     this.rig = new CameraRig(this.cameras.main, this.controller.vStall, this.controller.vMax);
 
     // The engine you hear is the engine you can see. Style, count and blade
@@ -700,7 +738,7 @@ export class FlightScene extends Phaser.Scene {
     this.keyHintText = this.add.text(width / 2, height - 4, keyLegend,
       { fontSize: '11px', color: '#5a6a5a', fontFamily: 'monospace',
         backgroundColor: '#00000055', padding: { x: 6, y: 4 } }
-    ).setOrigin(0.5, 1).setDepth(10).setVisible(!isTouchDevice());
+    ).setOrigin(0.5, 1).setDepth(10).setVisible(!isTouchDevice() && !this.lesson);
 
     this.warpText = this.add.text(14, 14, '»» TIME ×4', {
       fontSize: '15px', color: '#ffd080', fontFamily: 'monospace', fontStyle: 'bold',
@@ -774,6 +812,19 @@ export class FlightScene extends Phaser.Scene {
           fadeToScene(this, 'MapScene');
         }
       }),
+      // The lesson debrief's buttons, and Quit on the card
+      EventBus.on('flight:lesson-exit', ({ action }) => {
+        if (!this.lesson) return;
+        const again = action === 'next' ? nextLessonId(this.lesson.id) : action === 'retry' ? this.lesson.id : null;
+        EventBus.emit('flight:lesson', null);
+        if (again) {
+          fadeToScene(this, 'FlightScene', { contractId: '', lessonId: again });
+          return;
+        }
+        EventBus.emit('scene:return-to-map');
+        fadeToScene(this, 'MapScene');
+        if (action === 'school') EventBus.emit('ui:open-flight-school');
+      }),
       EventBus.on('flight:hide-tips', () => {
         this.coach?.hideAll();
         const save = SaveService.get();
@@ -804,6 +855,8 @@ export class FlightScene extends Phaser.Scene {
     SoundEngine.unlock();
     SoundEngine.stopAmbient();
     SoundEngine.startFlightLoop();
+
+    if (this.lesson) this.startLesson();
 
     // ── First draw ────────────────────────────────────────────────────────
     this.world.update(0, {
@@ -965,6 +1018,14 @@ export class FlightScene extends Phaser.Scene {
       const down = Phaser.Input.Keyboard.JustDown(this.keys.F) || TouchInput.consume('flaps');
       const up = Phaser.Input.Keyboard.JustDown(this.keys.V) || TouchInput.consume('flapsUp');
       if ((down || up) && this.flapsToggleCooldown === 0) {
+        // The first touch of the lever takes the flaps off automatic
+        if (this.autoFlaps) {
+          this.autoFlaps = false;
+          EventBus.emit('ui:show-notification', {
+            message: `Manual flaps — ${ctl('flaps')} lowers a notch, ${ctl('flapsUp')} raises one`,
+            type: 'info',
+          });
+        }
         const was = this.state.flapStage;
         const next = clamp(was + (down ? 1 : 0) - (up ? 1 : 0), 0, 3);
         if (next !== was) {
@@ -983,8 +1044,29 @@ export class FlightScene extends Phaser.Scene {
         }
       }
     }
+    if (this.autoFlaps) {
+      const toStrip = this.routeKm - this.state.distanceTravelled;
+      const stage = autoFlapStage({
+        onGround: this.state.altitude <= 0,
+        hasFlown: this.hasBeenAirborne,
+        altitude: this.state.altitude,
+        speedRatio: (this.state.speed * Math.sqrt(this.controller.sigma)) / this.controller.vStall,
+        verticalSpeed: this.state.verticalSpeed,
+        throttle: this.state.throttle,
+        stripKm: Math.abs(toStrip),
+        towardStrip: this.heading * toStrip >= -0.05,
+        takeoffStage: this.controller.takeoffFlap,
+        stage: this.state.flapStage,
+      });
+      if (stage !== this.state.flapStage) {
+        this.state.flapStage = stage;
+        SoundEngine.flapMove();
+        EventBus.emit('flight:flaps-toggled', { deployed: stage > 0, stage });
+      }
+    }
     if (Phaser.Input.Keyboard.JustDown(this.keys.R) || TouchInput.consume('turn')) this.startTurn();
-    if ((Phaser.Input.Keyboard.JustDown(this.keys.T) || TouchInput.consume('time'))) {
+    // No time warp on a lesson: they are short, and the clock is graded
+    if ((Phaser.Input.Keyboard.JustDown(this.keys.T) || TouchInput.consume('time')) && !this.lesson) {
       if (this.timeScale === 4) {
         this.timeScale = 8;
         this.warpText.setText('»» TIME ×8').setVisible(true);
@@ -1002,6 +1084,13 @@ export class FlightScene extends Phaser.Scene {
       }
     }
     if ((Phaser.Input.Keyboard.JustDown(this.keys.ESC) || TouchInput.consume('abort'))) {
+      if (this.lesson) {
+        EventBus.emit('flight:lesson', null);
+        EventBus.emit('scene:return-to-map');
+        fadeToScene(this, 'MapScene');
+        EventBus.emit('ui:open-flight-school');
+        return;
+      }
       EventBus.emit('scene:return-to-map');
       EventBus.emit('ui:show-notification', { message: 'Flight aborted.', type: 'warning' });
       fadeToScene(this, 'MapScene');
@@ -1046,7 +1135,8 @@ export class FlightScene extends Phaser.Scene {
     const minutes = this.baseTimestamp + this.state.elapsedSeconds;
     const dayFrac = ((minutes / 60) % 24) / 24;
     const solar = Math.max(0, Math.sin((dayFrac - 0.25) * Math.PI * 2));
-    this.world.air.setConditions(solar, cover);
+    // Lessons fly in still air: rising and sinking air is not lesson one
+    this.world.air.setConditions(solar, this.lesson ? 0 : cover);
     const air = this.world.air.sample(airX, this.state.altitude);
     // A cell's own updraught/outflow rides on top of the convective field.
     air.vertical += wx.draught;
@@ -1158,6 +1248,16 @@ export class FlightScene extends Phaser.Scene {
       SoundEngine.warn();
       EventBus.emit('ui:show-notification', {
         message: `⚠ FLAP SPEED — slow below ${Math.round(this.controller.flapLimit * 3.6)} km/h or ${press('flapsUp')} to raise them`,
+        type: 'danger',
+      });
+    }
+    // Wheels left down at speed: drag that holds her back, and the doors
+    // and legs are being torn — say so, or it reads as damage from nowhere
+    if (this.controller.gearOverspeed && this.state.elapsedSeconds - this.gearWarnAt > 6) {
+      this.gearWarnAt = this.state.elapsedSeconds;
+      SoundEngine.warn();
+      EventBus.emit('ui:show-notification', {
+        message: `⚠ GEAR SPEED — the wheels are still down: ${press('gear')} to raise them`,
         type: 'danger',
       });
     }
@@ -1371,6 +1471,9 @@ export class FlightScene extends Phaser.Scene {
       timeScale: this.timeScale,
     });
     SoundEngine.setStallWarning(this.stallWarning);
+
+    // ── Flight school ──────────────────────────────────────────────────────
+    if (this.lessonRunner && !this.lessonDone) this.updateLesson(rawDt);
 
     // ── Events to React ────────────────────────────────────────────────────
     if (this.hudDue) EventBus.emit('flight:state-update', this.state);
@@ -1856,6 +1959,7 @@ export class FlightScene extends Phaser.Scene {
         trafficAvoid: this.trafficAvoid,
         fuelAtArrival: this.fuelAtArrival,
         retractableGear: this.aircraft.hasRetractableGear,
+        gearOverspeed: this.controller.gearOverspeed,
         // A camp is signalling and there is something left to drop on it
         dropReady: this.world.dropReticle !== null,
         cratesLeft: this.world.drops.cratesLeft,
@@ -1868,6 +1972,7 @@ export class FlightScene extends Phaser.Scene {
           nextLimitKmh: this.state.flapStage < 3 ? Math.round(this.controller.flapLimitAt(this.state.flapStage + 1) * 3.6) : null,
           overspeed: this.controller.flapOverspeed,
           blownBack: this.controller.flapBlownBack,
+          auto: this.autoFlaps,
         },
         stallKmh: Math.round(this.controller.stallSpeedNow * 3.6),
         climbReserve: this.controller.climbReserve,
@@ -2638,6 +2743,7 @@ export class FlightScene extends Phaser.Scene {
       timeWarp: this.timeScale,
       remainingKm: Math.abs(this.routeKm - this.state.distanceTravelled),
       vrKmh: Math.round(this.controller.stallSpeedNow * 1.1 * 3.6),
+      autoFlaps: this.autoFlaps,
       obstacle: this.coachObstacle,
       threat: this.coachThreat,
       drop: this.dropZone,
@@ -2670,6 +2776,139 @@ export class FlightScene extends Phaser.Scene {
       : { text: null });
     // The legend and the lesson share the bottom of the screen
     this.keyHintText?.setVisible(view === null);
+  }
+
+  // ── Flight school ─────────────────────────────────────────────────────────
+
+  /** Put the aeroplane where the lesson begins and start its runner. */
+  private startLesson(): void {
+    const l = this.lesson!;
+    if (l.start.kind === 'air') {
+      const st = l.start;
+      const atKm = st.atKm >= 0 ? st.atKm : this.routeKm + st.atKm;
+      const cruise = SaveService.getActiveAircraft().def.stats.cruiseSpeed / 3.6;
+      this.planeX = AIRCRAFT_X + atKm * 1000 * WORLD_PX_PER_M;
+      this.scrollX = this.planeX - this.planeScreenX;
+      this.state.distanceTravelled = atKm;
+      this.state.altitude = st.altitude;
+      this.state.speed = st.overStall ? this.controller.vStall * st.overStall : cruise * (st.ofCruise ?? 0.9);
+      this.state.throttle = st.throttle;
+      this.state.enginePower = st.throttle;
+      this.state.flapStage = 0;
+      this.state.flapAngle = 0;
+      this.state.flapsDeployed = false;
+      this.engineRunning = true;
+      this.aircraft.startEngine();
+      this.hasBeenAirborne = true;
+      // Flying at speed means the wheels are up — a lesson that wants them
+      // down says so; one that never mentions them must not drag them along
+      if (this.aircraft.hasRetractableGear) {
+        this.state.gearDown = false;
+        this.aircraft.setGearDown(false);
+      }
+    }
+    this.lessonIntegrity0 = this.state.integrity;
+    this.lessonRunner = new LessonRunner(l, this.lessonCtx());
+  }
+
+  /** What the lesson needs to know that the flight state does not. */
+  private lessonCtx(): LessonCtx {
+    return {
+      engineRunning: this.engineRunning,
+      // Rounded so the line on the card does not flicker as the air changes
+      vrKmh: Math.round((this.controller.stallSpeedNow * 1.1 * 3.6) / 5) * 5,
+      stallKmh: Math.round(this.controller.vStall * 3.6),
+      cruiseKmh: SaveService.getActiveAircraft().def.stats.cruiseSpeed,
+      retractableGear: this.aircraft.hasRetractableGear,
+      heading: this.heading,
+      turning: this.turn !== null,
+      stall: this.stallWarning,
+      landed: this.hasBeenAirborne && (this.rollout || this.lessonStopped),
+      stopped: this.lessonStopped,
+      onRunway: this.isOnRunway(this.planeX),
+      landing: this.lessonLanding ?? this.rolloutResult?.quality ?? null,
+      flapLimitKmh: [0, 1, 2, 3].map(i => Math.round(this.controller.flapLimitAt(i) * 3.6)),
+      damage: Math.max(0, this.lessonIntegrity0 - this.state.integrity),
+    };
+  }
+
+  /** Each frame: walk the goals, say the new one, tick the finished one. */
+  private updateLesson(dt: number): void {
+    const runner = this.lessonRunner!;
+    const view = runner.update(dt, this.state, this.lessonCtx());
+    if (view.justDone) SoundEngine.chime();
+    if (view.step !== this.lessonSpokenStep && !runner.result) {
+      this.lessonSpokenStep = view.step;
+      SoundEngine.radio(view.text, { kind: 'control', station: 'INSTRUCTOR' });
+    }
+    this.coachGuideFade = view.guide
+      ? Math.min(1, this.coachGuideFade + dt / 1.2)
+      : Math.max(0, this.coachGuideFade - dt / 0.8);
+    if (view.guide) {
+      this.world.trainGuide = { ...view.guide, fade: this.coachGuideFade };
+    } else if (this.world.trainGuide) {
+      this.world.trainGuide = this.coachGuideFade > 0 ? { ...this.world.trainGuide, fade: this.coachGuideFade } : null;
+    }
+    const key = JSON.stringify(view);
+    if (key !== this.lessonViewKey) {
+      this.lessonViewKey = key;
+      EventBus.emit('flight:lesson', view);
+    }
+    // Done (or failed) in the air: the picture holds under the debrief
+    if (runner.result) {
+      this.landed = true;
+      SoundEngine.stopFlightLoop();
+      this.endLesson();
+    }
+  }
+
+  /** A lesson flight ending on the ground: the landing it was, or a crash. */
+  private finishLessonFlight(result: LandingResult): void {
+    const runner = this.lessonRunner!;
+    if (result.quality === 'crash') {
+      runner.fail('You went in');
+      this.crashing = true;
+      SoundEngine.stopFlightLoop();
+      this.state.speed = 0;
+      this.state.verticalSpeed = 0;
+      this.state.throttle = 0;
+      this.crash.play(
+        { speed: 0, verticalSpeed: Math.abs(result.verticalSpeed), gearUp: !this.state.gearDown, dir: this.heading },
+        () => this.endLesson(),
+      );
+      return;
+    }
+    this.lessonStopped = true;
+    this.lessonLanding = result.quality;
+    // Let the last goals (touch down, stop) see the stop
+    for (let k = 0; k < 4 && !runner.result; k++) runner.update(0, this.state, this.lessonCtx());
+    if (!runner.result) runner.fail('Back on the ground before the lesson was done');
+    SoundEngine.stopFlightLoop();
+    this.endLesson();
+  }
+
+  /** Grade it, keep the best, pay the first pass, and show the debrief. */
+  private endLesson(): void {
+    if (this.lessonDone) return;
+    this.lessonDone = true;
+    const r = this.lessonRunner!.result!;
+    const l = this.lesson!;
+    this.world.trainGuide = null;
+    EventBus.emit('flight:lesson', null);
+    const save = SaveService.get();
+    const rec = recordLesson(save.player.stats.lessonStars ?? {}, l.id, r.stars);
+    save.player.stats.lessonStars = rec.stars;
+    const reward = rec.firstPass ? LESSON_REWARD : 0;
+    if (reward) save.player.money += reward;
+    SaveService.save(save.player, save.world);
+    if (reward) EventBus.emit('player:money-changed', { amount: save.player.money, delta: reward });
+    if (r.passed) SoundEngine.success(); else SoundEngine.failure();
+    EventBus.emit('flight:lesson-complete', {
+      id: l.id, n: l.n, title: l.title, passed: r.passed, stars: r.stars,
+      criteria: r.criteria, reason: r.reason, reward,
+      takeaway: r.passed ? l.takeaway : undefined,
+      nextId: r.passed ? nextLessonId(l.id) : null,
+    });
   }
 
   /**
@@ -2726,6 +2965,10 @@ export class FlightScene extends Phaser.Scene {
       this.aircraft.setFacing(this.heading);
     }
 
+    if (this.lesson) {
+      this.finishLessonFlight(result);
+      return;
+    }
     if (this.training) {
       this.finishTraining(result);
       return;
@@ -2783,7 +3026,7 @@ export class FlightScene extends Phaser.Scene {
     EventBus.emit('flight:status', {
       engineFailed: false, underFire: false, groundThreat: null, rangedOn: 0, airVertical: 0, inThermal: false, weatherAhead: null, stall: false,
       overspeed: false, obstacleAheadM: null, obstacleLabel: null, trafficDeltaM: null, trafficAvoid: null,
-      weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true,
+      weatherCaution: null, iceLoad: 0, avionicsOut: false, fuelAtArrival: 1, retractableGear: true, gearOverspeed: false,
       dropReady: false, cratesLeft: 0, dropZone: null, overshot: false, canTurn: false,
       flaps: null, stallKmh: 0, climbReserve: 1, eventCaution: null, coolantLeft: 0,
     });

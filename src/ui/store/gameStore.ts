@@ -3,6 +3,8 @@ import { EventBus, type DropZoneStatus } from '../../game/utils/EventBus';
 import { SaveService } from '../../services/SaveService';
 import type { FlightState } from '../../types';
 import type { TutorialPayload } from '../components/hud/TrainingPanel';
+import type { LessonView } from '../../game/training/LessonRunner';
+import type { HudPart } from '../../game/training/lessons';
 
 /**
  * Lightweight reactive store built on plain React hooks + EventBus.
@@ -46,6 +48,33 @@ export function useTutorial(): TutorialPayload | null {
   return lesson;
 }
 
+/** The flight-school goal in hand, or null when no lesson is running. */
+export function useLesson(): LessonView | null {
+  const [view, setView] = useState<LessonView | null>(null);
+  useEffect(() => {
+    const u1 = EventBus.on('flight:lesson', setView);
+    const u2 = EventBus.on('scene:return-to-map', () => setView(null));
+    return () => { u1(); u2(); };
+  }, []);
+  return view;
+}
+
+/**
+ * The readouts the lesson shows. Outlives the lesson card: the debrief is
+ * still the lesson, so the gauges it never taught stay away until the next
+ * flight starts.
+ */
+export function useLessonHud(): HudPart[] | null {
+  const [hud, setHud] = useState<HudPart[] | null>(null);
+  useEffect(() => {
+    const u1 = EventBus.on('flight:lesson', (v: LessonView | null) => { if (v) setHud(v.hud); });
+    const u2 = EventBus.on('scene:start-flight', () => setHud(null));
+    const u3 = EventBus.on('scene:return-to-map', () => setHud(null));
+    return () => { u1(); u2(); u3(); };
+  }, []);
+  return hud;
+}
+
 export function useMoney(): number {
   const [money, setMoney] = useState<number>(() => SaveService.get().player.money);
   useEffect(() => {
@@ -83,13 +112,14 @@ export interface FlightStatus {
   /** Projected fuel fraction left in the tank on arrival. See FlightScene. */
   fuelAtArrival: number;
   retractableGear: boolean;
+  gearOverspeed: boolean;
   dropReady: boolean;
   cratesLeft: number;
   dropZone: DropZoneStatus | null;
   overshot: boolean;
   canTurn: boolean;
   /** Flap notches (deg), limit speeds, and whether they are out too fast. */
-  flaps: { stops: number[]; limitKmh: number | null; nextLimitKmh: number | null; overspeed: boolean; blownBack?: boolean } | null;
+  flaps: { stops: number[]; limitKmh: number | null; nextLimitKmh: number | null; overspeed: boolean; blownBack?: boolean; auto: boolean } | null;
   /** 1g stall speed in the current configuration and air, km/h. */
   stallKmh: number;
   /** Climb left at this height as a fraction of sea level. */
@@ -108,7 +138,10 @@ export function useFlightStatus(): FlightStatus | null {
   useEffect(() => {
     const u1 = EventBus.on('flight:status', setStatus);
     const u2 = EventBus.on('scene:flight-complete', () => setStatus(null));
-    return () => { u1(); u2(); };
+    // A lesson can follow another without leaving the flight scene: drop the
+    // last flight's status so its flaps or cautions never show on the new one
+    const u3 = EventBus.on('scene:start-flight', () => setStatus(null));
+    return () => { u1(); u2(); u3(); };
   }, []);
   return status;
 }

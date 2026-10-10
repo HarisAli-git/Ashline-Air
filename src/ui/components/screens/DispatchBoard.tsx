@@ -7,6 +7,7 @@ import type { Contract } from '../../../types';
 import { routeBlock, routeKmBetween, describeBlock, fuelCheck } from '../../../services/RouteService';
 import { previewDrops } from '../../../game/world/RoutePreview';
 import { useViewport } from '../../viewport';
+import { lessonList, schoolDone } from '../../../game/training/lessons';
 
 /**
  * The dispatch board.
@@ -56,6 +57,29 @@ export function DispatchBoard({ settlementId, onContractAccepted }: Props): Reac
     c => c.originId === settlementId && c.status === 'available',
   );
   const [picked, setPicked] = useState<string | null>(save.player.activeContractId);
+
+  // Flight school first: the board opens once every lesson has a star
+  if (!schoolDone(save.player.stats)) {
+    const stars = save.player.stats.lessonStars ?? {};
+    const all = lessonList();
+    const passed = all.filter(l => (stars[l.id] ?? 0) > 0).length;
+    return (
+      <div style={s.root}>
+        <div style={s.head}>
+          <span style={s.place}>{here?.name ?? 'Unknown field'}</span>
+          <span style={s.craft}>{aircraft.name}</span>
+        </div>
+        <div style={s.locked}>
+          <div style={s.lockedTitle}>FLIGHT SCHOOL FIRST</div>
+          <div style={s.lockedText}>
+            Nobody on this board hands cargo to a pilot without their wings.
+            {` ${passed} of ${all.length} lessons passed.`}
+          </div>
+          <button style={s.go} onClick={() => EventBus.emit('ui:open-flight-school')}>Open flight school</button>
+        </div>
+      </div>
+    );
+  }
   const selected = offers.find(c => c.id === picked) ?? null;
 
   const repFor = (f: string): number =>
@@ -278,6 +302,12 @@ function styles(uiScale: number, compact: boolean): Record<string, React.CSSProp
     fig: { fontVariantNumeric: 'tabular-nums' },
     blocked: { color: '#c25a2a' },
     empty: { padding: n(20), color: '#6a5a3a', fontSize: n(compact ? 10.5 : 12.5), lineHeight: 1.5 },
+    locked: {
+      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      gap: n(12), padding: n(24), textAlign: 'center',
+    },
+    lockedTitle: { fontSize: n(compact ? 14 : 17), color: '#ffd080', fontWeight: 'bold', letterSpacing: 2 },
+    lockedText: { fontSize: n(compact ? 11 : 13), color: '#c8b888', lineHeight: 1.5, maxWidth: n(380) },
 
     bar: {
       display: 'flex', alignItems: 'center', gap: n(10),
