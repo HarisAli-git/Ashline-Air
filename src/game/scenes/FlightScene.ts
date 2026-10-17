@@ -2423,7 +2423,7 @@ export class FlightScene extends Phaser.Scene {
     }
 
     // ── Midair ────────────────────────────────────────────────────────────
-    const other = traffic.collision(worldX, this.state.altitude);
+    const other = traffic.collision(this.aircraft.hitBox);
     if (!other || !this.hasBeenAirborne) return;
     traffic.doom(other);
     // Debris at THEIR airframe as well, not only off your wing. Without it the
@@ -2828,6 +2828,7 @@ export class FlightScene extends Phaser.Scene {
       onRunway: this.isOnRunway(this.planeX),
       landing: this.lessonLanding ?? this.rolloutResult?.quality ?? null,
       flapLimitKmh: [0, 1, 2, 3].map(i => Math.round(this.controller.flapLimitAt(i) * 3.6)),
+      gearLimitKmh: Math.floor((this.controller.gearLimit * 3.6) / 5) * 5,
       damage: Math.max(0, this.lessonIntegrity0 - this.state.integrity),
     };
   }

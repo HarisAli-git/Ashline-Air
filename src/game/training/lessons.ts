@@ -44,6 +44,8 @@ export interface LessonCtx {
   landing: LandingQuality | null;
   /** Top speed for each flap notch, km/h, indexed by notch. */
   flapLimitKmh: number[];
+  /** Fastest the gear may be lowered at, km/h, rounded down to a safe number. */
+  gearLimitKmh: number;
   /** Integrity lost since the lesson began. */
   damage: number;
 }
@@ -210,7 +212,7 @@ export const LESSONS: Partial<Record<LessonId, LessonDef>> = {
         keys: ['flaps'], focus: 'flaps', done: s => (s.flapStage ?? 0) >= 1 },
       { id: 'flap2', text: c => `Second notch below ${c.flapLimitKmh[2]} km/h`, keys: ['flaps'], focus: 'flaps',
         done: s => (s.flapStage ?? 0) >= 2 },
-      { id: 'gear', text: () => 'Gear down', keys: ['gear'], focus: 'gear',
+      { id: 'gear', text: c => `Gear down — below ${c.gearLimitKmh} km/h`, keys: ['gear'], focus: 'gear',
         skip: c => !c.retractableGear, done: s => s.gearDown },
       { id: 'full', text: c => `Full flap below ${c.flapLimitKmh[3]} km/h — the last notch is mostly drag`,
         keys: ['flaps'], focus: 'flaps', done: s => (s.flapStage ?? 0) >= 3 },
