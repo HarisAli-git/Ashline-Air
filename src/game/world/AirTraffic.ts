@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { AircraftModel, type ModelLight } from '../entities/aircraft/render/AircraftModel';
+import { AircraftModel, type HitBox, type ModelLight } from '../entities/aircraft/render/AircraftModel';
 import { specFor } from '../entities/aircraft/render/AircraftVisualSpec';
 
 /**
@@ -62,9 +62,13 @@ export interface TrafficPlane {
 
 interface Wreck { wx: number; age: number; }
 
-/** Collision box, matched to the drawn silhouette. */
-const HALF_W_PX = 52;
-const HALF_ALT_M = 5.2;
+/**
+ * How much of each drawn outline counts as aeroplane. An outline is a box
+ * round wingtips, fin and propeller; its corners are empty sky, so two
+ * outlines touching corner to corner have not touched at all.
+ */
+const HIT_FILL_X = 0.85;
+const HIT_FILL_Y = 0.8;
 
 /** Conflict alerting: how far ahead in time we call traffic out. */
 const ADVISORY_SECONDS = 9;
@@ -313,11 +317,22 @@ export class AirTraffic {
 
   // ── Queries ───────────────────────────────────────────────────────────────
 
-  /** The aircraft we are currently occupying the same air as, if any. */
-  collision(planeWorldX: number, planeAlt: number): TrafficPlane | null {
+  /**
+   * The aircraft whose drawn airframe overlaps yours, if any.
+   *
+   * Decided on the pictures, not on altitudes: your altitude is measured at
+   * your wheels and theirs near the fuselage, so two aeroplanes that were
+   * plainly drawn through each other used to pass ten metres apart.
+   */
+  collision(you: HitBox): TrafficPlane | null {
+    if (!you.valid) return null;
     for (const p of this.list) {
       if (p.doom !== null) continue;
-      if (Math.abs(p.wx - planeWorldX) <= HALF_W_PX && Math.abs(p.alt - planeAlt) <= HALF_ALT_M) return p;
+      const them = this.models.get(p)?.hitBox;
+      if (!them?.valid) continue;
+      const nx = (them.cx - you.cx) / ((you.rx + them.rx) * HIT_FILL_X);
+      const ny = (them.cy - you.cy) / ((you.ry + them.ry) * HIT_FILL_Y);
+      if (nx * nx + ny * ny <= 1) return p;
     }
     return null;
   }

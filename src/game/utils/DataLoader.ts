@@ -15,18 +15,19 @@ export interface GameData {
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
-  const res = await fetch(path);
+  // Relative to wherever the game is served from, not the domain root
+  const res = await fetch(`${import.meta.env.BASE_URL}${path}`);
   if (!res.ok) throw new Error(`Failed to load ${path}: ${res.status}`);
   return res.json() as Promise<T>;
 }
 
 export async function loadAllGameData(): Promise<GameData> {
   const [aircraft, goods, settlements, events, factions] = await Promise.all([
-    fetchJson<AircraftDefinition[]>('/data/aircraft/aircraft.json'),
-    fetchJson<GoodDefinition[]>('/data/goods/goods.json'),
-    fetchJson<SettlementDefinition[]>('/data/settlements/settlements.json'),
-    fetchJson<FlightEventDefinition[]>('/data/events/flight_events.json'),
-    fetchJson<FactionDefinition[]>('/data/factions/factions.json'),
+    fetchJson<AircraftDefinition[]>('data/aircraft/aircraft.json'),
+    fetchJson<GoodDefinition[]>('data/goods/goods.json'),
+    fetchJson<SettlementDefinition[]>('data/settlements/settlements.json'),
+    fetchJson<FlightEventDefinition[]>('data/events/flight_events.json'),
+    fetchJson<FactionDefinition[]>('data/factions/factions.json'),
   ]);
 
   return { aircraft, goods, settlements, events, factions };

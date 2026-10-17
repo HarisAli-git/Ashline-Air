@@ -23,3 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 docs
+
+# Local planning notes and tool state — not part of the game
+.claude/
+.superpowers/

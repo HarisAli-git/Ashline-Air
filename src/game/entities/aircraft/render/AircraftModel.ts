@@ -853,9 +853,18 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
 const ELEVATION = 0.16;
 const FOCAL = 760;
 
+/** Where a model was last drawn: centre and half-extents, scene px. */
+export interface HitBox { cx: number; cy: number; rx: number; ry: number; valid: boolean }
+
 export class AircraftModel {
   readonly gfx: Phaser.GameObjects.Graphics;
   readonly lamps: Phaser.GameObjects.Graphics;
+  /**
+   * The airframe as last drawn, so a collision is decided by the picture
+   * rather than by an altitude that sits at the wheels on one aeroplane and
+   * mid-fuselage on another. Invalid while the model is not on screen.
+   */
+  readonly hitBox: HitBox = { cx: 0, cy: 0, rx: 0, ry: 0, valid: false };
   private readonly d: ModelData;
   private readonly webgl: boolean;
   // Scratch buffers, allocated once
@@ -894,6 +903,7 @@ export class AircraftModel {
   setVisible(v: boolean): void {
     this.gfx.setVisible(v);
     this.lamps.setVisible(v);
+    if (!v) this.hitBox.valid = false;
   }
 
   destroy(): void {
@@ -987,6 +997,7 @@ export class AircraftModel {
 
     const n = d.vpart.length;
     const P = d.pos, N = d.norms;
+    let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
     for (let i = 0; i < n; i++) {
       let x0 = P[i * 3], y0 = P[i * 3 + 1], z0 = P[i * 3 + 2];
       let n0 = N[i * 3], n1 = N[i * 3 + 1], n2 = N[i * 3 + 2];
@@ -1011,6 +1022,11 @@ export class AircraftModel {
       this.mx[i] = vx; this.my[i] = vy; this.mz[i] = vz;
       const k = FOCAL / (FOCAL - vz);
       this.px[i] = vx * k; this.py[i] = vy * k; this.vz[i] = vz;
+      // The outline of what is actually drawn: stowed parts do not count
+      if (!(pi > 0 && d.parts[pi].hidden)) {
+        if (this.px[i] < bx0) bx0 = this.px[i]; if (this.px[i] > bx1) bx1 = this.px[i];
+        if (this.py[i] < by0) by0 = this.py[i]; if (this.py[i] > by1) by1 = this.py[i];
+      }
       // …and for its normal
       y1 = n1 * cr - n2 * sr; z1 = n1 * sr + n2 * cr;
       x2 = n0 * cp + y1 * sp; y2 = -n0 * sp + y1 * cp;
@@ -1027,6 +1043,18 @@ export class AircraftModel {
       this.ndh[i] = Math.max(0, qx * Hh[0] + qy * Hh[1] + qz * Hh[2]);
       const facing = Math.max(0, qz);
       this.fres[i] = (1 - facing) * (1 - facing) * (1 - facing);
+    }
+
+    {
+      // Local box → scene: the graphics are placed at (x, y), turned and scaled
+      const lcx = (bx0 + bx1) / 2, lcy = (by0 + by1) / 2;
+      const cs = Math.cos(rotation), sn = Math.sin(rotation);
+      const hb = this.hitBox;
+      hb.cx = x + scale * (lcx * cs - lcy * sn);
+      hb.cy = y + scale * (lcx * sn + lcy * cs);
+      hb.rx = (scale * (bx1 - bx0)) / 2;
+      hb.ry = (scale * (by1 - by0)) / 2;
+      hb.valid = bx1 > bx0;
     }
 
     // ── Faces: cull, key, sort ──

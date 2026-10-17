@@ -275,6 +275,8 @@ export class AircraftController {
   private accumulator = 0;
 
   get hasRetractableGear(): boolean { return !this.gearFixed; }
+  /** Fastest the gear may be down at, m/s — above it the legs are being torn. */
+  get gearLimit(): number { return this.vStall * 1.8; }
 
   /** Set by FlightScene: called with stall intensity 0–1 while buffeting. */
   onBuffet: ((intensity: number) => void) | null = null;
@@ -857,7 +859,7 @@ export class AircraftController {
     if (this.flapOverspeed) {
       s.integrity = clamp(s.integrity - TUNING.flapOverspeedDamage * dt, 0, 100);
     }
-    this.gearOverspeed = !this.gearFixed && s.gearDown && !onGround && s.speed > this.vStall * 1.8;
+    this.gearOverspeed = !this.gearFixed && s.gearDown && !onGround && s.speed > this.gearLimit;
     if (this.gearOverspeed) {
       s.integrity = clamp(s.integrity - TUNING.gearDragDamage * dt, 0, 100);
     }

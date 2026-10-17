@@ -6,7 +6,7 @@ import {
 import { ensureAircraftTextures, SS, type AircraftTexKeys } from './render/AircraftPainter';
 import { AircraftParticles } from './render/AircraftParticles';
 import { drawMainLeg, drawNoseLeg, drawTailSpring, drawSpat, type GearStyle } from './render/GearArt';
-import { AircraftModel, type ModelLight } from './render/AircraftModel';
+import { AircraftModel, type HitBox, type ModelLight } from './render/AircraftModel';
 import { isTouchDevice } from '../../utils/device';
 
 /**
@@ -500,6 +500,9 @@ export class AircraftSprite {
     const e = this.spec.engines[0];
     return this.localToScene(e.x, e.y);
   }
+
+  /** The airframe as last drawn — what a midair is tested against. */
+  get hitBox(): HitBox { return this.model.hitBox; }
 
   wingPoint(): { x: number; y: number } {
     const w = this.spec.wing;
