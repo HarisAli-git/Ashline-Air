@@ -103,6 +103,14 @@ class SoundEngineClass {
 
   private ambientSrc: AudioBufferSourceNode | null = null;
   private ambientGain: GainNode | null = null;
+  /** The slow LFOs that make the ambient wind gust rather than hiss. */
+  private ambientLfos: OscillatorNode[] = [];
+  /**
+   * A scene asked for the ambient bed before the browser allowed audio. The
+   * menu does exactly that on every cold start, so the wind used to stay
+   * silent until the next scene change; unlock() starts it instead.
+   */
+  private ambientWanted = false;
 
   // ── Weather bed: rain, dust, the roar of a cell ───────────────────────────
   /** Wind whistle/howl for gales and blizzards: a narrow band that wanders. */
@@ -168,8 +176,17 @@ class SoundEngineClass {
   private turbineOsc: OscillatorNode | null = null;
   private turbineGain: GainNode | null = null;
   private turbineFilter: BiquadFilterNode | null = null;
+  /** The whine's level at full rpm for this airframe; 0 on a radial. */
+  private turbineLevel = 0;
   private beatOsc: OscillatorNode | null = null;
   private beatGain: GainNode | null = null;
+  /**
+   * Unity-gain stage after the engine's own gain, which the twin-engine beat
+   * modulates. The beat used to be summed straight into the engine gain at a
+   * fixed ±0.30 — several times the engine's whole level (0.05–0.11), which
+   * would have swung it through zero twice a second.
+   */
+  private beatStage: GainNode | null = null;
 
   private flightLoopOn = false;
 
@@ -266,6 +283,7 @@ class SoundEngineClass {
       } catch {
         this.ctx = null;
       }
+      if (this.ctx && this.ambientWanted && !this.flightLoopOn) this.startAmbient();
     }
     if (this.ctx?.state === 'suspended') void this.ctx.resume();
   }
@@ -407,8 +425,10 @@ class SoundEngineClass {
 
     this.engineGain = ctx.createGain();
     this.engineGain.gain.value = 0;
+    this.beatStage = ctx.createGain();
+    this.beatStage.gain.value = 1;
     this.engineFilter.connect(this.chopGain).connect(this.engineGain)
-      .connect(this.busEngine ?? this.master);
+      .connect(this.beatStage).connect(this.busEngine ?? this.master);
 
     this.engineOsc = ctx.createOscillator();
     this.engineOsc.type = 'sawtooth';
@@ -464,6 +484,14 @@ class SoundEngineClass {
     this.hornOsc2.connect(hg);
     this.hornOsc.start();
     this.hornOsc2.start();
+
+    /*
+     * Voice it for THIS aeroplane. FlightScene sets the profile before it
+     * starts the loop, and setEngineProfile only applies it to a loop that is
+     * already running — so the per-airframe voice (the turboprop whine, the
+     * twin beat, the rounder oscillators) never reached a single flight.
+     */
+    this.applyEngineProfile();
   }
 
   /** Per-frame modulation of every continuous layer. */
@@ -497,10 +525,14 @@ class SoundEngineClass {
       const depth = (P.kind === 'radial' ? 0.30 : 0.14) + s.roughness * 0.3;
       this.ramp(this.chopDepth.gain, depth, t, 0.15);
     }
-    if (this.turbineOsc && this.turbineFilter) {
+    if (this.turbineOsc && this.turbineFilter && this.turbineGain) {
       // The whine climbs with rpm — the sound of a turboprop spooling
       this.ramp(this.turbineOsc.frequency, (420 + s.rpm * 900) * warp, t, 0.12);
       this.ramp(this.turbineFilter.frequency, 1800 + s.rpm * 2200, t, 0.12);
+      // …and it is the ENGINE's sound: silent with the engine stopped, low at
+      // idle, full at power, and buried by a storm like the rest of it
+      const spool = s.rpm > 0.01 ? 0.3 + 0.7 * Math.min(1, s.rpm) : 0;
+      this.ramp(this.turbineGain.gain, this.turbineLevel * spool * (1 - this.wxMask * 0.45), t, 0.15);
     }
     if (this.exhaustGain && this.exhaustFilter) {
       // Relative to the tone (it shares the engine's gain stage now)
@@ -537,37 +569,90 @@ class SoundEngineClass {
     this.flightLoopOn = false;
     this.hornOn = false;
     const t = this.ctx.currentTime;
-    for (const g of [this.engineGain, this.exhaustGain, this.windGain, this.rumbleGain, this.hornGain]) {
+    for (const g of [this.engineGain, this.exhaustGain, this.windGain, this.rumbleGain, this.hornGain, this.turbineGain]) {
       if (g) this.ramp(g.gain, 0, t, 0.08);
     }
+    /*
+     * The turbine and the twin beat go with the rest. They were built once and
+     * never stopped, so a turboprop's whine carried on over the chart after
+     * landing, and every later flight's beat stayed wired to the FIRST
+     * flight's (long disconnected) engine gain.
+     */
     const nodes = [
       this.engineOsc, this.engineOsc2, this.chopLfo, this.hornOsc, this.hornOsc2,
-      this.exhaustSrc, this.windSrc, this.rumbleSrc,
+      this.exhaustSrc, this.windSrc, this.rumbleSrc, this.turbineOsc, this.beatOsc,
     ];
     setTimeout(() => {
       for (const n of nodes) { try { n?.stop(); n?.disconnect(); } catch { /* already stopped */ } }
     }, 500);
     this.engineOsc = this.engineOsc2 = this.chopLfo = this.hornOsc = this.hornOsc2 = null;
     this.exhaustSrc = this.windSrc = this.rumbleSrc = null;
+    this.turbineOsc = this.beatOsc = null;
+    this.turbineGain = this.beatGain = null;
+    this.turbineFilter = null;
+    this.beatStage = null;
   }
 
   // ── Ambient bed (menu / map) ──────────────────────────────────────────────
 
+  /**
+   * Wind over the wasteland, for the menu and the chart.
+   *
+   * It was one band of low noise at a fixed level — a hum, not weather. Two
+   * slow, unrelated LFOs now move its level and its colour, so it comes in
+   * long gusts that swell and brighten and die back, never quite repeating.
+   */
   startAmbient(): void {
+    this.ambientWanted = true;
     if (!this.ctx || !this.master || this.ambientSrc || !this.noiseBuffer) return;
-    const amb = this.loopNoise('lowpass', 320, 0.7);
-    if (!amb) return;
-    this.ambientSrc = amb.src;
-    this.ambientGain = amb.gain;
-    this.ambientGain.gain.setTargetAtTime(0.035, this.ctx.currentTime, 1.5);
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    src.loop = true;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 320;
+    filter.Q.value = 0.7;
+    // The gusts move a unity stage; the fade below it takes everything down
+    // together, LFOs included
+    const gust = ctx.createGain();
+    gust.gain.value = 1;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    src.connect(filter).connect(gust).connect(gain).connect(this.master);
+    src.start(0, Math.random() * 1.5);
+    gain.gain.setTargetAtTime(0.035, ctx.currentTime, 1.5);
+    this.ambientSrc = src;
+    this.ambientGain = gain;
+    const lfo = (hz: number, depth: number, param: AudioParam): OscillatorNode => {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = hz;
+      const d = ctx.createGain();
+      d.gain.value = depth;
+      o.connect(d).connect(param);
+      o.start();
+      return o;
+    };
+    this.ambientLfos = [
+      // Level: ±40% over about eleven seconds, with a faster flutter on top
+      lfo(0.09, 0.38, gust.gain),
+      lfo(0.23, 0.12, gust.gain),
+      // Colour: the gusts brighten as they build
+      lfo(0.07, 110, filter.frequency),
+    ];
   }
 
   stopAmbient(): void {
+    this.ambientWanted = false;
     if (!this.ctx || !this.ambientSrc) return;
     this.ambientGain?.gain.setTargetAtTime(0, this.ctx.currentTime, 0.3);
-    const src = this.ambientSrc;
+    const nodes: AudioScheduledSourceNode[] = [this.ambientSrc, ...this.ambientLfos];
     this.ambientSrc = null;
-    setTimeout(() => { try { src.stop(); src.disconnect(); } catch { /* gone */ } }, 800);
+    this.ambientLfos = [];
+    setTimeout(() => {
+      for (const n of nodes) { try { n.stop(); n.disconnect(); } catch { /* gone */ } }
+    }, 800);
   }
 
   // ── One-shots ─────────────────────────────────────────────────────────────
@@ -1495,20 +1580,17 @@ class SoundEngineClass {
     }
 
     this.ensureTurbine();
-    if (this.turbineGain && this.ctx) {
-      // Only a turboprop has a compressor whine over the propeller
-      // The whine IS the turboprop. At 0.02 it was inaudible under the
-      // propeller and every aeroplane still sounded like the same radial.
-      this.turbineGain.gain.setTargetAtTime(
-        P.kind === 'turboprop' ? 0.035 + P.count * 0.008 : 0, this.ctx.currentTime, 0.3,
-      );
-    }
+    // Only a turboprop has a compressor whine over the propeller. The whine
+    // IS the turboprop; updateFlight scales it with rpm, so it spools up from
+    // the start and dies with the engine.
+    this.turbineLevel = P.kind === 'turboprop' ? 0.03 + P.count * 0.006 : 0;
     if (this.beatGain && this.ctx) {
-      // Two or more engines beat against one another; a single does not
-      this.beatGain.gain.setTargetAtTime(P.count > 1 ? 0.30 : 0, this.ctx.currentTime, 0.3);
+      // Two or more engines beat against one another; a single does not. A
+      // tenth or so of the level either way: a slow "wow", not a tremolo.
+      this.beatGain.gain.setTargetAtTime(P.count > 1 ? 0.09 + Math.min(4, P.count) * 0.012 : 0, this.ctx.currentTime, 0.3);
     }
     if (this.beatOsc && this.ctx) {
-      this.beatOsc.frequency.setTargetAtTime(0.7 + P.count * 0.5, this.ctx.currentTime, 0.3);
+      this.beatOsc.frequency.setTargetAtTime(0.55 + P.count * 0.22, this.ctx.currentTime, 0.3);
     }
   }
 
@@ -1528,13 +1610,14 @@ class SoundEngineClass {
     this.turbineOsc.connect(this.turbineFilter).connect(this.turbineGain).connect(this.busEngine);
     this.turbineOsc.start();
 
-    // Slow beat between engines, modulating the main engine gain
+    // Slow beat between engines, on the unity stage after the engine gain so
+    // its depth is a fraction of whatever the engine is doing
     this.beatOsc = ctx.createOscillator();
     this.beatOsc.type = 'sine';
     this.beatOsc.frequency.value = 1.2;
     this.beatGain = ctx.createGain();
     this.beatGain.gain.value = 0;
-    if (this.engineGain) this.beatOsc.connect(this.beatGain).connect(this.engineGain.gain);
+    if (this.beatStage) this.beatOsc.connect(this.beatGain).connect(this.beatStage.gain);
     this.beatOsc.start();
   }
 }

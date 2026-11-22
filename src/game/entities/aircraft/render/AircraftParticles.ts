@@ -23,6 +23,8 @@ export class AircraftParticles {
   private rollOn = false;
   private leakOn = false;
   private smokeOn = false;
+  /** The damage smoke's starting opacity as last applied. */
+  private smokeAlpha = -1;
 
   private readonly spec: AircraftVisualSpec;
   /** Emitters that throw particles backwards, with their authored speed range. */
@@ -164,8 +166,14 @@ export class AircraftParticles {
           [this.damageSmoke, -190, -90], [this.hitSparks, -320, -40],
         ];
       }
+      /*
+       * Reload the op, not the property. `em.speedX = {min, max}` only clamps
+       * the op's CURRENT value — a random range is emitted from the op's own
+       * start/end, which that setter never touches — so after a 180 the
+       * exhaust, smoke and dust went on streaming out ahead of the nose.
+       */
       for (const [em, lo, hi] of this.flippable) {
-        em.speedX = sign > 0 ? { min: lo, max: hi } : { min: -hi, max: -lo };
+        em.ops.speedX.loadConfig({ speedX: sign > 0 ? { min: lo, max: hi } : { min: -hi, max: -lo } });
       }
     }
 
@@ -196,7 +204,17 @@ export class AircraftParticles {
       this.damageSmoke.setPosition(sx2, sy2);
       this.damageSmoke.frequency = Phaser.Math.Linear(150, 14, hurt);
       this.damageSmoke.particleTint = hurt > 0.6 ? 0x14120e : 0x3a352c;
-      this.damageSmoke.setParticleAlpha({ start: 0.22 + hurt * 0.45, end: 0 });
+      /*
+       * Thicker as it gets worse. setParticleAlpha({start, end}) never did
+       * this — like the speed setter, it leaves an eased op's range alone — so
+       * the wisp and the black plume were the same opacity. Reloaded only when
+       * the step changes, not every frame.
+       */
+      const a0 = Math.round((0.22 + hurt * 0.45) * 20) / 20;
+      if (a0 !== this.smokeAlpha) {
+        this.smokeAlpha = a0;
+        this.damageSmoke.ops.alpha.loadConfig({ alpha: { start: a0, end: 0 } });
+      }
     }
 
     // Engine fire once it is genuinely coming apart

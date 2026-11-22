@@ -160,7 +160,7 @@ export class AircraftSprite {
     // ── Layers, back → front ──────────────────────────────────────────────
     img(this.tex.wingFar);
 
-    this.lightCone = scene.add.graphics();
+    this.lightCone = scene.add.graphics().setBlendMode(Phaser.BlendModes.ADD);
     this.body.add(this.lightCone);
     this.iceGfx = scene.add.graphics();
 
@@ -767,10 +767,29 @@ export class AircraftSprite {
     }
     this.coneOn = true;
     const L = this.spec.length;
-    const flicker = 0.09 + Math.abs(Math.sin(this.t * 25)) * 0.035;
-    this.lightCone.clear();
-    this.lightCone.fillStyle(0xfff2c0, flicker);
-    this.lightCone.fillTriangle(L / 2 + 4, 2, L / 2 + 105, 18, L / 2 + 105, 50);
+    const g = this.lightCone;
+    g.clear();
+    /*
+     * A beam of light, not a pane of grey. It was a flat triangle at 10%
+     * opacity in normal blending, which in daylight laid a dirty grey wedge
+     * over the sky. Now it ADDS light, is brightest at the lamp and fades to
+     * nothing down the beam, and is a faint glow by day and a real beam at
+     * night.
+     */
+    const night = 1 - this.light.daylight;
+    const flicker = 0.92 + Math.abs(Math.sin(this.t * 25)) * 0.08;
+    const k = (0.05 + night * 0.24) * flicker;
+    const c = 0xfff0c8;
+    if (this.scene.sys.game.renderer.type === Phaser.WEBGL) {
+      // Vertex order for a gradient triangle: lamp first, then the far edge
+      g.fillGradientStyle(c, c, c, c, k, 0, 0, 0);
+      g.fillTriangle(L / 2 + 4, 2, L / 2 + 120, 14, L / 2 + 120, 56);
+      g.fillGradientStyle(c, c, c, c, k * 1.5, 0, 0, 0);
+      g.fillTriangle(L / 2 + 4, 2, L / 2 + 70, 14, L / 2 + 70, 32);
+    } else {
+      g.fillStyle(c, k * 0.6);
+      g.fillTriangle(L / 2 + 4, 2, L / 2 + 105, 18, L / 2 + 105, 50);
+    }
   }
 
   private updateAttitude(state: FlightState): void {

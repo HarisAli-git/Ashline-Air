@@ -4,6 +4,7 @@ import { drawUndead, undeadKindFor, type CrowdStyle } from './Crowds';
 import { DROP_RUN_BEFORE_PX, DROP_RUN_AFTER_PX, DROP_BAND_RUN_PX, GUN_REACH_PX, type Town } from './Towns';
 import type { Hazard } from './Hazards';
 import { depthOffset, extrude, extrudeBox } from './Depth';
+import { puff } from './Puffs';
 
 /**
  * Something to DO in the cruise.
@@ -932,11 +933,13 @@ export class SupplyDrops {
       const sx = s.x - scrollX;
       if (sx < -80 || sx > width + 80) continue;
       const base = groundY - s.surfaceM * pxPerM;
-      for (let i = 0; i < 8; i++) {
-        const k = i / 7;
+      // A signal canister pours it out thick and it billows as it rises: the
+      // puffs climb the column on a loop rather than standing in a stack
+      for (let i = 0; i < 9; i++) {
+        const k = (i / 9 + t * 0.09 + s.seed * 0.013) % 1;
         const drift = Math.sin(t * 0.6 + i + s.seed) * (3 + k * 12) + k * 26;
-        g.fillStyle(0x6ad08a, 0.16 * (1 - k * 0.7));
-        g.fillEllipse(sx + 14 + drift, base - 6 - k * 120, 8 + k * 22, 6 + k * 14);
+        puff(g, sx + 14 + drift, base - 6 - k * 120, 8 + k * 26, 6 + k * 18,
+          0x6ad08a, 0.19 * Math.min(1, k * 10) * (1 - k * 0.75), i + s.seed);
       }
     }
 
@@ -981,8 +984,8 @@ export class SupplyDrops {
       const fx = sx + Math.sin(ft * 0.7 + s.seed) * 10;
       for (let i = 0; i < 9; i++) {
         const k = i / 8;
-        g.fillStyle(0xd8c8b8, 0.10 * (1 - k * 0.6));
-        g.fillCircle(sx + (fx - sx) * k, base + (fy - base) * k, 3 + k * 5);
+        const r = 3 + k * 5;
+        puff(g, sx + (fx - sx) * k, base + (fy - base) * k, r * 2, r * 2, 0xd8c8b8, 0.10 * (1 - k * 0.6), i + s.seed);
       }
       const pulse = 0.75 + Math.sin(t * 22 + s.seed) * 0.25;
       const fade = ft > 11 ? Math.max(0, 1 - (ft - 11) / 3) : 1;

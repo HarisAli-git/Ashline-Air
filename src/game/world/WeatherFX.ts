@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import type { WeatherCondition } from '../../types';
 import { SoundEngine } from '../audio/SoundEngine';
+import { ensureSharedTextures, PUFF_TEX } from '../entities/aircraft/render/AircraftPainter';
 
 /**
  * Screen-space weather visuals: precipitation emitters, drifting fog banks,
@@ -55,6 +56,17 @@ export class WeatherFX {
   private boltGfx!: Phaser.GameObjects.Graphics;
   private bolt: Array<[number, number]> = [];
   private boltBranches: Array<Array<[number, number]>> = [];
+  /**
+   * How fast the world is sliding past, screen px/s (+ = flying right), low-
+   * passed. Precipitation is in the air the aeroplane is moving through, so it
+   * streams past at the aeroplane's speed: rain slants back across the screen
+   * when you are quick and falls nearly straight when you are slow.
+   */
+  private flow = 0;
+  /** Soft drifting fog banks; empty without a canvas to paint them. */
+  private readonly fogBanks: Phaser.GameObjects.Image[] = [];
+  /** Distance the air has streamed past, px — moves the fog with the flight. */
+  private fogScroll = 0;
 
   /** Re-fit to a new canvas size; all effects are drawn per frame from these. */
   resize(width: number, height: number): void {
@@ -66,19 +78,35 @@ export class WeatherFX {
     this.scene = scene;
     this.width = width;
     this.height = height;
+    ensureSharedTextures(scene);
 
-    this.rain = scene.add.particles(0, 0, 'px_streak', {
-      x: { min: -100, max: width + 100 },
+    /*
+     * Rain in two sheets. Every drop is emitted from wherever it has to start
+     * to fall through the screen with the slant the current airspeed gives it,
+     * and is turned to point the way it is falling. (The streaks used to lean
+     * the opposite way to their own motion, and were the solid bar the sparks
+     * use — at rain size, falling sticks.)
+     */
+    const sheet = (vy: [number, number], drift: number, base: number, life: number) => ({
+      x: { onEmit: (): number => {
+        const vx = -(base + this.flow * drift);
+        const reach = -vx * (life / 1000);
+        const lo = Math.min(-100, -100 + reach), hi = Math.max(width + 100, width + 100 + reach);
+        return lo + Math.random() * (hi - lo);
+      } },
+      speedX: { onEmit: (): number => -(base + this.flow * drift) * (0.9 + Math.random() * 0.2) },
+      speedY: { min: vy[0], max: vy[1] },
+      rotate: { onEmit: (): number => Phaser.Math.RadToDeg(Math.atan2((vy[0] + vy[1]) / 2, -(base + this.flow * drift))) },
+    });
+    this.rain = scene.add.particles(0, 0, 'px_rain', {
+      ...sheet([520, 640], 0.45, 40, 1300),
       y: -12,
       lifespan: 1300,
-      speedY: { min: 520, max: 640 },
-      speedX: { min: -60, max: -30 },
-      rotate: 79,
-      scaleX: 0.9,
-      scaleY: 0.5,
-      alpha: { start: 0.45, end: 0.15 },
+      scaleX: { min: 0.42, max: 0.62 },
+      scaleY: 0.55,
+      alpha: { start: 0.34, end: 0.12 },
       tint: 0x9ab4cc,
-      frequency: 7,
+      frequency: 5,
       emitting: false,
     }).setDepth(FX_DEPTH);
 
@@ -96,11 +124,15 @@ export class WeatherFX {
     }).setDepth(FX_DEPTH);
 
     this.snow = scene.add.particles(0, 0, 'px_soft', {
-      x: { min: -100, max: width + 100 },
+      x: { onEmit: (): number => {
+        const reach = (200 + this.flow * 0.55) * 2.6;
+        const lo = Math.min(-100, -100 + reach), hi = Math.max(width + 100, width + 100 + reach);
+        return lo + Math.random() * (hi - lo);
+      } },
       y: -12,
       lifespan: 2600,
       speedY: { min: 160, max: 260 },
-      speedX: { min: -260, max: -140 },
+      speedX: { onEmit: (): number => -(140 + Math.random() * 120 + this.flow * 0.55) },
       scale: { min: 0.08, max: 0.22 },
       alpha: { start: 0.8, end: 0.3 },
       tint: 0xf0f6fc,
@@ -108,23 +140,26 @@ export class WeatherFX {
       emitting: false,
     }).setDepth(FX_DEPTH);
 
-    // Near sheet — bigger, faster, brighter: gives the rain real depth
-    this.rainNear = scene.add.particles(0, 0, 'px_streak', {
-      x: { min: -120, max: width + 120 },
+    // Near sheet — longer, faster, brighter: gives the rain real depth
+    this.rainNear = scene.add.particles(0, 0, 'px_rain', {
+      ...sheet([780, 950], 0.85, 70, 900),
       y: -16,
       lifespan: 900,
-      speedY: { min: 780, max: 950 },
-      speedX: { min: -110, max: -60 },
-      rotate: 76,
-      scaleX: 1.7,
+      scaleX: { min: 0.8, max: 1.1 },
       scaleY: 0.8,
-      alpha: { start: 0.5, end: 0.2 },
+      alpha: { start: 0.42, end: 0.16 },
       tint: 0xc2d6e8,
-      frequency: 11,
+      frequency: 9,
       emitting: false,
     }).setDepth(FX_DEPTH + 0.4);
 
     this.fogGfx = scene.add.graphics().setDepth(FX_DEPTH);
+    if (scene.textures.exists(PUFF_TEX)) {
+      for (let i = 0; i < 7; i++) {
+        this.fogBanks.push(scene.add.image(0, 0, PUFF_TEX, `p${i % 4}`)
+          .setDepth(FX_DEPTH).setTint(0xc2cad0).setVisible(false));
+      }
+    }
     this.boltGfx = scene.add.graphics().setDepth(FX_DEPTH + 0.55);
 
     this.overlay = scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0)
@@ -154,17 +189,43 @@ export class WeatherFX {
     };
   }
 
-  update(dt: number): void {
+  /**
+   * @param scrollSpeed how fast the world is sliding past, screen px/s
+   *                    (+ = the aeroplane flying right). Drives the slant.
+   */
+  update(dt: number, scrollSpeed = 0): void {
     this.t += dt;
     this.blend = Math.min(1, this.blend + dt / BLEND_SECONDS);
+    // Eased, so a turn or a touchdown swings the slant round rather than snapping it
+    this.flow += (Phaser.Math.Clamp(scrollSpeed, -900, 900) - this.flow) * Math.min(1, dt * 2.5);
 
     // Visibility overlay
     const alpha = Phaser.Math.Linear(this.previous.overlayAlpha, this.current.overlayAlpha, this.blend);
     this.overlay.setFillStyle(this.current.overlayColor, alpha);
 
-    // Drifting fog banks
+    /*
+     * Drifting fog banks. They were hard-edged ellipses at 22% — three pale
+     * plates sliding across the screen. Now each bank is a few soft lumps of
+     * mist, drifting at their own pace and streaming past with the airspeed
+     * like everything else in the air.
+     */
     this.fogGfx.clear();
-    if (this.current.fogBanks) {
+    const fogA = this.current.fogBanks ? this.blend : this.previous.fogBanks ? 1 - this.blend : 0;
+    if (this.fogBanks.length) {
+      const span = this.width + 900;
+      for (let i = 0; i < this.fogBanks.length; i++) {
+        const img = this.fogBanks[i];
+        if (fogA <= 0.01) { if (img.visible) img.setVisible(false); continue; }
+        const lane = i % 3;
+        const travel = this.t * (14 + lane * 9 + i * 2) + this.fogScroll * (0.5 + lane * 0.2) + i * 380;
+        const fx = this.width + 450 - (((travel % span) + span) % span);
+        const fy = this.height * (0.26 + lane * 0.24) + Math.sin(this.t * 0.35 + i * 1.7) * 18 + (i > 2 ? 26 : 0);
+        img.setPosition(fx, fy)
+          .setDisplaySize(420 + (i % 4) * 90, 110 + lane * 30)
+          .setAlpha(fogA * (0.42 - lane * 0.06))
+          .setVisible(true);
+      }
+    } else if (this.current.fogBanks) {
       const a = this.blend * 0.22;
       for (let i = 0; i < 3; i++) {
         const fx = ((this.t * (12 + i * 7) + i * 400) % (this.width + 600)) - 300;
@@ -174,6 +235,7 @@ export class WeatherFX {
         this.fogGfx.fillEllipse(this.width - fx + 180, fy + 22, 320, 50);
       }
     }
+    this.fogScroll += this.flow * dt;
 
     // Lightning — brief and soft; it should read as distant weather, not strobe
     if (this.current.lightning) {
@@ -246,6 +308,8 @@ export class WeatherFX {
     this.dust.destroy();
     this.snow.destroy();
     this.fogGfx.destroy();
+    for (const f of this.fogBanks) f.destroy();
+    this.fogBanks.length = 0;
     this.overlay.destroy();
     this.flash.destroy();
   }
