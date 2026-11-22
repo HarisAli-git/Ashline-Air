@@ -302,6 +302,15 @@ export interface ModelData {
   /** Named parts, for the pose to drive. */
   named: Record<string, number[]>;
   lights: { beacon: V3; navL: V3; navR: V3; land: V3 };
+  /**
+   * How far back (view units) fully stowed gear is sorted. A wheel folding
+   * into the hull is INSIDE the skin, but the painter's sort only compares
+   * triangle centres, and a tyre's outer face can sit nearer the camera than
+   * the fairing it is vanishing into — which drew it on top of the fuselage
+   * all the way up. Scaled by how far the gear has travelled, so gear that is
+   * down and locked sorts exactly as it always did.
+   */
+  gearSink: number;
 }
 
 export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, detail: 'high' | 'low' = 'high'): ModelData {
@@ -740,18 +749,32 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
   const mainAx = g.mainX + (g.rake ?? 0);
   const retract = !g.fixed;
   const sponson = !!g.sponson;
+  /** How far out from the centreline the sponson blister sits. */
+  let sponsonZ = 0;
   if (g.sponson) {
+    const u = (g.sponson.x + L / 2) / L;
+    sponsonZ = halfH(u) * widthAt(u) * 0.86;
     for (const side of [1, -1]) {
-      const u = (g.sponson.x + L / 2) / L;
-      B.ellipsoid([g.sponson.x, H / 2 - g.sponson.h * 0.35, side * halfH(u) * widthAt(u) * 0.86],
+      B.ellipsoid([g.sponson.x, H / 2 - g.sponson.h * 0.35, side * sponsonZ],
         g.sponson.w / 2, g.sponson.h / 2, H * 0.2, MAT.belly, false, 12, 5);
     }
   }
   for (const side of [1, -1]) {
     const hinge: V3 = [g.mainX, g.hingeY - 2, side * (sponson ? H * 0.42 : H * 0.28)];
     const axle: V3 = [mainAx, wheelY, side * track];
+    /*
+     * Stowing into the blister, not up the side of it.
+     *
+     * The wheels stand at the outer edge of the sponson so they read from the
+     * side, and the slide used to be straight up — so a retracting wheel ran
+     * up the OUTSIDE of the fairing and was drawn over it the whole way. It
+     * now also tucks in to the blister's middle as it rises, which puts it
+     * inside the fairing it is meant to disappear into (the renderer also
+     * sorts stowing gear behind the skin; see `gearSink`).
+     */
+    const tuck = sponson ? side * (sponsonZ - track) : 0;
     const pi = retract
-      ? B.newPart({ pivot: hinge, axis: [0, 0, 1], sign: 1, offset: [0, -(wheelY - g.hingeY) - g.wheelR * 0.6, 0], kind: sponson ? 'gearSlide' : 'gear' })
+      ? B.newPart({ pivot: hinge, axis: [0, 0, 1], sign: 1, offset: [0, -(wheelY - g.hingeY) - g.wheelR * 0.6, tuck], kind: sponson ? 'gearSlide' : 'gear' })
       : 0;
     if (retract) name('gear', pi);
     B.part = pi;
@@ -844,6 +867,9 @@ export function buildAircraftModel(spec: AircraftVisualSpec, contactY: number, d
       navR: [w.rootX + w.chord * 0.5 - w.sweep * 0.85 - 2, w.y - S * dihedral, S + 0.5],
       land: [w.rootX + w.chord * 0.5 - w.sweep * 0.2, w.y + 1, S * 0.25],
     },
+    // About the hull's own half-depth: enough to put a tyre behind the near
+    // skin and the blister, not so much it slips behind the far wing
+    gearSink: H * 0.6,
   };
 }
 
@@ -875,9 +901,15 @@ export class AircraftModel {
   private readonly ndh: Float32Array; private readonly fres: Float32Array;
   private readonly keys: Float32Array;
   private readonly order: number[];
+  /**
+   * Per part: 0 not undercarriage, 1 a leg that folds, 2 one that slides up
+   * into a sponson. See ModelData.gearSink.
+   */
+  private readonly gearKind: Uint8Array;
 
   constructor(scene: Phaser.Scene, spec: AircraftVisualSpec, contactY: number, detail: 'high' | 'low' = 'high') {
     this.d = buildAircraftModel(spec, contactY, detail);
+    this.gearKind = Uint8Array.from(this.d.parts, p => (p.kind === 'gearSlide' ? 2 : p.kind === 'gear' ? 1 : 0));
     this.gfx = scene.add.graphics();
     this.lamps = scene.add.graphics().setBlendMode(Phaser.BlendModes.ADD);
     this.webgl = scene.sys.game.renderer.type === Phaser.WEBGL;
@@ -1061,6 +1093,16 @@ export class AircraftModel {
     const order = this.order;
     order.length = 0;
     const nt = d.tris.length / 3;
+    /*
+     * Gear on its way up (or down) sorts behind the skin it is folding into.
+     * Sponson gear sits behind its blister ALWAYS: the wheels hang half inside
+     * the fairing even when down (that is how a C-130 squats), and sinking
+     * them only once they started moving made their tops blink behind it on
+     * the first frame of every retraction.
+     */
+    const travel = 1 - Math.min(1, Math.max(0, pose.gear));
+    const sinkFold = travel * d.gearSink;
+    const sinkSlide = d.gearSink;
     for (let t = 0; t < nt; t++) {
       const a = d.tris[t * 3], b = d.tris[t * 3 + 1], c = d.tris[t * 3 + 2];
       const pa = d.vpart[a];
@@ -1074,7 +1116,9 @@ export class AircraftModel {
         const wx = this.mx[c] - this.mx[a], wy = this.my[c] - this.my[a];
         if (wx * uy - wy * ux < 0) continue;
       }
-      this.keys[t] = (this.vz[a] + this.vz[b] + this.vz[c]) / 3 + (flags & 2 ? 1.2 : 0);
+      const gk = this.gearKind[pa];
+      this.keys[t] = (this.vz[a] + this.vz[b] + this.vz[c]) / 3 + (flags & 2 ? 1.2 : 0)
+        - (gk === 2 ? sinkSlide : gk === 1 ? sinkFold : 0);
       order.push(t);
     }
     const keys = this.keys;

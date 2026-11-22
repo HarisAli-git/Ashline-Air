@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { drawObstacle, drawObstacleDepth, type ObstacleKind, type ObstacleStyle } from './Obstacles';
+import { puff } from './Puffs';
 import { layoutCountryside, drawProp, type Prop } from './Countryside';
 import type { BiomeId } from './Biomes';
 import {
@@ -632,13 +633,14 @@ export class Hazards {
       g.fillEllipse(sx, topY, w * 0.8, 12);
     }
 
-    // Smoke climbing off it — this is what you see from a distance
+    // Smoke climbing off it — this is what you see from a distance. Each puff
+    // swells and thins as it climbs, so the column has a base and a top.
     const smoke = Math.max(0, 1 - age / 26) * d;
     for (let k = 0; k < 7; k++) {
       const drift = (t * 16 + k * 34 + h.seed * 7) % 190;
-      g.fillStyle(0x191512, 0.26 * smoke * (1 - k / 8));
-      g.fillEllipse(sx + Math.sin(t * 0.5 + k) * (5 + k * 5) + drift * 0.22,
-        topY - 12 - drift, 16 + k * 9, 12 + k * 6);
+      const up = drift / 190;
+      puff(g, sx + Math.sin(t * 0.5 + k) * (5 + k * 5) + drift * 0.22, topY - 12 - drift,
+        16 + up * 60, 12 + up * 42, 0x191512, 0.3 * smoke * Math.min(1, up * 8) * (1 - up * 0.85), k + h.seed);
     }
 
     // Debris scattered at the foot of it

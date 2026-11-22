@@ -3,6 +3,7 @@ import type { Hazard } from './Hazards';
 import { mix, type ObstacleStyle } from './Obstacles';
 import { drawWireFence } from './Figures';
 import { depthOffset, extrude, sideWallX, type OutlinePt } from './Depth';
+import { puff } from './Puffs';
 
 /**
  * Where people actually live, and the wires that feed them.
@@ -986,8 +987,9 @@ export function drawBuilding(
   if ((b.kind === 'house' || b.kind === 'shack') && hash(seed + 13) < 0.35) {
     for (let k = 0; k < 4; k++) {
       const drift = (t * 9 + k * 11 + seed) % 44;
-      g.fillStyle(0x2a2520, 0.16 * (1 - k / 5));
-      g.fillEllipse(sx + hw * 0.4 + drift * 0.4, top - 6 - drift, 6 + k * 3, 4 + k * 2);
+      const up = drift / 44;
+      puff(g, sx + hw * 0.4 + drift * 0.4, top - 6 - drift, 6 + up * 14, 4 + up * 9,
+        0x2a2520, 0.18 * Math.min(1, up * 6) * (1 - up), k + seed);
     }
   }
 }

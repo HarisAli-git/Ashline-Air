@@ -846,8 +846,6 @@ export class FlightScene extends Phaser.Scene {
       this.eventUnsubs.forEach(u => u());
       this.eventUnsubs = [];
       SoundEngine.stopFlightLoop();
-    SoundEngine.stopWeatherBed();
-    SoundEngine.stopTraffic();
       SoundEngine.stopWeatherBed();
       SoundEngine.stopTraffic();
       this.crash.destroy();
@@ -1427,7 +1425,9 @@ export class FlightScene extends Phaser.Scene {
       speedFrac: clamp(this.state.groundSpeed / 55, 0, 1),
       progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
     });
-    this.fx.update(sdt);
+    // The rain and the fog stream past at the speed the world does
+    // (per REAL second — the particles run on the frame clock, not the warp)
+    this.fx.update(sdt, along * this.state.groundSpeed * WORLD_PX_PER_M * (dt > 0 ? sdt / dt : 1));
 
     // ── Aircraft ───────────────────────────────────────────────────────────
     this.aircraft.setTurbulence(turbulence);
@@ -1507,7 +1507,7 @@ export class FlightScene extends Phaser.Scene {
       speedFrac: 0,
       progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
     });
-    this.fx.update(sdt);
+    this.fx.update(sdt, this.heading * this.crash.slideSpeed() * WORLD_PX_PER_M);
   }
 
   /** True when the given world position is on either airfield's asphalt. */

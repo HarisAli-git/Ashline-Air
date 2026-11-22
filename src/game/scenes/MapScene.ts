@@ -50,7 +50,7 @@ export class MapScene extends Phaser.Scene {
 
     // Trade routes (animated dashes drawn per frame)
     this.routeGfx = this.add.graphics();
-    this.drawRouteLabels(settlements, unlocked);
+    // Distances live on the destination markers now — see createMarker
 
     this.drawRangeRing(settlements, save.player.currentLocationId);
 
@@ -202,7 +202,16 @@ export class MapScene extends Phaser.Scene {
       }
     }
 
-    // ── Relief: inked hachures, the way a survey sheet shows high ground ──
+    /*
+     * ── Relief: shaded peaks and contours, the way a survey sheet shows ──
+     *
+     * The ranges were rows of bare chevrons — "^ ^ ^", which read as typing
+     * rather than terrain. Each peak is now a little solid: a flank catching
+     * the lamp, a flank in shadow with hachures down it, an inked ridge line
+     * — and each range sits inside a couple of loose contour lines, which is
+     * what makes a sheet of paper read as a MAP of something. Same seeded
+     * positions as before, so the chart's geography has not moved.
+     */
     const ranges = 7;
     for (let r = 0; r < ranges; r++) {
       const rx = width * (0.06 + rnd() * 0.88);
@@ -210,22 +219,60 @@ export class MapScene extends Phaser.Scene {
       const len = 5 + Math.floor(rnd() * 5);
       const slope = (rnd() - 0.5) * 0.7;
       const spacing = width * 0.026;
-      for (let i = 0; i < len; i++) {
-        const cx = rx + i * spacing;
-        const cy = ry + i * slope * spacing;
-        if (cx < 8 || cx > width - 8) continue;
-        const h = 8 + ((i * 7) % 7);
-        const l = lit(cx, cy);
-        // Peak chevron
-        g.lineStyle(1.7, 0x7a5f28, 0.34 + l * 0.66);
-        g.lineBetween(cx - 9, cy, cx, cy - h);
-        g.lineBetween(cx, cy - h, cx + 9, cy);
-        // Hachures down the shaded flank — this is what gives the range mass
-        g.lineStyle(1, 0x4a3a18, 0.20 + l * 0.46);
-        for (let k = 1; k < 5; k++) {
-          const hx = cx + k * 2.1;
-          g.lineBetween(hx, cy - h + k * (h / 5), hx + 3.4, cy + 1);
+      // Contours round the whole range, drawn first so the peaks sit on them
+      {
+        const mx = rx + (len - 1) * spacing * 0.5, my = ry + (len - 1) * slope * spacing * 0.5 - 4;
+        const ex = (len - 1) * spacing * 0.5 + 26, ey = 22 + Math.abs(slope) * spacing * len * 0.4;
+        const ang = Math.atan(slope);
+        for (const [k, a0] of [[1, 0.2], [1.45, 0.13], [1.9, 0.08]] as const) {
+          const l = lit(mx, my);
+          g.lineStyle(1, 0x6a5228, a0 + l * a0 * 1.6);
+          g.beginPath();
+          const steps = 40;
+          for (let i = 0; i <= steps; i++) {
+            const t = (i / steps) * Math.PI * 2;
+            const wob = 1 + (Math.sin(t * 3 + r * 1.7 + k) * 0.08 + Math.sin(t * 5 + r) * 0.05);
+            const px = Math.cos(t) * ex * k * wob, py = Math.sin(t) * ey * k * wob;
+            const x = mx + px * Math.cos(ang) - py * Math.sin(ang);
+            const y = my + px * Math.sin(ang) + py * Math.cos(ang);
+            if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+          }
+          g.strokePath();
         }
+      }
+      // Peaks, back to front so the nearer ones overlap the further. Their
+      // jitter has its own seed: drawing from `rnd` would move every range
+      // after this one.
+      const jit = mulberry32(0xbeef + r * 977);
+      const peaks: Array<[number, number, number, number]> = [];
+      for (let i = 0; i < len; i++) {
+        const cx = rx + i * spacing + (jit() - 0.5) * spacing * 0.4;
+        const cy = ry + i * slope * spacing + (jit() - 0.5) * 8;
+        const h = 9 + jit() * 9 + (i > 0 && i < len - 1 ? 4 : 0);
+        const w = 8 + h * 0.45;
+        if (cx < 10 || cx > width - 10) continue;
+        peaks.push([cx, cy, h, w]);
+      }
+      peaks.sort((a, b) => a[1] - b[1]);
+      for (const [cx, cy, h, w] of peaks) {
+        const l = lit(cx, cy);
+        const tipX = cx - w * 0.12;
+        // The flank toward the lamp (up and to the left) catches the light…
+        g.fillStyle(0x9a7c44, 0.18 + l * 0.34);
+        g.fillTriangle(cx - w, cy, tipX, cy - h, cx - w * 0.05, cy);
+        // …the far flank is in its own shadow
+        g.fillStyle(0x1e160a, 0.4 + l * 0.3);
+        g.fillTriangle(cx - w * 0.05, cy, tipX, cy - h, cx + w, cy);
+        // Hachures down the shaded flank
+        g.lineStyle(1, 0x3a2c12, 0.22 + l * 0.4);
+        for (let k = 1; k < 4; k++) {
+          const f = k / 4;
+          g.lineBetween(tipX + (w * 1.12) * f * 0.55, cy - h + h * f, tipX + (w * 1.12) * f * 0.55 + 3, cy - 1);
+        }
+        // The ridge line in ink
+        g.lineStyle(1.3, 0x7a5f28, 0.35 + l * 0.6);
+        g.lineBetween(cx - w, cy, tipX, cy - h);
+        g.lineBetween(tipX, cy - h, cx + w, cy);
       }
     }
 
@@ -296,15 +343,27 @@ export class MapScene extends Phaser.Scene {
      * colour under each settlement makes the map read as six different
      * places, and it is the same colour you will see out of the window.
      */
+    // Strong enough to change what the chart reads as, not just tint it.
+    // One smooth wash each: seven stacked circles showed as seven rings.
+    // Laid first, so the water and snow marks below sit on top of it.
+    const smooth = this.textures.exists('px_soft');
+    if (smooth) {
+      for (const s of settlements) {
+        this.add.image(s.position.x, s.position.y, 'px_soft')
+          .setDisplaySize(330, 330).setTint(BIOMES[biomeFor(s.id)].palette.hillLight)
+          .setAlpha(unlocked.includes(s.id) ? 0.68 : 0.4);
+      }
+    }
     const rg = this.add.graphics();
     for (const s of settlements) {
       const biome = BIOMES[biomeFor(s.id)];
       const land = biome.palette.hillLight;
       const open = unlocked.includes(s.id);
-      // Strong enough to change what the chart reads as, not just tint it
-      for (let k = 7; k >= 1; k--) {
-        rg.fillStyle(land, (open ? 0.085 : 0.05) * (8 - k) / 7 * 1.6);
-        rg.fillCircle(s.position.x, s.position.y, 18 + k * 17);
+      if (!smooth) {
+        for (let k = 7; k >= 1; k--) {
+          rg.fillStyle(land, (open ? 0.085 : 0.05) * (8 - k) / 7 * 1.6);
+          rg.fillCircle(s.position.x, s.position.y, 18 + k * 17);
+        }
       }
       // The drowned coast gets water on the chart too — it is the whole point
       if (biome.shape.water > 0.2) {
@@ -412,21 +471,6 @@ export class MapScene extends Phaser.Scene {
     }
   }
 
-  private drawRouteLabels(settlements: SettlementDefinition[], unlocked: string[]): void {
-    for (const [a, b] of this.routePairs(settlements, unlocked)) {
-      const km = Math.round(pixelsToKm(
-        distance(a.position.x, a.position.y, b.position.x, b.position.y), KM_PER_PIXEL,
-      ));
-      const mx = (a.position.x + b.position.x) / 2;
-      const my = (a.position.y + b.position.y) / 2;
-      this.add.text(mx, my - 10, `${km} km`, {
-        fontSize: '10px', color: '#6a5a3a', fontFamily: 'monospace',
-        backgroundColor: '#0e0b06',
-        padding: { x: 4, y: 2 },
-      }).setOrigin(0.5);
-    }
-  }
-
   // ── Markers ────────────────────────────────────────────────────────────────
 
   private createMarker(settlement: SettlementDefinition, unlocked: boolean): void {
@@ -509,14 +553,36 @@ export class MapScene extends Phaser.Scene {
     // on the chart next to the name — not buried in a refusal message.
     const active = SaveService.getActiveAircraft().def;
     const verdict = canOperate(active, settlement);
+    // The strip length decides whether you can land there; it was #7a6a48
+    // at 9 px on a brown chart, which is to say unreadable
     const strip = this.add.text(0, (isHere ? 38 : 22) + 14,
       `▭ ${settlement.field.runwayM} m${verdict.ok ? '' : '  ✕'}`, {
-      fontSize: '9px',
-      color: !unlocked ? '#3a3428' : verdict.ok ? '#7a6a48' : '#b05a3a',
+      fontSize: '10px',
+      color: !unlocked ? '#5a5040' : verdict.ok ? '#b09a6a' : '#c8704a',
       fontFamily: 'monospace',
     }).setOrigin(0.5, 0);
 
     container.add([dot, label, strip]);
+
+    /*
+     * How far it is from here, on the place itself. The distances used to
+     * float in boxes halfway along every route — fifteen of them, most about
+     * legs that do not start where you are, and the short ones sat on top of
+     * the markers. Each destination now says its own distance from you,
+     * amber if this aircraft can make it and rust with a cross if it cannot.
+     */
+    const here = window.gameData.settlements.find(s => s.id === SaveService.get().player.currentLocationId);
+    if (unlocked && here && !isHere) {
+      const km = Math.round(pixelsToKm(
+        distance(here.position.x, here.position.y, settlement.position.x, settlement.position.y), KM_PER_PIXEL,
+      ));
+      const block = routeBlock(active, here, settlement);
+      const tooFar = block?.reason === 'range';
+      const dist = this.add.text(0, (isHere ? 38 : 22) + 27, tooFar ? `${km} km · out of range` : `${km} km from here`, {
+        fontSize: '10px', color: tooFar ? '#c47452' : '#d8b878', fontFamily: 'monospace',
+      }).setOrigin(0.5, 0);
+      container.add(dist);
+    }
 
     if (!unlocked) {
       // Say what it takes, at the place itself — not just "LOCKED"

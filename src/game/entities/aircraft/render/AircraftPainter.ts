@@ -139,19 +139,139 @@ function bake(
   g.destroy();
 }
 
+/**
+ * A radial falloff painted on a canvas, as a texture.
+ *
+ * The soft textures used to be baked from Graphics: four or five concentric
+ * discs at rising alpha. A disc has a hard edge, so every one of them was a
+ * ring — smoke, dust and glows all showed contour lines, and a map territory
+ * scaled up eleven times was a target board. A canvas gradient has no steps.
+ *
+ * `stops` are [radius 0…1, alpha]; `squash` flattens it into an ellipse.
+ * Returns false when there is no canvas to paint on (the caller falls back).
+ */
+function bakeRadial(
+  scene: Phaser.Scene, key: string, w: number, h: number,
+  stops: Array<[number, number]>, rgb = '255,255,255',
+): boolean {
+  if (scene.textures.exists(key)) return true;
+  const tex = scene.textures.createCanvas(key, w, h);
+  if (!tex) return false;
+  const ctx = tex.getContext();
+  const r = w / 2;
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.scale(1, h / w);
+  const gr = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+  for (const [at, a] of stops) gr.addColorStop(Math.min(1, Math.max(0, at)), `rgba(${rgb},${a})`);
+  ctx.fillStyle = gr;
+  ctx.fillRect(-r, -r, w, w);
+  ctx.restore();
+  tex.refresh();
+  return true;
+}
+
+/** Deterministic 0…1 noise for the painted textures. */
+function texRand(i: number): number {
+  const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
 // ── Shared particle / effect textures ────────────────────────────────────────
 export function ensureSharedTextures(scene: Phaser.Scene): void {
-  bake(scene, 'px_soft', 32, 32, 16, 16, p => {
-    const steps: Array<[number, number]> = [[15, 0.05], [12, 0.09], [9, 0.14], [6, 0.22], [3.5, 0.34]];
-    for (const [r, a] of steps) p.circle(0, 0, r, 0xffffff, a);
-  });
+  // The same falloff the stepped discs approximated, without the steps
+  const soft = bakeRadial(scene, 'px_soft', 32 * SS, 32 * SS, [
+    [0, 0.64], [0.11, 0.62], [0.3, 0.43], [0.47, 0.26], [0.66, 0.135], [0.84, 0.05], [0.97, 0],
+  ]);
+  if (!soft) {
+    bake(scene, 'px_soft', 32, 32, 16, 16, p => {
+      const steps: Array<[number, number]> = [[15, 0.05], [12, 0.09], [9, 0.14], [6, 0.22], [3.5, 0.34]];
+      for (const [r, a] of steps) p.circle(0, 0, r, 0xffffff, a);
+    });
+  }
   bake(scene, 'px_streak', 12, 4, 6, 2, p => {
     p.rrect(-6, -1.5, 12, 3, 1.5, 0xffffff, 1);
   });
-  bake(scene, 'px_shadow', 96, 24, 48, 12, p => {
-    const steps: Array<[number, number, number]> = [[46, 11, 0.10], [38, 9, 0.14], [28, 7, 0.18], [18, 5, 0.22]];
-    for (const [w, h, a] of steps) p.ellipse(0, 0, w * 2, h * 2, 0x000000, a);
-  });
+  const shadow = bakeRadial(scene, 'px_shadow', 96 * SS, 24 * SS, [
+    [0, 0.52], [0.19, 0.5], [0.48, 0.365], [0.69, 0.226], [0.875, 0.1], [1, 0],
+  ], '0,0,0');
+  if (!shadow) {
+    bake(scene, 'px_shadow', 96, 24, 48, 12, p => {
+      const steps: Array<[number, number, number]> = [[46, 11, 0.10], [38, 9, 0.14], [28, 7, 0.18], [18, 5, 0.22]];
+      for (const [w, h, a] of steps) p.ellipse(0, 0, w * 2, h * 2, 0x000000, a);
+    });
+  }
+  ensureRainTexture(scene);
+  ensurePuffTexture(scene);
+}
+
+/**
+ * A raindrop as the eye sees it falling: a thin streak, brightest at the
+ * leading end and fading out along its tail. The rain used to be the solid
+ * rounded bar the sparks use, which at rain scale read as falling sticks.
+ * Drawn pointing along +x; the emitter turns it to the direction of fall.
+ */
+function ensureRainTexture(scene: Phaser.Scene): void {
+  if (scene.textures.exists('px_rain')) return;
+  const W = 64, H = 6;
+  const tex = scene.textures.createCanvas('px_rain', W, H);
+  if (!tex) {
+    bake(scene, 'px_rain', 32, 3, 16, 1.5, p => { p.rrect(-16, -0.6, 32, 1.2, 0.6, 0xffffff, 0.8); });
+    return;
+  }
+  const ctx = tex.getContext();
+  const gr = ctx.createLinearGradient(0, 0, W, 0);
+  gr.addColorStop(0, 'rgba(255,255,255,0)');
+  gr.addColorStop(0.55, 'rgba(255,255,255,0.35)');
+  gr.addColorStop(0.92, 'rgba(255,255,255,0.95)');
+  gr.addColorStop(1, 'rgba(255,255,255,0.7)');
+  ctx.fillStyle = gr;
+  ctx.beginPath();
+  ctx.moveTo(0, H / 2);
+  ctx.lineTo(W - 6, H / 2 - 1.1);
+  ctx.quadraticCurveTo(W, H / 2, W - 6, H / 2 + 1.1);
+  ctx.closePath();
+  ctx.fill();
+  tex.refresh();
+}
+
+/**
+ * Soft, lumpy puffs of smoke or mist, four variants on one sheet (frames
+ * `p0`…`p3`). Each is a cluster of overlapping radial falloffs, so the
+ * outline is irregular and the edge is all gradient — it reads as vapour
+ * where a disc reads as a coin.
+ */
+export const PUFF_TEX = 'px_puff';
+function ensurePuffTexture(scene: Phaser.Scene): void {
+  if (scene.textures.exists(PUFF_TEX)) return;
+  const S = 96;
+  const tex = scene.textures.createCanvas(PUFF_TEX, S * 2, S * 2);
+  if (!tex) return;
+  const ctx = tex.getContext();
+  for (let v = 0; v < 4; v++) {
+    const ox = (v % 2) * S, oy = Math.floor(v / 2) * S;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, oy, S, S);
+    ctx.clip();
+    const lobes = 5 + v;
+    for (let i = 0; i < lobes; i++) {
+      const a = (i / lobes) * Math.PI * 2 + texRand(v * 17 + i) * 0.9;
+      const d = i === 0 ? 0 : S * (0.1 + texRand(v * 31 + i) * 0.13);
+      const cx = ox + S / 2 + Math.cos(a) * d;
+      const cy = oy + S / 2 + Math.sin(a) * d * 0.8;
+      const r = S * (i === 0 ? 0.34 : 0.2 + texRand(v * 7 + i) * 0.1);
+      const gr = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      gr.addColorStop(0, 'rgba(255,255,255,0.5)');
+      gr.addColorStop(0.5, 'rgba(255,255,255,0.32)');
+      gr.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = gr;
+      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    }
+    ctx.restore();
+    tex.add(`p${v}`, 0, ox, oy, S, S);
+  }
+  tex.refresh();
 }
 
 // ── Wing planform helper ─────────────────────────────────────────────────────

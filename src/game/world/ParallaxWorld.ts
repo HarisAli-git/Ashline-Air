@@ -14,6 +14,9 @@ import { blendBiome, dominantBiome, BIOMES, type BiomeId, type BiomeShape } from
 import { SupplyDrops, type DropGuide } from './SupplyDrops';
 import { routeSpanPx, originStripPx, destStripPx } from './RoutePreview';
 import { CloudSprites, ensureSkyTextures, GLOW_TEX } from './CloudSprites';
+import { SpritePool } from './SpritePool';
+import { withPuffs, puff } from './Puffs';
+import { ensureSharedTextures, PUFF_TEX } from '../entities/aircraft/render/AircraftPainter';
 
 /**
  * The whole flight environment, drawn procedurally every frame:
@@ -207,10 +210,20 @@ export class ParallaxWorld {
   private readonly skyClouds: CloudSprites | null = null;
   /** The sun's glow, a soft falloff instead of three nested discs. */
   private readonly sunGlow: Phaser.GameObjects.Image | null = null;
+  /** The moon's halo, the same way: it was a hard grey disc round the moon. */
+  private readonly moonGlow: Phaser.GameObjects.Image | null = null;
   private readonly hillGfx: Phaser.GameObjects.Graphics;
+  /** Soft puffs for the smoke columns out on the plain (WebGL only). */
+  private readonly smokePool: SpritePool | null = null;
   private readonly scrubGfx: Phaser.GameObjects.Graphics;
+  /** The ground itself — soil, water, tracks — under the patches. */
+  private readonly groundBaseGfx: Phaser.GameObjects.Graphics;
+  /** Soft patches of different ground, lying between the soil and its cover. */
+  private readonly patchPool: SpritePool | null = null;
   private readonly groundGfx: Phaser.GameObjects.Graphics;
   private readonly hazardGfx: Phaser.GameObjects.Graphics;
+  /** Smoke off the hazards, towns and drop sites — see Puffs. */
+  private readonly hazardPuffs: SpritePool | null = null;
   /** Other aircraft — above the player's plane so a conflict reads clearly. */
   private readonly trafficGfx: Phaser.GameObjects.Graphics;
   /** Rounds in flight, drawn over everything they pass. */
@@ -291,6 +304,8 @@ export class ParallaxWorld {
   private factionColor = 0x4a90d9;
 
   private t = 0;
+  /** Along-track wind, m/s (+ = tailwind) — leans the smoke over. */
+  private windX = 0;
   private readonly cloudOffsets = [0, 200, 450, 700, 900];
   private readonly skids: number[] = []; // world-px of touchdown tire marks
   /** Scratch buffers for ridge sampling — reused so no per-frame allocation. */
@@ -328,8 +343,11 @@ export class ParallaxWorld {
     // Creation order = draw order (back → front). Each sprite pool is made
     // straight after the layer it belongs to, so it draws at that depth.
     const painted = this.webgl && ensureSkyTextures(scene);
+    ensureSharedTextures(scene);
+    const soft = painted && scene.textures.exists(PUFF_TEX);
     this.skyGfx = scene.add.graphics();
     if (painted) this.sunGlow = scene.add.image(0, 0, GLOW_TEX).setVisible(false);
+    if (painted) this.moonGlow = scene.add.image(0, 0, GLOW_TEX).setVisible(false);
     this.farGfx = scene.add.graphics();
     this.mountainGfx = scene.add.graphics();
     this.deckGfx = scene.add.graphics();
@@ -337,11 +355,16 @@ export class ParallaxWorld {
     this.cloudGfx = scene.add.graphics();
     if (painted) this.skyClouds = new CloudSprites(scene, 40);
     this.hillGfx = scene.add.graphics();
+    // Smoke rises from behind the dead cities, so it goes in under them
+    if (soft) this.smokePool = new SpritePool(scene, 48, PUFF_TEX, 'p0');
     this.scrubGfx = scene.add.graphics();
+    this.groundBaseGfx = scene.add.graphics();
+    if (soft) this.patchPool = new SpritePool(scene, 110, 'px_soft');
     this.groundGfx = scene.add.graphics();
     // Hazards render in front of the terrain but behind the aircraft, which
     // is created after this class — so the plane passes in front of them.
     this.hazardGfx = scene.add.graphics();
+    if (soft) this.hazardPuffs = new SpritePool(scene, 120, PUFF_TEX, 'p0');
     // Traffic and tracers sit ABOVE the player's aircraft (which the scene
     // creates after this class, at depth 0). A conflicting aeroplane that
     // passes behind your own tail is a conflict you never see coming.
@@ -475,16 +498,30 @@ export class ParallaxWorld {
     const sink = Math.max(0, (f.altitude - ALT_BAND) * this.pxPerM);
     const hMult = Phaser.Math.Linear(1, 0.6, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 600, 0, 1));
 
+    this.windX = f.windX;
     this.drawSky(f);
     this.drawFar(f.scrollX, sink * 0.30, hMult);
     this.drawMountains(f.scrollX, sink * 0.55, hMult);
+    // Each sprite pool is claimed between its own begin() and end(); a pool
+    // can serve several layers as long as they all draw inside its bracket
+    this.cellClouds?.begin();
+    this.skyClouds?.begin();
     this.drawCloudDeck(f.altitude, f.scrollX);
     this.drawClouds(f.scrollX, f.altitude);
     this.drawHills(f.scrollX, sink * 0.8, f);
+    this.smokePool?.begin();
     this.drawScrub(f.scrollX, sink);
+    this.smokePool?.end();
     this.drawThermals(f.scrollX, sink, f.altitude);
+    this.skyClouds?.end();
     this.drawWeatherCells(f.scrollX, sink);
-    this.drawGround(f.scrollX, sink, f);
+    this.cellClouds?.end();
+    this.patchPool?.begin();
+    // The hazard puffs open here: the settlements' chimneys, drawn with the
+    // ground, smoke into the same pool as the towns along the route
+    this.hazardPuffs?.begin();
+    withPuffs(this.hazardPuffs, () => this.drawGround(f.scrollX, sink, f));
+    this.patchPool?.end();
 
     this.drawNearField(f.scrollX, sink, f.speedFrac ?? 0);
 
@@ -502,14 +539,18 @@ export class ParallaxWorld {
 
     this.hazardGfx.clear();
     if (gy < this.height + 40) {
-      // Obstacles are lit by the sky they stand against, so they get the
-      // current horizon colour rather than being flat black cut-outs.
-      this.hazards.draw(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, {
-        rim: this.pal.skyBot, daylight: this.dl,
+      // Every plume drawn down in the hazard painters comes out as soft smoke
+      withPuffs(this.hazardPuffs, () => {
+        // Obstacles are lit by the sky they stand against, so they get the
+        // current horizon colour rather than being flat black cut-outs.
+        this.hazards.draw(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, {
+          rim: this.pal.skyBot, daylight: this.dl,
+        });
+        this.raiders.draw(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl, this.crowdStyle);
+        this.drops.drawSites(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl, this.crowdStyle);
       });
-      this.raiders.draw(this.hazardGfx, f.scrollX, gy, this.width, this.t, this.dl, this.crowdStyle);
-      this.drops.drawSites(this.hazardGfx, f.scrollX, gy, this.pxPerM, this.width, this.t, this.dl, this.crowdStyle);
     }
+    this.hazardPuffs?.end();
 
     this.tracerGfx.clear();
     this.raiders.drawTracers(this.tracerGfx, f.scrollX, this.width);
@@ -628,11 +669,15 @@ export class ParallaxWorld {
 
   destroy(): void {
     for (const g of [this.skyGfx, this.farGfx, this.mountainGfx, this.deckGfx,
-      this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundGfx, this.hazardGfx,
+      this.cloudGfx, this.hillGfx, this.scrubGfx, this.groundBaseGfx, this.groundGfx, this.hazardGfx,
       this.foreGfx, this.vignetteGfx]) g.destroy();
     this.cellClouds?.destroy();
     this.skyClouds?.destroy();
+    this.smokePool?.destroy();
+    this.patchPool?.destroy();
+    this.hazardPuffs?.destroy();
     this.sunGlow?.destroy();
+    this.moonGlow?.destroy();
   }
 
   // ── Layers ─────────────────────────────────────────────────────────────────
@@ -886,10 +931,22 @@ export class ParallaxWorld {
       const my = this.groundY - Math.sin(mT * Math.PI) * (this.groundY - 130) - 20;
       const ma = (1 - dl * 2) * vis;
       if (ma > 0.02) {
-        g.fillStyle(0xd8e2ec, 0.12 * ma); g.fillCircle(mx, my, 26);
+        if (this.moonGlow) {
+          // A cold soft halo; the glow texture's own core is the moon's disc
+          this.moonGlow.setPosition(mx, my).setDisplaySize(120, 120).setTint(0xcfdcec)
+            .setAlpha(Math.min(1, 0.5 * ma)).setVisible(true);
+        } else {
+          g.fillStyle(0xd8e2ec, 0.12 * ma); g.fillCircle(mx, my, 26);
+        }
         g.fillStyle(0xe8eef6, 0.9 * ma);  g.fillCircle(mx, my, 12);
-        g.fillStyle(top, 0.95 * ma);      g.fillCircle(mx + 5, my - 3, 10);
+        // The bite is the sky at the moon's own height, so it vanishes into it
+        const skyAt = lerpColor(top, bot, Phaser.Math.Clamp(my / this.height, 0, 1));
+        g.fillStyle(skyAt, 0.95 * ma);    g.fillCircle(mx + 5, my - 3, 10);
+      } else {
+        this.moonGlow?.setVisible(false);
       }
+    } else {
+      this.moonGlow?.setVisible(false);
     }
 
     // Warm horizon band, fading with altitude and daylight
@@ -1373,23 +1430,58 @@ export class ParallaxWorld {
     }
   }
 
-  /** Distant smoke columns — something is always burning out there. */
+  /**
+   * Distant smoke columns — something is always burning out there.
+   *
+   * A column was seven translucent ellipses stacked up and swaying, which read
+   * as a pile of grey coins. Smoke is a stream: puffs leave the fire, rise,
+   * swell, thin out and bend over downwind, and the column is never the same
+   * shape twice. Each puff here is born at the base and climbs for about
+   * twenty seconds, growing and fading as it goes.
+   */
   private drawSmokeColumns(g: Phaser.GameObjects.Graphics, scrollX: number, baseY: number): void {
     const cellW = 2400;
     const factor = 0.55;
     const first = Math.floor((scrollX * factor - 300) / cellW);
+    const pool = this.smokePool;
+    // Smoke takes on the colour of the distance it stands in, and is black
+    // against a night sky
+    const smoke = lerpColor(lerpColor(0x1e1a14, this.pal.far, 0.28), this.pal.skyBot, 0.1);
+    // Bends over with the wind, and always a little: there is always some air moving
+    const lean = Phaser.Math.Clamp(0.35 + this.windX / 9, -1, 1);
     for (let c = first; c <= first + Math.ceil(this.width / cellW) + 1; c++) {
       if (propRand(c + 7) < 0.45) continue;
       const cx = c * cellW + propRand(c) * 1200 - scrollX * factor;
-      if (cx < -80 || cx > this.width + 80) continue;
+      if (cx < -160 || cx > this.width + 160) continue;
 
       const colH = 90 + propRand(c + 11) * 70;
-      for (let k = 0; k < 7; k++) {
-        const yy = baseY - (k / 7) * colH;
-        const sway = Math.sin(this.t * 0.7 + k * 0.8 + c) * (2 + k * 2.4);
-        const r = 4 + k * 2.8;
-        g.fillStyle(0x17140f, 0.30 * (1 - k / 8.5));
-        g.fillEllipse(cx + sway + k * 3, yy, r * 2, r * 1.3);
+      if (pool) {
+        const N = 11;
+        for (let k = 0; k < N; k++) {
+          // 0 leaving the fire … 1 dissolved at the top
+          const age = (this.t * 0.05 + k / N + propRand(c * 3.1 + k) * 0.05) % 1;
+          const rise = age * colH;
+          const sway = Math.sin(this.t * 0.5 + k * 1.3 + c) * (1 + age * 8);
+          const x = cx + sway + lean * age * age * colH * 0.6;
+          const size = (9 + age * 44) * (0.85 + propRand(c * 5 + k) * 0.3);
+          const a = 0.78 * Math.min(1, age * 7) * Math.pow(1 - age, 1.25);
+          const img = pool.next();
+          if (!img) break;
+          img.setFrame(`p${(k + c) & 3}`)
+            .setPosition(x, baseY - 3 - rise)
+            .setDisplaySize(size * 1.3, size)
+            .setRotation(k * 1.7 + age * 0.9)
+            .setTint(smoke)
+            .setAlpha(a);
+        }
+      } else {
+        for (let k = 0; k < 7; k++) {
+          const yy = baseY - (k / 7) * colH;
+          const sway = Math.sin(this.t * 0.7 + k * 0.8 + c) * (2 + k * 2.4);
+          const r = 4 + k * 2.8;
+          g.fillStyle(0x17140f, 0.30 * (1 - k / 8.5));
+          g.fillEllipse(cx + sway + k * 3, yy, r * 2, r * 1.3);
+        }
       }
       // Half of them still burn at the base
       if (propRand(c + 3) < 0.5) {
@@ -1452,7 +1544,14 @@ export class ParallaxWorld {
     this.hazeBand(g, baseY - 80, baseY + 4, 0.16);
   }
 
-  /** High-altitude cloud deck: the tops of the weather layer, far below. */
+  /**
+   * High-altitude cloud deck: the tops of the weather layer, far below.
+   *
+   * It was a pale rectangle with a row of hard white ellipses along its top
+   * edge — plates laid on a shelf. Now the deck is a haze that thickens
+   * downward with no edge to it, and its top is a line of real cumulus heads
+   * standing up out of it, lit by the same sun as every other cloud.
+   */
   private drawCloudDeck(alt: number, scrollX: number): void {
     const g = this.deckGfx;
     g.clear();
@@ -1460,15 +1559,30 @@ export class ParallaxWorld {
     if (a <= 0.01) return;
 
     const y = this.groundY - 30;
-    g.fillStyle(0xd8dce2, a * 0.5);
-    g.fillRect(0, y + 26, this.width, this.height - y);
+    const body = lerpColor(0x2a3240, lerpColor(0xeceef0, this.pal.skyBot, 0.2), this.dl);
+    const shade = lerpColor(0x141a24, lerpColor(0x9aa4b0, this.pal.skyTop, 0.25), this.dl);
+    const hi = lerpColor(body, lerpColor(0xffffff, this.pal.glow, 0.35), 0.5 * this.dl);
+    if (this.webgl) {
+      g.fillGradientStyle(body, body, body, body, 0, 0, a * 0.62, a * 0.62);
+      g.fillRect(0, y - 6, this.width, 48);
+      g.fillStyle(body, a * 0.62);
+      g.fillRect(0, y + 42, this.width, this.height - y);
+    } else {
+      g.fillStyle(0xd8dce2, a * 0.5);
+      g.fillRect(0, y + 26, this.width, this.height - y);
+    }
     const period = 900;
     for (let rep = -1; rep <= 2; rep++) {
       const bx = rep * period - ((scrollX * 0.12) % period);
       for (let i = 0; i < 5; i++) {
         const cx = bx + i * 180 + (i % 2) * 60;
-        g.fillStyle(0xe4e8ee, a);
-        g.fillEllipse(cx, y + 20 + (i % 3) * 8, 220, 30);
+        const cy = y + 22 + (i % 3) * 8;
+        if (this.cellClouds) {
+          this.cellClouds.draw(cx, cy, 250, 44, i * 13 + 5, Math.min(1, a * 1.7), hi, shade, this.width);
+        } else {
+          g.fillStyle(0xe4e8ee, a);
+          g.fillEllipse(cx, cy - 2, 220, 30);
+        }
       }
     }
   }
@@ -1530,17 +1644,48 @@ export class ParallaxWorld {
         g.strokePath();
       }
 
-      // Scraps of cumulus marking the top of the column. This is the cue you
-      // read from a distance and steer at.
-      const topY = gy - (THERMAL_MARKER_M - altitudeM) * this.pxPerM;
-      if (topY > -60 && topY < this.height) {
+      /*
+       * Birds riding the column — the oldest thermal marker there is, and the
+       * one that shows at every height. Hawks circle where the lift is, high
+       * and low, mostly gliding with the odd lazy flap.
+       */
+      if (strength > 1.2) {
+        g.lineStyle(1.3, lerpColor(0x14100c, this.pal.skyBot, 0.2), Math.min(0.85, 0.25 + a));
         for (let k = 0; k < 3; k++) {
-          const ox = (k - 1) * 26 + Math.sin(this.t * 0.3 + i + k) * 6;
-          g.fillStyle(0xf0ece4, a * 0.5);
-          g.fillEllipse(sx + ox, topY + (k % 2) * 5, 44 - k * 6, 20 - k * 3);
+          const altB = 110 + k * 95 + Math.sin(this.t * 0.2 + i + k) * 12;
+          const by = gy - altB * this.pxPerM;
+          if (by < -20 || by > this.height + 20) continue;
+          const ang = this.t * (0.55 + k * 0.08) + k * 2.1 + i;
+          const bx = sx + Math.cos(ang) * (16 + k * 5);
+          const bby = by + Math.sin(ang) * 5;
+          const flap = Math.max(0, Math.sin(this.t * 2.4 + k * 1.7)) * 2.2;
+          g.lineBetween(bx - 5.5, bby - 1.6 - flap, bx, bby);
+          g.lineBetween(bx, bby, bx + 5.5, bby - 1.6 - flap);
         }
-        g.fillStyle(0x9a9086, a * 0.35);
-        g.fillEllipse(sx, topY + 11, 78, 10);
+      }
+
+      // Scraps of cumulus marking the top of the column. This is the cue you
+      // read from a distance and steer at. At the column's top in the WORLD:
+      // it was offset by the aircraft's own height, so it only came on screen
+      // between about 150 and 250 m — level with you, wherever you were.
+      const topY = gy - THERMAL_MARKER_M * this.pxPerM;
+      if (topY > -60 && topY < this.height) {
+        if (this.skyClouds) {
+          // A young cumulus, still building: the same painted cloud as the
+          // sky's, small and bright, so it reads as weather and not a badge
+          const lit = lerpColor(lerpColor(0xf6f2ea, this.pal.skyBot, 0.12), 0x2a3240, 1 - this.dl);
+          const base = lerpColor(lerpColor(0x8e96a2, this.pal.skyTop, 0.25), 0x141a24, 1 - this.dl);
+          const breathe = 1 + Math.sin(this.t * 0.3 + i) * 0.05;
+          this.skyClouds.draw(sx, topY + 6, 96 * breathe, 34 * breathe, i * 7 + 3, Math.min(1, a * 1.25), lit, base, this.width);
+        } else {
+          for (let k = 0; k < 3; k++) {
+            const ox = (k - 1) * 26 + Math.sin(this.t * 0.3 + i + k) * 6;
+            g.fillStyle(0xf0ece4, a * 0.5);
+            g.fillEllipse(sx + ox, topY + (k % 2) * 5, 44 - k * 6, 20 - k * 3);
+          }
+          g.fillStyle(0x9a9086, a * 0.35);
+          g.fillEllipse(sx, topY + 11, 78, 10);
+        }
       }
     }
   }
@@ -1559,7 +1704,6 @@ export class ParallaxWorld {
     const g = this.deckGfx;
     const gy = this.groundY + sink;
     const dl = this.dl;
-    this.cellClouds?.begin();
     for (const c of this.weatherField.all) {
       const strength = this.weatherField.strength(c);
       if (strength < 0.05) continue;
@@ -1640,7 +1784,6 @@ export class ParallaxWorld {
         }
       }
     }
-    this.cellClouds?.end();
   }
 
   private drawClouds(scrollX: number, alt: number): void {
@@ -1652,7 +1795,6 @@ export class ParallaxWorld {
     const shade = lerpColor(0x141a24, lerpColor(0x8a96a4, this.pal.skyTop, 0.3), this.dl);
     const hi = lerpColor(body, lerpColor(0xffffff, this.pal.glow, 0.4), 0.55 * this.dl);
 
-    this.skyClouds?.begin();
     for (let layer = 0; layer < CLOUD_LAYER_ALTS.length; layer++) {
       const layerAlt = CLOUD_LAYER_ALTS[layer];
       const baseY = groundScreenY - layerAlt * this.pxPerM;
@@ -1674,7 +1816,6 @@ export class ParallaxWorld {
         this.cumulus(this.skyClouds, g, ox, oy, w, w * 0.34, i * 31 + layer * 7, alpha, lb, ls, lh);
       }
     }
-    this.skyClouds?.end();
   }
 
   private drawHills(scrollX: number, sink: number, f: WorldFrame): void {
@@ -1791,6 +1932,16 @@ export class ParallaxWorld {
    * route seed so the same leg has the same coastline every time.
    */
   waterAt(worldX: number): number {
+    const d = this.waterField(worldX);
+    return d <= 0 ? 0 : Math.min(1, d / 0.30);
+  }
+
+  /**
+   * The water field itself, signed: above zero is water (its depth), below is
+   * dry land. Kept separate from `waterAt` so the drawing can find exactly
+   * where a bank is by interpolating the zero crossing between two samples.
+   */
+  private waterField(worldX: number): number {
     /*
      * Coverage comes from where this POINT is on the route, not from the
      * camera's current blend. Water is a property of the place — the raider
@@ -1808,7 +1959,7 @@ export class ParallaxWorld {
       + BIOMES[this.biomeTo].shape.water * wB
       + BIOMES.ashland.shape.water * wMid
     ) / Math.max(1e-6, wA + wB + wMid);
-    if (cover <= 0.02) return 0;
+    if (cover <= 0.02) return -1;
     /*
      * Channel wavelength ~330 m, broken up by a ~80 m ripple.
      *
@@ -1823,13 +1974,132 @@ export class ParallaxWorld {
            + 0.15 * Math.sin(worldX * 0.0087 + k * 2.7);
     // Water wherever the field dips below the biome's coverage. The distance
     // below the threshold becomes depth, which is what shades the shoreline.
-    const d = (cover * 1.15) - n;
-    return d <= 0 ? 0 : Math.min(1, d / 0.30);
+    return (cover * 1.15) - n;
+  }
+
+  /**
+   * Tidal channels across the plain.
+   *
+   * They were filled strip by strip, twelve pixels at a time, so every bank
+   * was a staircase and every channel ended in a pale vertical wall. The
+   * water field only varies along the route, so a channel is a band of world
+   * x: its banks are found exactly (interpolated between samples on a fixed
+   * world grid, so they never crawl as you fly), and the band is laid on the
+   * ground plane in perspective — narrowing into the distance and wandering a
+   * little either side of the line the action is on, where it is exactly
+   * where `waterAt` says (that is where the gun barges float).
+   */
+  private drawWaterChannels(
+    g: Phaser.GameObjects.Graphics, gy: number, nearDepth: number,
+    sAt: (y: number) => number, xAt: (wx: number, sc: number) => number, wxAt: (sx: number, sc: number) => number,
+  ): void {
+    const W = this.width;
+    const by = gy - BACK_BAND;
+    const S_FAR = 0.3;
+    const MEANDER = 260;
+    const STEP = 24;
+    // The widest stretch of world the plain shows is at its far edge
+    const x0 = Math.floor((wxAt(-40, S_FAR) - MEANDER) / STEP) * STEP;
+    const x1 = wxAt(W + 40, S_FAR) + MEANDER;
+    const runs: Array<[number, number]> = [];
+    let px = x0, pf = this.waterField(x0);
+    let start = pf > 0 ? x0 : NaN;
+    for (let x = x0 + STEP; x <= x1 + STEP; x += STEP) {
+      const f = this.waterField(x);
+      if ((pf > 0) !== (f > 0)) {
+        const cross = px + (x - px) * (pf / (pf - f));
+        if (f > 0) start = cross;
+        else if (!Number.isNaN(start)) { runs.push([start, cross]); start = NaN; }
+      }
+      px = x; pf = f;
+    }
+    if (!Number.isNaN(start)) runs.push([start, x1 + STEP]);
+    if (!runs.length) return;
+
+    // Depth stations, from the far edge of the plain to under the camera:
+    // [screen y, depth −1 far … 0 the line … +1 near]
+    const rows: Array<[number, number]> = [];
+    for (const t of [0, 0.3, 0.62, 1]) rows.push([by + t * BACK_BAND, t - 1]);
+    for (const t of [0.22, 0.5, 1]) rows.push([gy + t * nearDepth, t]);
+
+    // Sky in the water far off, dark and deep up close
+    const skyRefl = lerpColor(lerpColor(this.pal.skyBot, 0x2e7d92, 0.62), 0x0a1622, 0.18);
+    const deepWater = 0x0b2430;
+    const colAt = (y: number): number => (y < gy
+      ? lerpColor(lerpColor(skyRefl, deepWater, 0.2), this.pal.skyBot, ((gy - y) / BACK_BAND) * 0.5)
+      : lerpColor(skyRefl, deepWater, Math.min(1, (y - gy) / 90)));
+    const bank = lerpColor(this.pal.glow, 0xffffff, 0.3);
+    const glint = lerpColor(lerpColor(this.pal.skyBot, 0xffffff, 0.45), this.pal.glow, 0.2);
+    const L: number[] = [], R: number[] = [], Y: number[] = [], C: number[] = [];
+    for (const [wa, wb] of runs) {
+      // A stable identity for the channel, so its wander never changes
+      const id = Math.round((wa + wb) / 1400);
+      const lean = (propRand(id * 1.31 + this.routeSeed * 0.7) - 0.5) * MEANDER * 1.3;
+      const wig = (propRand(id * 2.17 + 5) - 0.5) * MEANDER * 0.7;
+      const ph = propRand(id * 3.7 + 1) * 6.28;
+      const off = (d: number): number => lean * d + wig * (Math.sin(d * 2.6 + ph) - Math.sin(ph));
+      L.length = 0; R.length = 0; Y.length = 0; C.length = 0;
+      let lo = Infinity, hi = -Infinity;
+      for (const [y, d] of rows) {
+        const sc = sAt(y), o = off(d);
+        const l = xAt(wa + o, sc), r = xAt(wb + o, sc);
+        L.push(l); R.push(r); Y.push(y); C.push(colAt(y));
+        lo = Math.min(lo, l); hi = Math.max(hi, r);
+      }
+      if (hi < -10 || lo > W + 10) continue;
+      for (let i = 0; i + 1 < Y.length; i++) {
+        if (this.webgl) {
+          g.fillGradientStyle(C[i], C[i], C[i + 1], C[i + 1], 0.94, 0.94, 0.94, 0.94);
+          g.fillTriangle(L[i], Y[i], R[i], Y[i], L[i + 1], Y[i + 1]);
+          g.fillGradientStyle(C[i], C[i + 1], C[i + 1], C[i + 1], 0.94, 0.94, 0.94, 0.94);
+          g.fillTriangle(R[i], Y[i], R[i + 1], Y[i + 1], L[i + 1], Y[i + 1]);
+        } else {
+          g.fillStyle(lerpColor(C[i], C[i + 1], 0.5), 0.94);
+          g.fillPoints([{ x: L[i], y: Y[i] }, { x: R[i], y: Y[i] }, { x: R[i + 1], y: Y[i + 1] }, { x: L[i + 1], y: Y[i + 1] }], true);
+        }
+      }
+      // The wet banks catching the light, both sides
+      g.lineStyle(1.2, bank, 0.3);
+      for (const side of [L, R]) {
+        g.beginPath();
+        g.moveTo(side[0], Y[0]);
+        for (let i = 1; i < Y.length; i++) g.lineTo(side[i], Y[i]);
+        g.strokePath();
+      }
+      /*
+       * Light moving on the water: short glints that drift slowly across the
+       * channel and fade in and out, thicker toward you. Still water would be
+       * a painted stripe; this is what makes it read as a surface.
+       */
+      const nG = 7;
+      for (let k = 0; k < nG; k++) {
+        const v = propRand(id * 7.3 + k * 1.9);
+        const life = (this.t * (0.07 + v * 0.05) + v) % 1;
+        const ty = by + (0.08 + v * 0.9) * (this.height - by);
+        if (ty >= this.height) continue;
+        // Find the channel's edges at this depth
+        let i = 0;
+        while (i + 2 < Y.length && Y[i + 1] < ty) i++;
+        const f = Phaser.Math.Clamp((ty - Y[i]) / Math.max(1e-3, Y[i + 1] - Y[i]), 0, 1);
+        const l = L[i] + (L[i + 1] - L[i]) * f, r = R[i] + (R[i + 1] - R[i]) * f;
+        const w = r - l;
+        if (w < 6) continue;
+        const gx = l + w * ((v * 3.1 + life * 0.35) % 1);
+        const len = Math.min(w * 0.3, 4 + (ty - by) * 0.12);
+        const a = Math.sin(life * Math.PI) * (0.18 + this.dl * 0.22);
+        g.lineStyle(ty > gy ? 1.6 : 1, glint, a);
+        g.lineBetween(Math.max(l + 1, gx - len / 2), ty, Math.min(r - 1, gx + len / 2), ty);
+      }
+    }
   }
 
   private drawGround(scrollX: number, sink: number, f: WorldFrame): void {
     const g = this.groundGfx;
     g.clear();
+    // The soil, the water and the tracks lie UNDER the patches of different
+    // ground; the cover, the runway and everything standing on it lie over
+    const base = this.groundBaseGfx;
+    base.clear();
     const gy = this.groundY + sink;
     if (gy - BACK_BAND > this.height + 10) return;
 
@@ -1865,11 +2135,11 @@ export class ParallaxWorld {
     const grad = (y0: number, y1: number, c0: number, c1: number): void => {
       if (y1 <= y0) return;
       if (this.webgl) {
-        g.fillGradientStyle(c0, c0, c1, c1, 1, 1, 1, 1);
-        g.fillRect(0, y0, W, y1 - y0 + 1);
+        base.fillGradientStyle(c0, c0, c1, c1, 1, 1, 1, 1);
+        base.fillRect(0, y0, W, y1 - y0 + 1);
       } else {
-        g.fillStyle(lerpColor(c0, c1, 0.5), 1);
-        g.fillRect(0, y0, W, y1 - y0 + 1);
+        base.fillStyle(lerpColor(c0, c1, 0.5), 1);
+        base.fillRect(0, y0, W, y1 - y0 + 1);
       }
     };
     grad(by, gy, farSoil, lineSoil);
@@ -1878,41 +2148,12 @@ export class ParallaxWorld {
 
     // ── Water, receding: channels cross the plain into the distance ──────
     if (BIOMES[this.biomeFrom].shape.water > 0.02 || BIOMES[this.biomeTo].shape.water > 0.02) {
-      const skyRefl = lerpColor(lerpColor(this.pal.skyBot, 0x2e7d92, 0.62), 0x0a1622, 0.18);
-      const deepWater = 0x0b2430;
-      const strips: Array<[number, number]> = [];
-      for (let y = by; y < gy; y += 5) strips.push([y, Math.min(gy, y + 5)]);
-      for (let y = gy; y < H;) {
-        const hgt = Math.max(5, (y - gy) * 0.18 + 5);
-        strips.push([y, Math.min(H, y + hgt)]);
-        y += hgt;
-      }
-      for (const [y0, y1] of strips) {
-        const sc = sAt((y0 + y1) / 2);
-        const depthT = y0 < gy ? (gy - y0) / BACK_BAND : 0;
-        const col = lerpColor(
-          lerpColor(skyRefl, deepWater, y0 >= gy ? Math.min(1, (y0 - gy) / 90) : 0.2),
-          this.pal.skyBot, depthT * 0.5,
-        );
-        let run = -1;
-        for (let x = -12; x <= W + 12; x += 12) {
-          const wet = this.waterAt(wxAt(x, sc)) > 0;
-          if (wet && run < 0) run = x;
-          if ((!wet || x >= W) && run >= 0) {
-            g.fillStyle(col, 0.94);
-            g.fillRect(run, y0, x - run + 1, y1 - y0 + 0.5);
-            // The bright wet bank at each end of the run
-            g.fillStyle(lerpColor(this.pal.glow, 0xffffff, 0.3), 0.35);
-            g.fillRect(run - 1, y0, 2, y1 - y0);
-            g.fillRect(x - 1, y0, 2, y1 - y0);
-            run = -1;
-          }
-        }
-      }
+      this.drawWaterChannels(base, gy, nearDepth, sAt, xAt, wxAt);
     }
 
     // ── Dirt tracks running off into the distance ────────────────────────
     {
+      const g = base;
       const [oA, oB] = originStripPx(f.originRunwayM ?? 600);
       const [dA, dB] = destStripPx(f.routeTotalKm, f.destRunwayM ?? 600);
       const SP = 2600;
@@ -1969,19 +2210,35 @@ export class ParallaxWorld {
     for (let r = 0; r < rows.length; r++) {
       const { y, sc, gap, far } = rows[r];
       const haze = (c: number): number => lerpColor(c, farSoil, far * 0.7);
-      // Patches of different ground — dry, dark, overgrown — flattened by distance
+      /*
+       * Patches of different ground — dry, dark, overgrown — flattened by
+       * distance. Hard-edged ellipses at a quarter opacity made the plain a
+       * field of pale and dark coins; as soft sprites they blend into the
+       * soil and each other, which is what variation in ground looks like.
+       */
       {
         const SP = 300 / sc;
         const k0 = Math.floor(wxAt(-300, sc) / SP), k1 = Math.ceil(wxAt(W + 300, sc) / SP);
+        const pool = this.patchPool;
         for (let k = k0; k <= k1; k++) {
           const h1 = propRand(k * 1.7 + r * 31);
           const wx = k * SP + h1 * SP * 0.7;
           const x = xAt(wx, sc);
           const w = (150 + propRand(k + r * 7) * 240) * sc;
+          if (x + w < -20 || x - w > W + 20) continue;
           const which = propRand(k * 2.3 + r);
           const col = which < 0.4 ? pale : which < 0.75 ? dark : tuft;
-          g.fillStyle(haze(col), 0.16 + propRand(k + r) * 0.12);
-          g.fillEllipse(x, y, w, Math.max(2, gap * 1.6));
+          const a = 0.16 + propRand(k + r) * 0.12;
+          const img = pool?.next();
+          if (img) {
+            // px_soft peaks at ~0.64 and falls away, so it is drawn larger
+            // and denser than the ellipse it replaces to carry the same weight
+            img.setPosition(x, y).setDisplaySize(w * 1.35, Math.max(3, gap * 1.6) * 1.9)
+              .setTint(haze(col)).setAlpha(Math.min(1, a * 1.9));
+          } else {
+            base.fillStyle(haze(col), a);
+            base.fillEllipse(x, y, w, Math.max(2, gap * 1.6));
+          }
         }
       }
       // Tufts, stones and brush — small at the back, big in front
@@ -2380,10 +2637,12 @@ export class ParallaxWorld {
         const chx = left + bw * 0.7;
         g.fillStyle(dark, 1);
         g.fillRect(chx, gy - bh - 14, 5, 14);
-        for (let s2 = 0; s2 < 4; s2++) {
-          const sway = Math.sin(this.t * 0.8 + s2 + i) * (2 + s2 * 2);
-          g.fillStyle(0x1c1812, 0.16 * (1 - s2 / 5));
-          g.fillEllipse(chx + 2 + sway - s2 * 2, gy - bh - 20 - s2 * 9, 9 + s2 * 4, 6 + s2 * 2);
+        for (let s2 = 0; s2 < 5; s2++) {
+          // Rising on a loop, swelling and thinning as it goes
+          const up = (s2 / 5 + this.t * 0.11 + i * 0.17) % 1;
+          const sway = Math.sin(this.t * 0.8 + s2 + i) * (2 + up * 8);
+          puff(g, chx + 2 + sway - up * 8, gy - bh - 18 - up * 40, 8 + up * 20, 6 + up * 10,
+            0x1c1812, 0.2 * Math.min(1, up * 7) * (1 - up), s2 + i);
         }
       }
 

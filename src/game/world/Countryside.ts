@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { mix, type ObstacleStyle } from './Obstacles';
 import type { BiomeId } from './Biomes';
 import { depthOffset, extrude, extrudeBox, type DepthOffset } from './Depth';
+import { puff } from './Puffs';
 
 /**
  * The land between the towns.
@@ -332,8 +333,9 @@ function drawPropAt(
       // Woodsmoke
       for (let k = 0; k < 4; k++) {
         const d = (t * 8 + k * 10 + p.seed) % 36;
-        g.fillStyle(0x3a3530, 0.14 * (1 - k / 5));
-        g.fillEllipse(sx + 10 + d * 0.4, base - ch - roof - d, 5 + k * 3, 4 + k * 2);
+        const up = d / 36;
+        puff(g, sx + 10 + d * 0.4, base - ch - roof - d, 5 + up * 13, 4 + up * 8,
+          0x3a3530, 0.16 * Math.min(1, up * 6) * (1 - up), k + p.seed);
       }
       break;
     }
