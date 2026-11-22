@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { drawObstacle, drawObstacleDepth, type ObstacleKind, type ObstacleStyle } from './Obstacles';
 import { puff } from './Puffs';
+import { lakeSpan, type Lake } from './Lakes';
 import { layoutCountryside, drawProp, type Prop } from './Countryside';
 import type { BiomeId } from './Biomes';
 import {
@@ -121,7 +122,11 @@ export class Hazards {
    * pumpjack or a barn — never where anything solid goes, so the dispatch
    * board's preview (which does not pass it) lays out the same route.
    */
-  generate(startPx: number, endPx: number, seed: number, biomeAt?: (x: number) => BiomeId): void {
+  generate(
+    startPx: number, endPx: number, seed: number, biomeAt?: (x: number) => BiomeId,
+    /** Open water on the route — nothing is built on it, and boat crews hold it. */
+    lake: Lake | null = null,
+  ): void {
     this.list = [];
     this.props = [];
     this.hostile = [];
@@ -131,10 +136,16 @@ export class Hazards {
     this.camps = [];
     const span = endPx - startPx;
     if (span <= 0) return;
+    // The water and a strip of shore round it
+    const wet: Array<[number, number]> = [];
+    if (lake) {
+      const [l0, l1] = lakeSpan(lake);
+      wet.push([l0 - 300 * 9, l1 + 300 * 9]);
+    }
 
     // Towns and the lines that feed them go down first; everything else
     // has to find room around them.
-    const built = layoutSettlements(startPx, endPx, seed);
+    const built = layoutSettlements(startPx, endPx, seed, wet);
     this.townList = built.towns;
     this.spanList = built.spans;
 
@@ -150,7 +161,8 @@ export class Hazards {
       const wanted = Math.max(2 - Math.min(2, built.towns.length), Math.round(span / (12000 * M)));
       const lo = startPx + 900 * M, hi = endPx - 600 * M;
       const clearOfTowns = (x: number): boolean =>
-        built.towns.every(t => x < t.x0 - 700 * M || x > t.x1 + 700 * M);
+        built.towns.every(t => x < t.x0 - 700 * M || x > t.x1 + 700 * M)
+        && wet.every(([w0, w1]) => x < w0 - 200 * M || x > w1 + 200 * M);
       const clearOfCamps = (x: number): boolean =>
         this.camps.every(c => Math.abs(c - x) > DROP_RUN_BEFORE_PX + DROP_RUN_AFTER_PX);
       if (wanted > 0 && hi > lo) {
@@ -308,6 +320,35 @@ export class Hazards {
         if (zones[i].z[0] < z[1] + GUN_REACH_PX && zones[i].z[1] > z[0] - GUN_REACH_PX) zones.splice(i, 1);
       }
       zones.push({ z, only: ['nest'] });
+    }
+    /*
+     * Open water belongs to the boat crews. A zone that happened to fall on
+     * the lake would have floated gun barges — the drowned coast's heavy
+     * weapon — out into the middle of it, so ordinary zones come off the
+     * water, and the lake gets its own: a few makeshift boats working the
+     * middle of it, which is where anyone crossing has to fly.
+     */
+    if (lake) {
+      const [l0, l1] = lakeSpan(lake);
+      for (let i = zones.length - 1; i >= 0; i--) {
+        if (zones[i].only === null && zones[i].z[0] < l1 && zones[i].z[1] > l0) zones.splice(i, 1);
+      }
+      const mid = (l0 + l1) / 2, reach = (l1 - l0) * 0.3;
+      /*
+       * Carved, not all-or-nothing. The lake sits clear of the climb-out but
+       * the guns' reach is added on top of it, and a zone dropped for
+       * clipping that by a few metres left three lakes in five empty. What is
+       * left after the kept-out stretches come off is used — the longest
+       * piece, if it is long enough for a boat or two.
+       */
+      let pieces: Array<[number, number]> = [[mid - reach, mid + reach]];
+      for (const [p, q] of keepOut) {
+        pieces = pieces.flatMap(([a, b]): Array<[number, number]> => (b <= p || a >= q)
+          ? [[a, b]]
+          : [[a, Math.min(b, p)], [Math.max(a, q), b]].filter(([u, v]) => v - u > 0) as Array<[number, number]>);
+      }
+      const best = pieces.sort((u, v) => (v[1] - v[0]) - (u[1] - u[0]))[0];
+      if (best && best[1] - best[0] >= 1800) zones.push({ z: best, only: ['raft'] });
     }
     zones.sort((p, q) => p.z[0] - q.z[0]);
     this.hostile = zones.map(z => z.z);

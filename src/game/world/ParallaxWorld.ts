@@ -16,6 +16,9 @@ import { routeSpanPx, originStripPx, destStripPx } from './RoutePreview';
 import { CloudSprites, ensureSkyTextures, GLOW_TEX } from './CloudSprites';
 import { SpritePool } from './SpritePool';
 import { withPuffs, puff } from './Puffs';
+import { NearField, ensureForeTexture } from './NearField';
+import { lakeFor, lakeField, shoresAt, LAKE_D_FAR, LAKE_D_NEAR, type Lake } from './Lakes';
+import { layoutJunk, drawJunk, type Junk, type JunkStyle } from './LakeArt';
 import { ensureSharedTextures, PUFF_TEX } from '../entities/aircraft/render/AircraftPainter';
 
 /**
@@ -230,6 +233,8 @@ export class ParallaxWorld {
   private readonly tracerGfx: Phaser.GameObjects.Graphics;
   /** Near field, scrolls FASTER than the ground — the main speed cue. */
   private readonly foreGfx: Phaser.GameObjects.Graphics;
+  /** The out-of-focus things in it — see NearField. */
+  private readonly nearField: NearField | null = null;
   private readonly vignetteGfx: Phaser.GameObjects.Graphics;
 
   /** Solid obstacles + raider-held ground along the route. */
@@ -293,6 +298,19 @@ export class ParallaxWorld {
 
   /** Route seed, so the channels are in the same place every time you fly it. */
   private routeSeed = 1;
+  /** The lake on this route, if there is one, and what lies dead in it. */
+  private lake: Lake | null = null;
+  /**
+   * Stretches of route the tidal channels may not cross, world px: both
+   * airfields with room to undershoot and run off the end, every town, every
+   * drop camp. The marsh used to run its channels straight through all of
+   * them — three quarters of the Saltmarsh Docks strip was "water", so a
+   * firm landing there went down as a ditching.
+   */
+  private dryLand: Array<[number, number]> = [];
+  private lakeJunk: Junk[] = [];
+  /** Where the sun is on screen, for its glitter on still water; null when down. */
+  private sunX: number | null = null;
   private routeEndPx = 1;
   private prevWeather: WeatherCondition = 'clear';
   private curWeather: WeatherCondition = 'clear';
@@ -306,6 +324,9 @@ export class ParallaxWorld {
   private t = 0;
   /** Along-track wind, m/s (+ = tailwind) — leans the smoke over. */
   private windX = 0;
+  /** How far the cloud shadows have drifted, world px, and how strong they are. */
+  private cloudDrift = 0;
+  private shadowK = 0;
   private readonly cloudOffsets = [0, 200, 450, 700, 900];
   private readonly skids: number[] = []; // world-px of touchdown tire marks
   /** Scratch buffers for ridge sampling — reused so no per-frame allocation. */
@@ -374,6 +395,7 @@ export class ParallaxWorld {
     // Near-field strip and vignette sit ABOVE the aircraft; they occupy the
     // bottom edge only, so they frame the shot without hiding the plane.
     this.foreGfx = scene.add.graphics().setDepth(6);
+    if (painted && ensureForeTexture(scene)) this.nearField = new NearField(scene, 6);
     this.vignetteGfx = scene.add.graphics().setDepth(7);
     this.drawVignette();
   }
@@ -392,7 +414,21 @@ export class ParallaxWorld {
     const [spanA, spanB] = routeSpanPx(routeKm, originRunwayM, destRunwayM);
     // The country each point is in, crossing over on the same S-curve as the land
     const from = this.biomeFrom, to = this.biomeTo, end = this.routeEndPx;
-    this.hazards.generate(spanA, spanB, seed, x => dominantBiome(from, to, x / end));
+    // A lake first, if this country keeps one: nothing gets built on it
+    this.lake = lakeFor([spanA, spanB], seed, from, to);
+    this.lakeJunk = this.lake ? layoutJunk(this.lake) : [];
+    this.hazards.generate(spanA, spanB, seed, x => dominantBiome(from, to, x / end), this.lake);
+    // Firm ground where it matters, before anything asks where the water is
+    {
+      const M = WORLD_PX_PER_M, RUN_OFF = 600 * M;
+      const [oa, ob] = originStripPx(originRunwayM), [da, db] = destStripPx(routeKm, destRunwayM);
+      this.dryLand = [
+        [oa - RUN_OFF, ob + RUN_OFF],
+        [da - RUN_OFF, db + RUN_OFF],
+        ...this.hazards.towns.map((t): [number, number] => [t.x0 - 60 * M, t.x1 + 60 * M]),
+        ...this.hazards.campAnchors.map((c): [number, number] => [c - 120 * M, c + 120 * M]),
+      ];
+    }
     // The layout needs to know which positions are afloat, so a stretch over
     // the channels comes out as gun barges rather than sandbag nests.
     this.raiders.layout(this.hazards.zones, seed, x => this.waterAt(x) > 0.25, null, this.hazards.zoneWeapons, threat);
@@ -415,6 +451,10 @@ export class ParallaxWorld {
     const seed = 4242;
     this.routeSeed = seed;
     this.routeEndPx = Math.max(1, routeKm * 1000 * WORLD_PX_PER_M);
+    // Lessons fly over dry land: one new thing at a time
+    this.lake = null;
+    this.lakeJunk = [];
+    this.dryLand = [];
     const home = this.biomeFrom;
     const marks = this.hazards.generateTraining(routeKm, townName, () => home, features);
     this.raiders.layout(this.hazards.zones, seed, () => false, ['nest', 'technical']);
@@ -460,6 +500,21 @@ export class ParallaxWorld {
     if (this.skids.length > 24) this.skids.shift();
   }
 
+  /**
+   * 0 … 1: how deep in a cloud's shadow a point on the land is.
+   *
+   * A smooth field of soft-edged patches, a few hundred metres across, sliding
+   * with the wind. Sampled per vertex by whatever surface wants shading, so a
+   * shadow lies ON the hill or the plain — following its perspective and its
+   * parallax — rather than being a dark shape laid over the picture.
+   */
+  private cloudShadow(wx: number, seed: number): number {
+    const u = (wx + this.cloudDrift) * 0.0031 + seed;
+    const v = Math.sin(u) * 0.6 + Math.sin(u * 2.17 + 1.3) * 0.3 + Math.sin(u * 4.9 + seed * 3.1) * 0.1;
+    const e = (v - 0.22) / 0.38;
+    return e <= 0 ? 0 : e >= 1 ? 1 : e * e * (3 - 2 * e);
+  }
+
   /** Screen y for a given altitude (two-band camera). */
   altitudeToScreenY(altitude: number): number {
     const pxPerM = (this.groundY - PLANE_MIN_Y) / ALT_BAND;
@@ -499,6 +554,20 @@ export class ParallaxWorld {
     const hMult = Phaser.Math.Linear(1, 0.6, Phaser.Math.Clamp((f.altitude - ALT_BAND) / 600, 0, 1));
 
     this.windX = f.windX;
+    /*
+     * Cloud shadows: they drift with the wind, and they only exist in direct
+     * sun — under an overcast, in fog or inside a storm the light is diffuse
+     * and there is nothing to throw one.
+     */
+    this.cloudDrift += dt * (26 + f.windX * 6);
+    {
+      const sunny: Record<WeatherCondition, number> = {
+        clear: 1, cloudy: 0.8, strong_winds: 0.9, dust_storm: 0.2, thunderstorm: 0.15, fog: 0, blizzard: 0.1,
+      };
+      const want = this.dl * sunny[this.curWeather] * Phaser.Math.Clamp(f.visibility * 1.4, 0, 1);
+      // A flight starts in whatever light it starts in; after that it changes slowly
+      this.shadowK = this.t <= dt * 1.5 ? want : this.shadowK + (want - this.shadowK) * Math.min(1, dt * 0.5);
+    }
     this.drawSky(f);
     this.drawFar(f.scrollX, sink * 0.30, hMult);
     this.drawMountains(f.scrollX, sink * 0.55, hMult);
@@ -676,6 +745,7 @@ export class ParallaxWorld {
     this.smokePool?.destroy();
     this.patchPool?.destroy();
     this.hazardPuffs?.destroy();
+    this.nearField?.destroy();
     this.sunGlow?.destroy();
     this.moonGlow?.destroy();
   }
@@ -691,9 +761,25 @@ export class ParallaxWorld {
     const g = this.foreGfx;
     g.clear();
     const bandTop = this.groundY + sink + 34;
-    if (bandTop > this.height) return;
-
     const scroll = scrollX * 1.9;
+    if (this.nearField) {
+      // Always called, so the sprites hide themselves when the strip is gone
+      this.nearField.draw(scroll, bandTop, this.width, this.height,
+        lerpColor(this.pal.ground, 0x000000, 0.6), speedFrac);
+      if (bandTop > this.height) return;
+      /*
+       * A soft dark floor for them to stand in, fading up from the bottom of
+       * the frame. The old lip was a jagged polyline — an edge, where there
+       * should be the blur of ground too close to focus on.
+       */
+      const lipTop = this.height - 54;
+      const k = lerpColor(this.pal.ground, 0x000000, 0.8);
+      g.fillGradientStyle(k, k, k, k, 0, 0, 0.82, 0.82);
+      g.fillRect(0, lipTop, this.width, this.height - lipTop + 2);
+      this.drawSpeedStreaks(g, speedFrac);
+      return;
+    }
+    if (bandTop > this.height) return;
     const spacing = 52;
     const first = Math.floor((scroll - 120) / spacing);
     for (let i = first; i < first + Math.ceil(this.width / spacing) + 3; i++) {
@@ -737,16 +823,19 @@ export class ParallaxWorld {
       g.fillPath();
     }
 
-    // Motion streaks along the very bottom once genuinely quick
-    if (speedFrac > 0.35) {
-      const a = (speedFrac - 0.35) / 0.65;
-      for (let i = 0; i < 7; i++) {
-        const y = this.height - 6 - propRand(i + 71) * 46;
-        const phase = ((this.t * (900 + i * 120) + i * 337) % (this.width + 400)) - 200;
-        const len = 60 + a * 190;
-        g.lineStyle(1.6, lerpColor(this.pal.ground, 0xffffff, 0.35), 0.10 + a * 0.22);
-        g.lineBetween(this.width - phase, y, this.width - phase + len, y);
-      }
+    this.drawSpeedStreaks(g, speedFrac);
+  }
+
+  /** Motion streaks along the very bottom once genuinely quick. */
+  private drawSpeedStreaks(g: Phaser.GameObjects.Graphics, speedFrac: number): void {
+    if (speedFrac <= 0.35) return;
+    const a = (speedFrac - 0.35) / 0.65;
+    for (let i = 0; i < 7; i++) {
+      const y = this.height - 6 - propRand(i + 71) * 46;
+      const phase = ((this.t * (900 + i * 120) + i * 337) % (this.width + 400)) - 200;
+      const len = 60 + a * 190;
+      g.lineStyle(1.6, lerpColor(this.pal.ground, 0xffffff, 0.35), 0.10 + a * 0.22);
+      g.lineBetween(this.width - phase, y, this.width - phase + len, y);
     }
   }
 
@@ -902,9 +991,12 @@ export class ParallaxWorld {
 
     // Sun arcs across the sky through the day, dimmed by bad weather
     const vis = Phaser.Math.Clamp(f.visibility, 0.12, 1);
+    this.sunX = null;
     if (dl > 0.04) {
       const sunT = Phaser.Math.Clamp((f.minutesOfDay - 300) / 900, 0, 1);
       const sx = this.width * (0.08 + 0.84 * sunT);
+      // Still water shows its glitter only when there is a clear sun to make it
+      if (vis > 0.6) this.sunX = sx;
       const sy = this.groundY - Math.sin(sunT * Math.PI) * (this.groundY - 110) - 16;
       const sa = dl * vis;
       // Low sun is redder
@@ -996,6 +1088,8 @@ export class ParallaxWorld {
       snow?: number; snowMin?: number; trees?: number;
       /** Surface marks — scrub, rock, scree — scaled by how near the layer is, 0 = none. */
       texture?: number;
+      /** How dark a passing cloud's shadow makes this layer, 0 = none. */
+      shadows?: number;
     } = {},
   ): void {
     const step = 12;
@@ -1085,6 +1179,9 @@ export class ParallaxWorld {
        */
       const tops = this.rsTop, mids = this.rsMid, ups = this.rsUp;
       tops.length = 0; mids.length = 0; ups.length = 0;
+      // Cloud shadow: a cool dark the lit colours sink toward, per vertex
+      const shK = (opts.shadows ?? 0) * this.shadowK;
+      const shadeTint = lerpColor(dark, 0x141a26, 0.35);
       for (let i = 0; i < n; i++) {
         const a = hs[Math.max(0, i - 1)], b = hs[Math.min(n - 1, i + 1)];
         const slope = (b - a) / (2 * step);
@@ -1094,9 +1191,20 @@ export class ParallaxWorld {
         const kb = Phaser.Math.Clamp(0.45 + broad * 0.9, 0, 1);
         const wxv = (i0 + i) * step;
         const veg = 0.5 + 0.5 * Math.sin(wxv * 0.0042 + seed) * Math.sin(wxv * 0.0013 + seed * 1.7);
-        tops.push(lerpColor(lerpColor(dark, lit, k), vegTint, veg * 0.18 * texK));
-        ups.push(lerpColor(lerpColor(lerpColor(dark, lit, kb), color, 0.35), vegTint, veg * 0.26 * texK));
-        mids.push(lerpColor(lerpColor(color, dark, 0.35 + (1 - kb) * 0.25), vegTint, veg * 0.38 * texK));
+        let top = lerpColor(lerpColor(dark, lit, k), vegTint, veg * 0.18 * texK);
+        let up = lerpColor(lerpColor(lerpColor(dark, lit, kb), color, 0.35), vegTint, veg * 0.26 * texK);
+        let mid = lerpColor(lerpColor(color, dark, 0.35 + (1 - kb) * 0.25), vegTint, veg * 0.38 * texK);
+        if (shK > 0.01) {
+          const sh = this.cloudShadow(wxv * 1.6, seed) * shK;
+          if (sh > 0.005) {
+            top = lerpColor(top, shadeTint, sh);
+            up = lerpColor(up, shadeTint, sh * 0.9);
+            mid = lerpColor(mid, shadeTint, sh * 0.75);
+          }
+        }
+        tops.push(top);
+        ups.push(up);
+        mids.push(mid);
       }
       const yb = baseY + 60;
       for (let i = 0; i + 1 < n; i++) {
@@ -1537,6 +1645,7 @@ export class ParallaxWorld {
         snow: this.pal.snow,
         snowMin: (this.shape.caps > 0.4 ? 150 : 1e9) * hMult * amp,
         texture: 0.55,
+        shadows: 0.28,
       },
     );
 
@@ -1829,6 +1938,7 @@ export class ParallaxWorld {
         highlight: this.pal.hillLight,
         trees: lerpColor(this.pal.hill, 0x000000, 0.5),
         texture: 1,
+        shadows: 0.42,
       },
     );
     this.hazeBand(g, baseY - 40, baseY + 2, 0.12);
@@ -1936,12 +2046,25 @@ export class ParallaxWorld {
     return d <= 0 ? 0 : Math.min(1, d / 0.30);
   }
 
+  /** The colour of the water on the action line here — what a wreck goes into. */
+  waterColourAt(worldX: number): number {
+    if (this.lake && lakeField(this.lake, worldX) > 0) return this.lakeColours().line;
+    return lerpColor(lerpColor(this.pal.skyBot, 0x2e7d92, 0.62), 0x0a1622, 0.18);
+  }
+
   /**
    * The water field itself, signed: above zero is water (its depth), below is
    * dry land. Kept separate from `waterAt` so the drawing can find exactly
    * where a bank is by interpolating the zero crossing between two samples.
    */
   private waterField(worldX: number): number {
+    // A lake on the route is water too — for the guns, the crates and a
+    // touchdown alike
+    return Math.max(this.channelField(worldX), lakeField(this.lake, worldX));
+  }
+
+  /** The tidal channels alone — what the channel renderer draws. */
+  private channelField(worldX: number): number {
     /*
      * Coverage comes from where this POINT is on the route, not from the
      * camera's current blend. Water is a property of the place — the raider
@@ -1974,8 +2097,22 @@ export class ParallaxWorld {
            + 0.15 * Math.sin(worldX * 0.0087 + k * 2.7);
     // Water wherever the field dips below the biome's coverage. The distance
     // below the threshold becomes depth, which is what shades the shoreline.
-    return (cover * 1.15) - n;
+    const raw = (cover * 1.15) - n;
+    if (raw <= 0 || this.dryLand.length === 0) return raw;
+    // Short of firm ground the channel shoals and comes ashore: a real bank
+    // about ten metres off it, not a cut-off wall of water
+    let gap = Infinity;
+    for (const [a, b] of this.dryLand) {
+      const e = worldX < a ? a - worldX : worldX > b ? worldX - b : 0;
+      if (e < gap) gap = e;
+      if (gap === 0) break;
+    }
+    const FEATHER = 80 * WORLD_PX_PER_M;
+    return gap >= FEATHER ? raw : Math.min(raw, -0.05 + 0.35 * (gap / FEATHER));
   }
+
+  /** The lake on this route, if any. */
+  get currentLake(): Lake | null { return this.lake; }
 
   /**
    * Tidal channels across the plain.
@@ -2002,10 +2139,10 @@ export class ParallaxWorld {
     const x0 = Math.floor((wxAt(-40, S_FAR) - MEANDER) / STEP) * STEP;
     const x1 = wxAt(W + 40, S_FAR) + MEANDER;
     const runs: Array<[number, number]> = [];
-    let px = x0, pf = this.waterField(x0);
+    let px = x0, pf = this.channelField(x0);
     let start = pf > 0 ? x0 : NaN;
     for (let x = x0 + STEP; x <= x1 + STEP; x += STEP) {
-      const f = this.waterField(x);
+      const f = this.channelField(x);
       if ((pf > 0) !== (f > 0)) {
         const cross = px + (x - px) * (pf / (pf - f));
         if (f > 0) start = cross;
@@ -2093,6 +2230,201 @@ export class ParallaxWorld {
     }
   }
 
+  /** The lake's colours: far (sky in it), at the line, and deep near the camera. */
+  private lakeColours(): { far: number; line: number; near: number; mud: number; ring: number; foam: number } {
+    const l = this.lake!;
+    const dlc = (c: number): number => applyDaylight(c, this.dl);
+    if (l.kind === 'tailings') {
+      // Rust-orange and opaque: nothing in it is water you would touch
+      return {
+        far: lerpColor(lerpColor(dlc(0x9a6a30), this.pal.skyBot, 0.45), this.pal.skyBot, 0.2),
+        line: lerpColor(dlc(0x6a3e18), this.pal.skyBot, 0.18),
+        near: lerpColor(dlc(0x2e1a0c), this.pal.skyTop, 0.08),
+        mud: lerpColor(this.pal.ground, dlc(0x2a1a0e), 0.55),
+        ring: lerpColor(this.pal.groundTop, dlc(0xc89a40), 0.55),
+        foam: dlc(0xd8c88a),
+      };
+    }
+    // Grey-green and still: the colour of water nothing lives in
+    return {
+      far: lerpColor(lerpColor(dlc(0x56645a), this.pal.skyBot, 0.5), this.pal.skyBot, 0.2),
+      line: lerpColor(dlc(0x2e3a30), this.pal.skyBot, 0.24),
+      near: lerpColor(dlc(0x141b16), this.pal.skyTop, 0.1),
+      mud: lerpColor(this.pal.ground, dlc(0x1a1812), 0.5),
+      ring: lerpColor(this.pal.groundTop, dlc(0xd8d2be), 0.5),
+      foam: dlc(0xc8ccc0),
+    };
+  }
+
+  /**
+   * The lake itself, on the ground plane.
+   *
+   * Drawn in rings from the outside in: wet mud, then the pale band of the
+   * old waterline — the bathtub ring a shrinking reservoir leaves, which is
+   * the single most telling thing about it — then the water, graded from the
+   * sky it reflects far off to the murk under the camera. Then dead foam along
+   * its edge, a few long glassy streaks where the light lies on the surface,
+   * and the sun's glitter when the sun is over it.
+   */
+  private drawLakeWater(
+    g: Phaser.GameObjects.Graphics, gy: number,
+    sAt: (y: number) => number, xAt: (wx: number, sc: number) => number, yOfD: (d: number) => number,
+  ): void {
+    const l = this.lake!;
+    const W = this.width, H = this.height;
+    const C = this.lakeColours();
+    // Stations down the lake's depth, each with its two shores on screen
+    const N = 26;
+    const Y: number[] = [], Lx: number[] = [], Rx: number[] = [], D: number[] = [], S: number[] = [];
+    for (let k = 0; k <= N; k++) {
+      const d = LAKE_D_FAR + 0.004 + (LAKE_D_NEAR - LAKE_D_FAR - 0.008) * (k / N);
+      const sh = shoresAt(l, d);
+      if (!sh) continue;
+      const y = yOfD(d);
+      const sc = sAt(Math.min(y, H + 40));
+      Y.push(y); D.push(d); S.push(sc);
+      Lx.push(xAt(sh[0], sc)); Rx.push(xAt(sh[1], sc));
+      if (y > H + 30) break;
+    }
+    const n = Y.length;
+    if (n < 2) return;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < n; i++) { lo = Math.min(lo, Lx[i]); hi = Math.max(hi, Rx[i]); }
+    if (hi < -60 || lo > W + 60) return;
+
+    const waterAtD = (d: number): number => (d < 0
+      ? lerpColor(C.line, C.far, Math.min(1, -d / 0.72))
+      : lerpColor(C.line, C.near, Math.min(1, d)));
+    /** One ring of the lake, its shores pushed out by `pad(i)` screen px. */
+    const band = (pad: (i: number) => number, col: (i: number) => number, alpha: number): void => {
+      for (let i = 0; i + 1 < n; i++) {
+        const l0 = Lx[i] - pad(i), r0 = Rx[i] + pad(i), l1 = Lx[i + 1] - pad(i + 1), r1 = Rx[i + 1] + pad(i + 1);
+        if (Math.max(r0, r1) < -10 || Math.min(l0, l1) > W + 10) continue;
+        const c0 = col(i), c1 = col(i + 1);
+        if (this.webgl) {
+          g.fillGradientStyle(c0, c0, c1, c1, alpha, alpha, alpha, alpha);
+          g.fillTriangle(l0, Y[i], r0, Y[i], l1, Y[i + 1]);
+          g.fillGradientStyle(c0, c1, c1, c1, alpha, alpha, alpha, alpha);
+          g.fillTriangle(r0, Y[i], r1, Y[i + 1], l1, Y[i + 1]);
+        } else {
+          g.fillStyle(c0, alpha);
+          g.fillPoints([{ x: l0, y: Y[i] }, { x: r0, y: Y[i] }, { x: r1, y: Y[i + 1] }, { x: l1, y: Y[i + 1] }], true);
+        }
+      }
+    };
+    const width = (i: number): number => Rx[i] - Lx[i];
+    // Wet mud, the bathtub ring, then the water
+    band(i => width(i) * 0.075 + 7 * S[i], () => C.mud, 0.9);
+    band(i => width(i) * 0.03 + 3 * S[i], i => lerpColor(C.ring, this.pal.skyBot, Math.max(0, -D[i]) * 0.5), 0.85);
+    band(() => 0, i => waterAtD(D[i]), 1);
+
+    // Dead foam lying along the water's edge
+    g.lineStyle(1.1, C.foam, 0.32 * (0.4 + this.dl * 0.6));
+    for (const side of [Lx, Rx]) {
+      g.beginPath();
+      for (let i = 0; i < n; i++) {
+        const inset = (side === Lx ? 1 : -1) * (1.5 + S[i] * 1.2);
+        if (i === 0) g.moveTo(side[i] + inset, Y[i]); else g.lineTo(side[i] + inset, Y[i]);
+      }
+      g.strokePath();
+    }
+
+    /*
+     * The surface. Still water does not glitter all over; it lies flat and
+     * shows long thin streaks where the sky catches it, drifting very slowly.
+     */
+    const streak = lerpColor(lerpColor(this.pal.skyBot, 0xffffff, 0.35), C.far, 0.3);
+    for (let k = 0; k < 9; k++) {
+      const v = propRand(l.seed * 3.1 + k * 1.7);
+      const i = Math.min(n - 2, Math.floor(v * (n - 1)));
+      const y = Y[i] + (Y[i + 1] - Y[i]) * propRand(k + 5);
+      if (y > H) continue;
+      const w0 = Rx[i] - Lx[i];
+      const life = (this.t * 0.04 + v) % 1;
+      const cx = Lx[i] + w0 * ((propRand(k * 2.3 + 1) + life * 0.2) % 1);
+      const len = w0 * (0.06 + propRand(k + 9) * 0.1);
+      g.lineStyle(y > gy ? 1.3 : 0.9, streak, Math.sin(life * Math.PI) * (0.12 + this.dl * 0.16));
+      g.lineBetween(Math.max(Lx[i] + 2, cx - len / 2), y, Math.min(Rx[i] - 2, cx + len / 2), y);
+    }
+    // The sun's glitter path, from the far shore to under the camera
+    if (this.sunX !== null && this.dl > 0.15) {
+      const glint = lerpColor(this.pal.glow, 0xffffff, 0.55);
+      for (let i = 0; i < n - 1; i++) {
+        if (Y[i] > H) break;
+        const spread = 6 + (Y[i] - Y[0]) * 0.35;
+        for (let k = 0; k < 2; k++) {
+          const x = this.sunX + (propRand(i * 7 + k + Math.floor(this.t * 6)) - 0.5) * spread;
+          if (x < Lx[i] + 2 || x > Rx[i] - 2) continue;
+          const a = (0.25 + propRand(i * 3 + k + Math.floor(this.t * 9)) * 0.45) * this.dl;
+          g.lineStyle(1.2, glint, a);
+          g.lineBetween(x - 2 - spread * 0.05, Y[i], x + 2 + spread * 0.05, Y[i]);
+        }
+      }
+    }
+  }
+
+  /**
+   * What lies dead in the lake, on its own depth on the water — and on the
+   * surface, an oily sheen (or the pit's scum), and a mist that never lifts.
+   */
+  private drawLakeLife(
+    g: Phaser.GameObjects.Graphics,
+    sAt: (y: number) => number, xAt: (wx: number, sc: number) => number, yOfD: (d: number) => number,
+  ): void {
+    const l = this.lake!;
+    const C = this.lakeColours();
+    const W = this.width, H = this.height;
+    // Sheen and mist first: they lie on the water, under what stands in it
+    const pool = this.patchPool;
+    if (pool) {
+      const sheen = l.kind === 'tailings' ? [0xd8c070, 0xb88a30, 0xe8dca0] : [0x8a5aa8, 0x3aa0a0, 0xb08a3a];
+      for (let i = 0; i < 5; i++) {
+        const d = -0.55 + propRand(l.seed + i * 3.3) * 1.45;
+        const sh = shoresAt(l, d);
+        if (!sh) continue;
+        const y = yOfD(d);
+        if (y > H + 20) continue;
+        const sc = sAt(Math.min(y, H));
+        const wx = sh[0] + (sh[1] - sh[0]) * (0.18 + propRand(l.seed + i * 5.1) * 0.64) + Math.sin(this.t * 0.04 + i) * 60;
+        const x = xAt(wx, sc);
+        if (x < -300 || x > W + 300) continue;
+        for (let k = 0; k < 3; k++) {
+          const img = pool.next();
+          if (!img) break;
+          img.setPosition(x + (k - 1) * 9 * sc, y + (k - 1) * 0.8 * sc)
+            .setDisplaySize(210 * sc, 14 * sc)
+            .setTint(sheen[k]).setAlpha(0.15 * (0.4 + this.dl * 0.6));
+        }
+      }
+      // A low mist on the water, thicker in the cold of the night and dawn
+      const mistA = 0.07 + (1 - this.dl) * 0.09;
+      const mistCol = lerpColor(this.pal.skyBot, 0xd8dcd8, 0.35);
+      for (let i = 0; i < 6; i++) {
+        const d = -0.5 + (i / 5) * 1.3;
+        const sh = shoresAt(l, d);
+        if (!sh) continue;
+        const y = yOfD(d) - 4;
+        if (y > H) continue;
+        const sc = sAt(Math.min(y, H));
+        const wx = sh[0] + (sh[1] - sh[0]) * ((propRand(l.seed + i * 7.7) + this.t * 0.004 * (1 + i % 3)) % 1);
+        const img = pool.next();
+        if (!img) break;
+        img.setPosition(xAt(wx, sc), y).setDisplaySize(520 * sc, 34 * sc).setTint(mistCol).setAlpha(mistA);
+      }
+    }
+    // The dead furniture, back to front
+    const st: JunkStyle = { daylight: this.dl, water: C.line, haze: this.pal.skyBot, t: this.t };
+    for (const j of this.lakeJunk) {
+      const y = yOfD(j.d);
+      if (y > H + 40) continue;
+      const sc = sAt(Math.min(y, H));
+      const x = xAt(j.wx, sc);
+      if (x < -140 || x > W + 140) continue;
+      st.water = j.d < 0 ? lerpColor(C.line, C.far, Math.min(1, -j.d / 0.72)) : lerpColor(C.line, C.near, Math.min(1, j.d));
+      drawJunk(g, j, x, y, sc, j.d < 0 ? Math.min(1, -j.d) : 0, st);
+    }
+  }
+
   private drawGround(scrollX: number, sink: number, f: WorldFrame): void {
     const g = this.groundGfx;
     g.clear();
@@ -2142,9 +2474,59 @@ export class ParallaxWorld {
         base.fillRect(0, y0, W, y1 - y0 + 1);
       }
     };
-    grad(by, gy, farSoil, lineSoil);
-    grad(gy, gy + nearDepth * 0.35, lineSoil, midSoil);
-    grad(gy + nearDepth * 0.35, H + 2, midSoil, deep);
+    if (this.webgl) {
+      /*
+       * The soil as a mesh of columns rather than three flat bands, so it can
+       * carry cloud shadows: every vertex reads the shadow at the world point
+       * it shows, through the plain's own perspective — the patches shrink and
+       * crowd toward the hills and sweep past huge under the camera, at the
+       * speed their distance says.
+       */
+      const ys = [by, by + BACK_BAND * 0.5, gy, gy + nearDepth * 0.35, H + 2];
+      const cs = [farSoil, lerpColor(farSoil, lineSoil, 0.5), lineSoil, midSoil, deep];
+      const shadeTint = lerpColor(deep, 0x101622, 0.4);
+      const COL = 32;
+      const nx = Math.ceil(W / COL) + 2;
+      const prev: number[] = [], cur: number[] = [];
+      for (let r = 0; r < ys.length; r++) {
+        cur.length = 0;
+        const sc = sAt(Math.min(ys[r], H));
+        const sk = this.shadowK * (r === 0 ? 0.24 : 0.42);
+        for (let j = 0; j <= nx; j++) {
+          const x = (j - 1) * COL;
+          const sh = sk > 0.01 ? this.cloudShadow(wxAt(x, sc), 7.3) * sk : 0;
+          cur.push(sh > 0.005 ? lerpColor(cs[r], shadeTint, sh) : cs[r]);
+        }
+        if (r > 0) {
+          const y0 = ys[r - 1], y1 = ys[r];
+          for (let j = 0; j < nx; j++) {
+            const x0 = (j - 1) * COL, x1 = j * COL;
+            base.fillGradientStyle(prev[j], prev[j + 1], cur[j], cur[j + 1], 1, 1, 1, 1);
+            base.fillTriangle(x0, y0, x1 + 0.5, y0, x0, y1 + 0.5);
+            base.fillGradientStyle(prev[j + 1], cur[j + 1], cur[j], cur[j], 1, 1, 1, 1);
+            base.fillTriangle(x1 + 0.5, y0, x1 + 0.5, y1 + 0.5, x0, y1 + 0.5);
+          }
+        }
+        prev.length = 0;
+        prev.push(...cur);
+      }
+    } else {
+      grad(by, gy, farSoil, lineSoil);
+      grad(gy, gy + nearDepth * 0.35, lineSoil, midSoil);
+      grad(gy + nearDepth * 0.35, H + 2, midSoil, deep);
+    }
+
+    // ── A lake, if this country keeps one ────────────────────────────────
+    // depth (−1 far … +1 near) to screen y, for everything on the water
+    const yOfD = (d: number): number => (d < 0 ? gy + d * BACK_BAND : gy + d * nearDepth);
+    const dOfY = (y: number): number => (y < gy ? (y - gy) / BACK_BAND : (y - gy) / nearDepth);
+    if (this.lake) this.drawLakeWater(base, gy, sAt, xAt, yOfD);
+    /** True where a point on the plain is under the lake (or on its shore). */
+    const inLake = (wx: number, y: number, margin = 0): boolean => {
+      if (!this.lake) return false;
+      const sh = shoresAt(this.lake, dOfY(y));
+      return !!sh && wx > sh[0] - margin && wx < sh[1] + margin;
+    };
 
     // ── Water, receding: channels cross the plain into the distance ──────
     if (BIOMES[this.biomeFrom].shape.water > 0.02 || BIOMES[this.biomeTo].shape.water > 0.02) {
@@ -2162,6 +2544,8 @@ export class ParallaxWorld {
         if (propRand(k * 3.1 + 7) > 0.42) continue;
         const wx = k * SP + propRand(k + 2) * SP * 0.6;
         if ((wx > oA - 300 && wx < oB + 300) || (wx > dA - 300 && wx < dB + 300)) continue;
+        // A track does not run across a lake (the drowned road's poles do)
+        if (inLake(wx, gy, 900) || inLake(wx, by + 4, 900)) continue;
         const hw = 10 + propRand(k + 5) * 8;
         const lean = (propRand(k + 9) - 0.5) * 260;      // tracks do not run straight at you
         const pts: Array<[number, number, number]> = [[by, S_FAR, lean * -0.6], [gy, 1, 0], [H, S_NEAR, lean]];
@@ -2226,6 +2610,7 @@ export class ParallaxWorld {
           const x = xAt(wx, sc);
           const w = (150 + propRand(k + r * 7) * 240) * sc;
           if (x + w < -20 || x - w > W + 20) continue;
+          if (inLake(wx, y, 120 / sc)) continue;
           const which = propRand(k * 2.3 + r);
           const col = which < 0.4 ? pale : which < 0.75 ? dark : tuft;
           const a = 0.16 + propRand(k + r) * 0.12;
@@ -2251,6 +2636,7 @@ export class ParallaxWorld {
           const wx = k * SP + propRand(k + r * 5) * SP;
           const x = xAt(wx, sc);
           const yy = y + (propRand(k * 1.3 + r) - 0.5) * gap;
+          if (inLake(wx, yy, 30)) continue;
           const z = sc * (0.7 + propRand(k + 11 * r) * 0.6);
           const kind = Math.floor(propRand(k * 7.7 + r * 3) * 5);
           if (z > 1.1) {
@@ -2286,6 +2672,9 @@ export class ParallaxWorld {
       }
     }
 
+    // What lies dead in the lake, and the sheen and the mist on it
+    if (this.lake) this.drawLakeLife(g, sAt, xAt, yOfD);
+
     // A soft seam of haze where the plain meets the hills
     if (this.webgl) {
       const c = this.pal.skyBot;
@@ -2317,6 +2706,7 @@ export class ParallaxWorld {
         const wx = c * cellW + propRand(c + 17) * 500;
         if (wx > zoneA[0] && wx < zoneA[1]) continue;
         if (wx > zoneB[0] && wx < zoneB[1]) continue;
+        if (inLake(wx, gy, 200)) continue;
         const sx = wx - scrollX;
         if (sx < -60 || sx > this.width + 60) continue;
         const face: 1 | -1 = propRand(c + 91) > 0.5 ? 1 : -1;

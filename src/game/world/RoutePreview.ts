@@ -1,5 +1,7 @@
 import { Hazards } from './Hazards';
 import { SupplyDrops } from './SupplyDrops';
+import { lakeFor } from './Lakes';
+import { biomeFor } from './Biomes';
 
 /**
  * What is waiting along a route, known before you fly it.
@@ -93,14 +95,17 @@ const cache = new Map<string, DropPreview>();
 
 export function previewDrops(
   contractId: string, routeKm: number, originRunwayM = 600, destRunwayM = 600,
+  /** The two settlements, so a lake on the route is laid out as the flight will. */
+  originId?: string, destId?: string,
 ): DropPreview {
-  const key = `${contractId}|${routeKm.toFixed(2)}|${originRunwayM}|${destRunwayM}`;
+  const key = `${contractId}|${routeKm.toFixed(2)}|${originRunwayM}|${destRunwayM}|${originId ?? ''}|${destId ?? ''}`;
   const hit = cache.get(key);
   if (hit) return hit;
   const seed = routeSeed(contractId);
   const hz = new Hazards();
   const [a, b] = routeSpanPx(routeKm, originRunwayM, destRunwayM);
-  hz.generate(a, b, seed);
+  const lake = originId && destId ? lakeFor([a, b], seed, biomeFor(originId), biomeFor(destId)) : null;
+  hz.generate(a, b, seed, undefined, lake);
   const drops = new SupplyDrops();
   drops.layout(routeKm * 1000 * M, seed, 1, {
     towns: hz.towns,

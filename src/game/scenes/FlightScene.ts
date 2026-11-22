@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { AircraftController, type FlightInput } from '../entities/aircraft/AircraftController';
 import { AircraftSprite } from '../entities/aircraft/AircraftSprite';
 import { specFor } from '../entities/aircraft/render/AircraftVisualSpec';
-import { CrashSequence } from '../entities/aircraft/CrashSequence';
+import { CrashSequence, type CrashOptions } from '../entities/aircraft/CrashSequence';
 import { WeatherSystem } from '../entities/weather/WeatherSystem';
 import { WeatherHazards } from '../entities/weather/WeatherHazards';
 import { ParallaxWorld, WORLD_PX_PER_M } from '../world/ParallaxWorld';
@@ -118,6 +118,10 @@ export class FlightScene extends Phaser.Scene {
   private rig!: CameraRig;
   private crash!: CrashSequence;
   private crashing = false;
+  /** The flight ended in the water. */
+  private ditched = false;
+  /** Seconds since the panel was last told the falling wreck's height. */
+  private crashHudT = 0;
   private engineRunning = true;
 
   // ── In-canvas HUD (approach guidance only — gauges live in React) ────────
@@ -347,6 +351,7 @@ export class FlightScene extends Phaser.Scene {
     this.coachThreat         = null;
     this.landed              = false;
     this.crashing            = false;
+    this.ditched             = false;
     this.hasBeenAirborne     = false;
     this.scrollX             = 0;
     this.planeX              = AIRCRAFT_X;
@@ -392,10 +397,15 @@ export class FlightScene extends Phaser.Scene {
     this.restartHoldFor      = 0;
     this.coolantLeft         = 1;
     this.autoFlaps           = this.lesson ? this.lesson.autoFlaps : true;
+    this.legendFade          = 1;
+    this.airborneFor         = 0;
   }
 
   /** Kept so it can be repositioned on resize and hidden on touch devices. */
   private keyHintText!: Phaser.GameObjects.Text;
+  /** The legend's fade, and how long the wheels have been off the ground. */
+  private legendFade = 1;
+  private airborneFor = 0;
 
   /**
    * Re-fit to a new design canvas without restarting — a flight in progress
@@ -1263,6 +1273,18 @@ export class FlightScene extends Phaser.Scene {
     // ── Airborne tracking ──────────────────────────────────────────────────
     if (this.state.altitude > 5) this.hasBeenAirborne = true;
 
+    // ── The key legend is for the apron ───────────────────────────────────
+    // Reference text, not an instrument: it was on screen for the whole
+    // flight, a line of key names under everything. It stays while you are on
+    // the ground and for a few seconds after lift-off, then gets out of the
+    // way — and is back the moment the wheels are down again.
+    this.airborneFor = this.state.altitude > 0.5 ? this.airborneFor + rawDt : 0;
+    {
+      const want = this.airborneFor < 7 ? 1 : 0;
+      this.legendFade += (want - this.legendFade) * Math.min(1, rawDt * (want ? 3 : 0.9));
+      this.keyHintText?.setAlpha(this.legendFade);
+    }
+
     // ── Cargo condition ────────────────────────────────────────────────────
     if (this.cargo.hasCargo) {
       this.cargo.update(sdt, turbulence);
@@ -1278,14 +1300,24 @@ export class FlightScene extends Phaser.Scene {
     // ── Touchdown: grade the exact moment the wheels meet the ground ──────
     if (this.pendingTouchdown && this.hasBeenAirborne && !this.rollout) {
       const { vs, speed } = this.pendingTouchdown;
-      const result = this.evaluateLanding(vs, speed);
-      this.aircraft.notifyTouchdown(vs);
-      SoundEngine.touchdown(vs);
-      this.world.addSkidMark(this.planeX);
+      let result = this.evaluateLanding(vs, speed);
+      /*
+       * Water is not a field. Wheels meeting a lake or a channel dig in and
+       * flip the aeroplane over its nose, whatever the sink rate: that is a
+       * ditching, and it ends the same way a crash does.
+       */
+      if (this.world.waterAt(this.planeX) > 0) {
+        this.ditched = true;
+        result = { ...result, quality: 'crash', integrityDamage: 100, cargoDamagePercent: 100 };
+      } else {
+        this.aircraft.notifyTouchdown(vs);
+        SoundEngine.touchdown(vs);
+        this.world.addSkidMark(this.planeX);
+      }
       this.cargo.applyDamage(result.cargoDamagePercent);
 
       if (result.quality === 'crash') {
-        this.cameras.main.shake(600, 0.014);
+        // The crash film shakes the camera itself, scaled to the impact
         this.finishFlight(result);
         return;
       }
@@ -1303,6 +1335,15 @@ export class FlightScene extends Phaser.Scene {
         this.controller.braking = false;
       } else {
         this.controller.braking = true;
+        // Rolled off the end of a field into the water
+        if (this.world.waterAt(this.planeX) > 0 && this.state.speed > 2) {
+          this.ditched = true;
+          this.finishFlight({
+            verticalSpeed: 0, horizontalSpeed: this.state.speed, gearDown: this.state.gearDown,
+            quality: 'crash', integrityDamage: 100, cargoDamagePercent: 100,
+          });
+          return;
+        }
         if (this.state.speed < 3) {
           this.finishFlight(this.rolloutResult!);
           return;
@@ -1485,14 +1526,41 @@ export class FlightScene extends Phaser.Scene {
    * to a stop rather than the whole scene freezing at the moment of impact.
    */
   private updateCrashSlide(dt: number): void {
-    const sdt = Math.min(dt, 0.05);
-    this.crash.update(sdt);
-    this.planeX += this.heading * this.crash.slideSpeed() * sdt * WORLD_PX_PER_M;
+    // The crash runs its own clock: a hit-stop at the impact, then slow
+    // motion easing back to real time. The world runs on the same clock, so
+    // the slow motion is the whole scene, not just the timers.
+    const rdt = Math.min(dt, 0.05);
+    const sdt = rdt * this.crash.timeScale;
+    const v = this.crash.slideSpeed();
+    const dx = this.heading * v * sdt * WORLD_PX_PER_M;
+    this.planeX += dx;
     this.scrollX = this.planeX - this.planeScreenX;
+    // Everything the crash leaves on the ground moves back with it
+    this.crash.update(rdt, dx);
+    // The key legend, the drop sight and the descent arrows have no business
+    // over a crash
+    this.legendFade = Math.max(0, this.legendFade - rdt * 3);
+    this.keyHintText?.setAlpha(this.legendFade);
+    this.world.dropGuide = null;
+    this.world.trainGuide = null;
+    this.world.dropReticle = null;
+    // The altimeter unwinds with a wreck falling out of the sky — a few times
+    // a second is plenty for the panel
+    const altNow = this.crash.altitudeM;
+    this.crashHudT += rdt;
+    if (this.state.altitude !== altNow && (this.crashHudT > 0.12 || altNow === 0)) {
+      this.crashHudT = 0;
+      // A fresh object: the panel's store ignores the same one sent twice
+      this.state = { ...this.state, altitude: altNow };
+      EventBus.emit('flight:state-update', this.state);
+    }
+    // A wreck falling out of the sky brings the camera down with it
+    const alt = this.crash.altitudeM;
     this.world.update(sdt, {
       scrollX: this.scrollX,
-      altitude: 0,
-      windX: 0,
+      altitude: alt,
+      heading: this.heading,
+      windX: this.weather.windX() * 0.4,
       routeTotalKm: this.routeKm,
       originRunwayM: this.originRunwayM,
       destRunwayM: this.destRunwayM,
@@ -1502,12 +1570,34 @@ export class FlightScene extends Phaser.Scene {
       minutesOfDay: (this.baseTimestamp + this.state.elapsedSeconds) % 1440,
       visibility: this.weather.current.visibility,
       planeScreenX: this.planeScreenX,
-      planeScreenY: this.world.altitudeToScreenY(0),
+      planeScreenY: this.world.altitudeToScreenY(alt),
       planeWorldX: this.planeX,
       speedFrac: 0,
       progress: clamp(this.state.distanceTravelled / Math.max(0.1, this.routeKm), 0, 1),
     });
-    this.fx.update(sdt, this.heading * this.crash.slideSpeed() * WORLD_PX_PER_M);
+    this.fx.update(sdt, this.heading * v * WORLD_PX_PER_M * this.crash.timeScale);
+  }
+
+  /**
+   * Everything the crash film needs, read BEFORE the flight state is zeroed
+   * for the panel: the speed it went in at, the height it ended at, and what
+   * it is coming down on. It used to be handed the speed after it had been
+   * cleared, so every crash played as the same small nudge.
+   */
+  private crashOptions(result: LandingResult): CrashOptions {
+    return {
+      speed: Math.max(result.horizontalSpeed, this.state.speed),
+      verticalSpeed: Math.abs(result.verticalSpeed),
+      altitude: Math.max(0, this.state.altitude),
+      gearUp: !this.state.gearDown,
+      dir: this.heading,
+      altToY: m => this.world.altitudeToScreenY(m),
+      surfaceAt: () => {
+        const water = this.ditched || this.world.waterAt(this.planeX) > 0;
+        return { water, color: this.world.waterColourAt(this.planeX) };
+      },
+      windX: this.weather.windX(),
+    };
   }
 
   /** True when the given world position is on either airfield's asphalt. */
@@ -1697,7 +1787,9 @@ export class FlightScene extends Phaser.Scene {
     // Each weapon has its own voice and distance dulls it, so you can hear
     // what is shooting and roughly how far off it is.
     if (fire.shots > 0 && fire.firedKind) {
-      SoundEngine.gunshot(fire.firedKind, fire.firedDist);
+      // Placed left or right by where the gun is: ahead of the nose is the
+      // way the aeroplane is pointing on screen
+      SoundEngine.gunshot(fire.firedKind, fire.firedDist, fire.firedSide * this.heading);
     }
     /*
      * How much fire is in the air, as one decaying number for the Director.
@@ -2870,13 +2962,11 @@ export class FlightScene extends Phaser.Scene {
       runner.fail('You went in');
       this.crashing = true;
       SoundEngine.stopFlightLoop();
+      const film = this.crashOptions(result);
       this.state.speed = 0;
       this.state.verticalSpeed = 0;
       this.state.throttle = 0;
-      this.crash.play(
-        { speed: 0, verticalSpeed: Math.abs(result.verticalSpeed), gearUp: !this.state.gearDown, dir: this.heading },
-        () => this.endLesson(),
-      );
+      this.crash.play(film, () => this.endLesson());
       return;
     }
     this.lessonStopped = true;
@@ -2947,13 +3037,11 @@ export class FlightScene extends Phaser.Scene {
     }
     this.crashing = true;
     SoundEngine.stopFlightLoop();
+    const film = this.crashOptions(result);
     this.state.speed = 0;
     this.state.verticalSpeed = 0;
     this.state.throttle = 0;
-    this.crash.play(
-      { speed: this.state.speed, verticalSpeed: Math.abs(result.verticalSpeed), gearUp: !this.state.gearDown, dir: this.heading },
-      debrief,
-    );
+    this.crash.play(film, debrief);
   }
 
   private finishFlight(result: LandingResult): void {
@@ -3031,6 +3119,7 @@ export class FlightScene extends Phaser.Scene {
       dropReady: false, cratesLeft: 0, dropZone: null, overshot: false, canTurn: false,
       flaps: null, stallKmh: 0, climbReserve: 1, eventCaution: null, coolantLeft: 0,
     });
+    const film = this.crashOptions(result);
     this.state.speed = 0;
     this.state.verticalSpeed = 0;
     this.state.throttle = 0;
@@ -3042,15 +3131,7 @@ export class FlightScene extends Phaser.Scene {
       message: '📻 Your locator beacon is transmitting.',
       type: 'danger',
     });
-    this.crash.play(
-      {
-        speed: this.state.speed,
-        verticalSpeed: Math.abs(result.verticalSpeed),
-        gearUp: !this.state.gearDown,
-        dir: this.heading,
-      },
-      () => fadeToScene(this, 'PostFlightScene', data),
-    );
+    this.crash.play(film, () => fadeToScene(this, 'PostFlightScene', data));
   }
 
   /** Grades the landing from the impact values captured at touchdown. */

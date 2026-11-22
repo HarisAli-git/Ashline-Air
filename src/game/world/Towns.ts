@@ -360,13 +360,19 @@ function overlaps(list: ReadonlyArray<[number, number]>, a: number, b: number): 
  * pile up, and kept well clear of both airfields — nobody wants a tower block
  * on the approach.
  */
-export function layoutSettlements(startPx: number, endPx: number, seed: number): RouteSettlements {
+export function layoutSettlements(
+  startPx: number, endPx: number, seed: number,
+  /** Ground nothing may be built on — open water, with its shore. */
+  keepClear: ReadonlyArray<[number, number]> = [],
+): RouteSettlements {
   const out: RouteSettlements = { towns: [], pylons: [], spans: [], substations: [], reserved: [] };
   const a = startPx + 2000 * M;
   const b = endPx - 2400 * M;
   if (b - a < 700 * M) return out;
   // Anything built has to stay inside these, so feeders cannot reach the runways
   const lo = startPx + 900 * M, hi = endPx - 1500 * M;
+  // The water is reserved from the start, so feeders and tie lines go round it
+  for (const k of keepClear) out.reserved.push([k[0], k[1]]);
 
   const n = Phaser.Math.Clamp(Math.round((b - a) / (8500 * M)), 1, 9);
   const slice = (b - a) / n;
@@ -375,7 +381,25 @@ export function layoutSettlements(startPx: number, endPx: number, seed: number):
     const s = seed * 53 + i * 101;
     const width = Math.min(slice * 0.42, (360 + hash(s) * 420) * M);
     const room = Math.max(0, slice - width) * 0.5;
-    const c = a + slice * (i + 0.5) + (hash(s + 1) - 0.5) * room;
+    let c = a + slice * (i + 0.5) + (hash(s + 1) - 0.5) * room;
+    /*
+     * A town does not stand in a lake. One that would is moved along its own
+     * slice to the nearer shore, and if the slice has no dry ground wide
+     * enough for it, that slice has no town.
+     */
+    const wet = (x: number): boolean => overlaps(keepClear, x - width / 2 - 80, x + width / 2 + 80);
+    if (wet(c)) {
+      const s0 = a + slice * i + width / 2 + 80, s1 = a + slice * (i + 1) - width / 2 - 80;
+      let best: number | null = null;
+      for (const [k0, k1] of keepClear) {
+        for (const cand of [k0 - width / 2 - 81, k1 + width / 2 + 81]) {
+          if (cand < s0 || cand > s1 || wet(cand)) continue;
+          if (best === null || Math.abs(cand - c) < Math.abs(best - c)) best = cand;
+        }
+      }
+      if (best === null) continue;
+      c = best;
+    }
     const name = TOWN_NAMES[(firstName + i * 7) % TOWN_NAMES.length];
     const town = buildTown(c - width / 2, c + width / 2, s, name);
     out.towns.push(town);

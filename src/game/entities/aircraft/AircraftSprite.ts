@@ -228,6 +228,9 @@ export class AircraftSprite {
   /** Texture keys, so the crash sequence can spawn matching debris. */
   get textureKeys(): AircraftTexKeys { return this.tex; }
 
+  /** The airframe as drawn — for putting something just behind it. */
+  get bodyLayer(): Phaser.GameObjects.Graphics { return this.model.gfx; }
+
   /**
    * The airframe loses the parts that visibly come off in a wreck. The pieces
    * themselves are spawned by CrashSequence in scene space so they can tumble
@@ -238,6 +241,18 @@ export class AircraftSprite {
     this.wingNearImg.setVisible(false);
     for (const p of this.props) p.root.setVisible(false);
     this.flapImg.setVisible(false);
+    // The electrics go with it: no landing light shining out of a wreck
+    if (this.coneOn) { this.lightCone.clear(); this.coneOn = false; }
+  }
+
+  /**
+   * Clip the airframe as drawn — what is below the water is not seen. Null
+   * takes the clip off.
+   */
+  setClip(mask: Phaser.Display.Masks.GeometryMask | null): void {
+    for (const g of [this.model.gfx, this.model.lamps]) {
+      if (mask) g.setMask(mask); else g.clearMask();
+    }
   }
 
   // ── Construction helpers ───────────────────────────────────────────────────
@@ -835,6 +850,13 @@ export class AircraftSprite {
 
     this.body.rotation = rot;
     this.body.y = yOff;
+  }
+
+  /** The shadow under a wreck the flight model no longer moves. */
+  placeShadow(x: number, altitudeM: number, visible = true): void {
+    const t = visible ? Math.max(0, 1 - altitudeM / 110) : 0;
+    this.shadowImg.setX(x);
+    this.shadowImg.setAlpha(t * 0.5);
   }
 
   private updateShadow(state: FlightState): void {

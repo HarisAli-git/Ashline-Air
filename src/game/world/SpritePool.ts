@@ -27,6 +27,11 @@ export class SpritePool {
     this.used = 0;
   }
 
+  /** Visit every sprite in the pool once — for set-up (depth, origin). */
+  forEach(fn: (img: Phaser.GameObjects.Image) => void): void {
+    for (const img of this.pool) fn(img);
+  }
+
   /** The next free sprite, already visible; null when the pool is spent. */
   next(): Phaser.GameObjects.Image | null {
     if (this.used >= this.pool.length) return null;
