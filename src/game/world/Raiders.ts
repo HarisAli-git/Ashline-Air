@@ -20,7 +20,7 @@ import { depthOffset, extrude, extrudeBox, type DepthOffset } from './Depth';
  * flying over a fight that was already happening before you arrived.
  */
 
-export type EmplacementKind = 'nest' | 'technical' | 'aa' | 'tower' | 'camp' | 'gunboat';
+export type EmplacementKind = 'nest' | 'technical' | 'aa' | 'tower' | 'camp' | 'gunboat' | 'raft';
 
 interface Emplacement {
   x: number;            // world px
@@ -98,6 +98,14 @@ export const WEAPONS: Record<EmplacementKind, WeaponProfile | null> = {
    * A moving platform aims worse, which is the trade for the reach.
    */
   gunboat:   { ceilingM: 250, rangePx: 2900, rounds: 2, spread: 0.042, damage: 5.5, cadence: 1.25, flak: false, label: 'GUN BARGE' },
+  /*
+   * A makeshift boat on a lake: oil drums lashed under a deck, or a rusted
+   * skiff with scrap bolted to the bow, and a couple of men with rifles and a
+   * light machine gun. Nest-class reach — it is a rocking platform with no
+   * real weapon on it — so the answer is the same as over a nest: do not
+   * cross the water on the deck.
+   */
+  raft:      { ceilingM: 95, rangePx: 1900, rounds: 2, spread: 0.036, damage: 3.2, cadence: 0.95, flak: false, label: 'BOAT CREW' },
   camp:      null,
 };
 
@@ -169,6 +177,8 @@ export interface RaiderFireReport {
   firedKind: 'small' | 'marksman' | 'heavy' | 'aa' | null;
   /** 0 = right underneath you, 1 = at the edge of that weapon's reach. */
   firedDist: number;
+  /** Where that gun is, in world terms: −1 well back down the route … +1 well ahead. */
+  firedSide: number;
   /** Integrity damage taken this frame. */
   damage: number;
   /** True if any round connected, so the camera can be kicked. */
@@ -204,6 +214,13 @@ function rnd(i: number): number {
   return x - Math.floor(x);
 }
 
+function mixC(a: number, b: number, t: number): number {
+  const u = Math.max(0, Math.min(1, t));
+  const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+  const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+  return (Math.round(ar + (br - ar) * u) << 16) | (Math.round(ag + (bg - ag) * u) << 8) | Math.round(ab + (bb - ab) * u);
+}
+
 /** Barrel pivot, in local px relative to (emplacement screen x, ground y). */
 function pivotOf(kind: EmplacementKind): { x: number; y: number; len: number } {
   switch (kind) {
@@ -212,6 +229,7 @@ function pivotOf(kind: EmplacementKind): { x: number; y: number; len: number } {
     case 'aa':        return { x: 0,  y: -15, len: 23 };
     case 'tower':     return { x: 1,  y: -37, len: 13 };
     case 'gunboat':   return { x: 2,  y: -20, len: 19 };
+    case 'raft':      return { x: 0,  y: -15, len: 14 };
     default:          return { x: 0,  y: -6,  len: 0 };
   }
 }
@@ -392,8 +410,12 @@ export class Raiders {
     for (let z = 0; z < zones.length; z++) {
       const [a, b] = zones[z];
       const span = b - a;
+      const boats = (only ?? zoneOnly[z] ?? null)?.includes('raft') ?? false;
       // Positions are sparser than they were: one every ~1100 px, 3–6 a zone.
-      const n = Phaser.Math.Clamp(Math.round(span / 850), 4, 8);
+      // A lake's boats are fewer again — a handful working the open water.
+      const n = boats
+        ? Phaser.Math.Clamp(Math.round(span / 2600), 2, 4)
+        : Phaser.Math.Clamp(Math.round(span / 850), 4, 8);
 
       // An AA battery is a real piece of ordnance, not standard kit. At most
       // ONE per zone and only in some zones — previously every middle
@@ -414,7 +436,11 @@ export class Raiders {
         const x = a + span * ((i + 0.5) / n) + (rnd(id + 3) - 0.5) * (span / n) * 0.5;
         // The camp furniture anchors each end; weapons fill the middle.
         let kind: EmplacementKind;
-        if (isWater(x)) {
+        if (boats) {
+          // The lake's crews are on the water or nowhere
+          if (!isWater(x)) continue;
+          kind = 'raft';
+        } else if (isWater(x)) {
           /*
            * Standing water. Nothing here can be dug in, so the whole position
            * is afloat: barges where the guns would be, and no camp furniture
@@ -558,6 +584,7 @@ export class Raiders {
     let damage = 0;
     let firedKind: 'small' | 'marksman' | 'heavy' | 'aa' | null = null;
     let firedDist = 1;
+    let firedSide = 0;
     let hit = false;
 
     // The aircraft's ground track, for the AA's lead. Smoothed, and clamped so
@@ -611,7 +638,11 @@ export class Raiders {
           : e.kind === 'technical' ? 'heavy'
             : e.kind === 'tower' ? 'marksman' : 'small';
       const rel = Math.min(1, d / w.rangePx);
-      if (firedKind === null || rel < firedDist) { firedKind = voice; firedDist = rel; }
+      if (firedKind === null || rel < firedDist) {
+        firedKind = voice; firedDist = rel;
+        // Ahead of you is right of you on screen when flying right
+        firedSide = Math.sign(e.x - target.worldX) * Math.min(1, d / 1200);
+      }
       // Half again as long between bursts in a respite; a shade quicker than
       // stock when the Director is pushing.
       const keen = 1.55 - Phaser.Math.Clamp(pressure, 0, 1) * 0.75;
@@ -640,7 +671,7 @@ export class Raiders {
 
     return {
       engaged, label: worst?.label ?? null, clearAltitudeM: clearAlt,
-      shots, damage, hit, firedKind, firedDist,
+      shots, damage, hit, firedKind, firedDist, firedSide,
     };
   }
 
@@ -809,6 +840,7 @@ export class Raiders {
         case 'aa':        this.drawAA(g, sx, baseY, t, e, dl); break;
         case 'tower':     this.drawTower(g, sx, baseY, t, e, dl); break;
         case 'gunboat':   this.drawGunboat(g, sx, baseY, t, e, dl); break;
+        case 'raft':      this.drawRaft(g, sx, baseY, t, e, dl); break;
       }
     }
   }
@@ -998,6 +1030,133 @@ export class Raiders {
     if (e.flash > 0) {
       drawMuzzleFlash(g, sx + 2 * face, y - 20, e.aim, e.flash, face);
     }
+  }
+
+  /**
+   * A makeshift boat on a lake.
+   *
+   * Nobody here has a boat; they have what floats. Half of them are rafts —
+   * a plank deck lashed over rusted oil drums, a sheet of corrugated iron
+   * for a shield, a pole with a rag on it — and the rest are an old skiff
+   * with scrap plate bolted over the bow and an outboard that smokes. Either
+   * way there are two men on it, one of them on the gun, and it wallows: it
+   * bobs on the swell, it pitches when the gun fires, and it leaves rings on
+   * the dead water.
+   */
+  private drawRaft(
+    g: Phaser.GameObjects.Graphics, sx0: number, baseY: number,
+    t: number, e: Emplacement, dl: number,
+  ): void {
+    const face: 1 | -1 = rnd(e.seed + 9) > 0.5 ? 1 : -1;
+    const skiff = rnd(e.seed + 21) > 0.5;
+    // Bobbing on the swell and kicked by the gun. It does not drift: the gun
+    // has to stay where the fire control thinks it is
+    const sx = sx0;
+    const bob = Math.sin(t * 1.3 + e.seed) * 1.3 + e.recoil * 1.6;
+    const y = baseY + bob * 0.5;
+    const night = 1 - dl;
+    const dim = (c: number): number => mixC(c, 0x06080a, night * 0.55);
+
+    // Rings spreading on the water round it, and the reflection under it
+    for (let k = 0; k < 3; k++) {
+      const ph = ((t * 0.45 + k / 3 + e.seed * 0.1) % 1);
+      g.lineStyle(1, 0xc8d2c8, 0.16 * (1 - ph) * (0.4 + dl * 0.6));
+      g.strokeEllipse(sx, baseY + 3, 40 + ph * 70, 5 + ph * 7);
+    }
+    g.fillStyle(0x0a0f0c, 0.42);
+    g.fillEllipse(sx, baseY + 5, 58, 7);
+
+    if (skiff) {
+      // ── A rusted skiff, scrap over the bow, an outboard on the transom ──
+      const hull = dim(0x3c3a30), stripe = dim(0x6a3a22);
+      g.fillStyle(hull, 1);
+      g.beginPath();
+      g.moveTo(sx - 24 * face, y - 5);
+      g.lineTo(sx + 16 * face, y - 6);
+      g.lineTo(sx + 28 * face, y - 12);          // the bow, raised
+      g.lineTo(sx + 20 * face, y + 3);
+      g.lineTo(sx - 21 * face, y + 3);
+      g.closePath();
+      g.fillPath();
+      g.fillStyle(stripe, 0.8);
+      g.fillRect(Math.min(sx - 22 * face, sx + 16 * face), y - 3, 38, 2);
+      // The gunwale catching the light
+      g.lineStyle(1.2, dim(0x7a786a), 0.8);
+      g.lineBetween(sx - 24 * face, y - 5, sx + 16 * face, y - 6);
+      // Outboard: the motor, the shaft into the water, and its smoke
+      g.fillStyle(dim(0x1c1c18), 1);
+      g.fillRect(sx - 30 * face - 3, y - 12, 7, 7);
+      g.lineStyle(1.6, dim(0x1c1c18), 1);
+      g.lineBetween(sx - 30 * face, y - 5, sx - 31 * face, y + 5);
+      for (let k = 0; k < 3; k++) {
+        const up = ((t * 0.6 + k / 3) % 1);
+        g.fillStyle(0x2a2622, 0.22 * (1 - up));
+        g.fillCircle(sx - 32 * face - up * 10 * face, y - 14 - up * 16, 2 + up * 5);
+      }
+      // Scrap plate bolted over the bow — the gunner's whole protection
+      g.fillStyle(dim(0x4a4438), 1);
+      g.beginPath();
+      g.moveTo(sx + 8 * face, y - 6); g.lineTo(sx + 9 * face, y - 19);
+      g.lineTo(sx + 19 * face, y - 17); g.lineTo(sx + 18 * face, y - 7);
+      g.closePath(); g.fillPath();
+      g.fillStyle(dim(0x8a7a5a), 0.8);
+      for (const [rx, ry] of [[10, -17], [16, -16], [11, -9], [16, -9]] as const) g.fillCircle(sx + rx * face, y + ry, 0.9);
+      // The crew: one at the motor, one behind the plate on the gun
+      this.rebel(g, sx - 20 * face, y - 5, t, e.seed + 5, 0.7, face, 'work', 0, dl);
+      this.rebel(g, sx + 3 * face, y - 6, t, e.seed + 4, 0.78, face, 'crouch', e.aim, dl);
+    } else {
+      // ── Oil drums under a plank deck ──
+      for (let k = -1; k <= 1; k++) {
+        const dx = sx + k * 15;
+        g.fillStyle(dim(k === 0 ? 0x5a3420 : 0x4a3a2a), 1);
+        g.fillEllipse(dx, y + 1, 14, 8);
+        g.lineStyle(1, dim(0x2a1c12), 0.9);
+        g.lineBetween(dx - 3, y - 2.5, dx - 3, y + 4.5);
+        g.lineBetween(dx + 3, y - 2.5, dx + 3, y + 4.5);
+      }
+      // The deck, plank by plank
+      for (let k = 0; k < 6; k++) {
+        g.fillStyle(dim(k % 2 ? 0x3a2e20 : 0x2e2418), 1);
+        g.fillRect(sx - 27 + k * 9, y - 6 + (k % 3 === 1 ? 0.6 : 0), 8.4, 4);
+      }
+      // Corrugated iron propped up at the front as a shield
+      const shX = sx + 14 * face;
+      g.fillStyle(dim(0x5a5448), 1);
+      g.beginPath();
+      g.moveTo(shX, y - 6); g.lineTo(shX + 2 * face, y - 21);
+      g.lineTo(shX + 9 * face, y - 20); g.lineTo(shX + 8 * face, y - 6);
+      g.closePath(); g.fillPath();
+      g.lineStyle(0.8, dim(0x2e2a22), 0.9);
+      for (let k = 1; k < 4; k++) g.lineBetween(shX + k * 2.2 * face, y - 6, shX + (k * 2.2 + 1.5) * face, y - 20.5);
+      // A pole with their rag on it, cracking in the wind
+      const poleX = sx - 20 * face;
+      g.lineStyle(1.4, dim(0x2a2016), 1);
+      g.lineBetween(poleX, y - 6, poleX, y - 34);
+      const flap = Math.sin(t * 5 + e.seed) * 2.5;
+      g.fillStyle(dim(0x7a1e14), 0.9);
+      g.beginPath();
+      g.moveTo(poleX, y - 34);
+      g.lineTo(poleX - 13 * face, y - 32 + flap);
+      g.lineTo(poleX - 11 * face, y - 27 + flap * 0.6);
+      g.lineTo(poleX, y - 28);
+      g.closePath(); g.fillPath();
+      // A crate of ammunition and the crew
+      g.fillStyle(dim(0x3a3424), 1);
+      g.fillRect(sx - 12, y - 11, 7, 5);
+      this.rebel(g, sx - 6 * face, y - 6, t, e.seed + 5, 0.74, face, 'stand', 0, dl);
+      this.rebel(g, sx + 6 * face, y - 6, t, e.seed + 4, 0.78, face, 'crouch', e.aim, dl);
+    }
+
+    // The gun, laid on the target over the bow
+    const p = pivotOf('raft');
+    const kick = e.recoil * 1.6;
+    const px = sx + p.x - Math.cos(e.aim) * kick;
+    const py = y + p.y - Math.sin(e.aim) * kick;
+    g.lineStyle(2.2, 0x14110c, 1);
+    g.lineBetween(px, py, px + Math.cos(e.aim) * p.len, py + Math.sin(e.aim) * p.len);
+    g.lineStyle(1, 0x4a4436, 0.8);
+    g.lineBetween(px, py - 1, px + Math.cos(e.aim) * p.len * 0.7, py + Math.sin(e.aim) * p.len * 0.7 - 1);
+    this.flash(g, px + Math.cos(e.aim) * p.len, py + Math.sin(e.aim) * p.len, e.aim, e.flash / 0.07, 3);
   }
 
   private drawTechnical(

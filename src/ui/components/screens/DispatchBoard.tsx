@@ -157,7 +157,7 @@ export function DispatchBoard({ settlementId, onContractAccepted }: Props): Reac
           // What else is on the way: people to drop to, and whether any of
           // them are under fire. Same layout the flight will use.
           const drops = km > 0 && here && dest
-            ? previewDrops(c.id, km, here.field?.runwayM ?? 600, dest.field?.runwayM ?? 600) : null;
+            ? previewDrops(c.id, km, here.field?.runwayM ?? 600, dest.field?.runwayM ?? 600, here.id, dest.id) : null;
           return (
             <button
               key={c.id}
