@@ -300,6 +300,14 @@ export class ParallaxWorld {
   private routeSeed = 1;
   /** The lake on this route, if there is one, and what lies dead in it. */
   private lake: Lake | null = null;
+  /**
+   * Stretches of route the tidal channels may not cross, world px: both
+   * airfields with room to undershoot and run off the end, every town, every
+   * drop camp. The marsh used to run its channels straight through all of
+   * them — three quarters of the Saltmarsh Docks strip was "water", so a
+   * firm landing there went down as a ditching.
+   */
+  private dryLand: Array<[number, number]> = [];
   private lakeJunk: Junk[] = [];
   /** Where the sun is on screen, for its glitter on still water; null when down. */
   private sunX: number | null = null;
@@ -410,6 +418,17 @@ export class ParallaxWorld {
     this.lake = lakeFor([spanA, spanB], seed, from, to);
     this.lakeJunk = this.lake ? layoutJunk(this.lake) : [];
     this.hazards.generate(spanA, spanB, seed, x => dominantBiome(from, to, x / end), this.lake);
+    // Firm ground where it matters, before anything asks where the water is
+    {
+      const M = WORLD_PX_PER_M, RUN_OFF = 600 * M;
+      const [oa, ob] = originStripPx(originRunwayM), [da, db] = destStripPx(routeKm, destRunwayM);
+      this.dryLand = [
+        [oa - RUN_OFF, ob + RUN_OFF],
+        [da - RUN_OFF, db + RUN_OFF],
+        ...this.hazards.towns.map((t): [number, number] => [t.x0 - 60 * M, t.x1 + 60 * M]),
+        ...this.hazards.campAnchors.map((c): [number, number] => [c - 120 * M, c + 120 * M]),
+      ];
+    }
     // The layout needs to know which positions are afloat, so a stretch over
     // the channels comes out as gun barges rather than sandbag nests.
     this.raiders.layout(this.hazards.zones, seed, x => this.waterAt(x) > 0.25, null, this.hazards.zoneWeapons, threat);
@@ -435,6 +454,7 @@ export class ParallaxWorld {
     // Lessons fly over dry land: one new thing at a time
     this.lake = null;
     this.lakeJunk = [];
+    this.dryLand = [];
     const home = this.biomeFrom;
     const marks = this.hazards.generateTraining(routeKm, townName, () => home, features);
     this.raiders.layout(this.hazards.zones, seed, () => false, ['nest', 'technical']);
@@ -2077,7 +2097,18 @@ export class ParallaxWorld {
            + 0.15 * Math.sin(worldX * 0.0087 + k * 2.7);
     // Water wherever the field dips below the biome's coverage. The distance
     // below the threshold becomes depth, which is what shades the shoreline.
-    return (cover * 1.15) - n;
+    const raw = (cover * 1.15) - n;
+    if (raw <= 0 || this.dryLand.length === 0) return raw;
+    // Short of firm ground the channel shoals and comes ashore: a real bank
+    // about ten metres off it, not a cut-off wall of water
+    let gap = Infinity;
+    for (const [a, b] of this.dryLand) {
+      const e = worldX < a ? a - worldX : worldX > b ? worldX - b : 0;
+      if (e < gap) gap = e;
+      if (gap === 0) break;
+    }
+    const FEATHER = 80 * WORLD_PX_PER_M;
+    return gap >= FEATHER ? raw : Math.min(raw, -0.05 + 0.35 * (gap / FEATHER));
   }
 
   /** The lake on this route, if any. */
